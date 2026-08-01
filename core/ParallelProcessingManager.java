@@ -9,6 +9,7 @@ import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.model.TranscriptionResult;
 import audiomanager.util.TimeLeftEstimator;
+import audiomanager.util.ProcessRunner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -135,6 +136,12 @@ public class ParallelProcessingManager {
     // raced against WhisperXTranscriptionService's own temp-dir cleanup and
     // always lost, silently producing zero output files.
     private final TranscriptionOutputWriter outputWriter = new TranscriptionOutputWriter();
+    private volatile boolean exportWordCopy = false;
+
+    /** Whether saveOutputDirectly() should also write a Word-compatible .html copy alongside the normal output. */
+    public void setExportWordCopy(boolean exportWordCopy) {
+        this.exportWordCopy = exportWordCopy;
+    }
 
     private volatile boolean initialized = false;
     private final Semaphore batchSemaphore = new Semaphore(3);
@@ -821,6 +828,23 @@ public class ParallelProcessingManager {
                     transcriptionConfig, config.getOutputDirectory());
             recordPhaseTiming("saving_transcription", start, originalFile.length() / (1024.0 * 1024.0));
             LOGGER.info("Saved output for {}: {}", originalFile.getName(), out);
+
+            if (exportWordCopy) {
+                try {
+                    // Reuse the primary output's base name (minus its extension) so the
+                    // two files are easy to find next to each other in the output folder.
+                    String outName = out.getName();
+                    int dot = outName.lastIndexOf('.');
+                    String baseName = dot > 0 ? outName.substring(0, dot) : outName;
+                    String wordPath = Paths.get(config.getOutputDirectory(), baseName + ".docx").toString();
+                    outputWriter.exportToWord(result, wordPath);
+                    LOGGER.info("Saved Word-compatible (.docx) copy for {}: {}", originalFile.getName(), wordPath);
+                } catch (IOException e) {
+                    // A failed optional export must never fail the whole file — the
+                    // primary .srt/.txt output above already succeeded.
+                    LOGGER.warn("Failed to save Word-compatible copy for {}: {}", originalFile.getName(), e.getMessage());
+                }
+            }
         } catch (IOException e) {
             LOGGER.error("Failed to save output for {}: {}", originalFile.getName(), e.getMessage());
             throw new CompletionException(e);
@@ -845,8 +869,24 @@ public class ParallelProcessingManager {
     // class's own executors. This is a thin alias over shutdown() (which
     // already does shutdownNow() + awaitTermination on every pool) so the
     // intent reads clearly at the call site.
+    /**
+     * FIX: previously this only called {@link #shutdown()}, which does
+     * {@code shutdownNow()} on the Java thread pools — that interrupts the
+     * *worker threads*, but a worker thread blocked in
+     * {@code Process.waitFor(timeout, unit)} inside {@link ProcessRunner}
+     * doesn't necessarily die just because it's interrupted quickly; the
+     * underlying WhisperX/ffmpeg OS process kept running regardless of what
+     * the user clicked. {@link ProcessRunner#destroyAllActiveProcesses()}
+     * now forcibly kills every subprocess this app has started, so
+     * cancellation actually stops the expensive work, not just the Java
+     * bookkeeping around it.
+     */
     public void cancel() {
         LOGGER.info("Cancelling parallel batch...");
+        int killed = ProcessRunner.destroyAllActiveProcesses();
+        if (killed > 0) {
+            LOGGER.info("Forcibly terminated {} active subprocess(es) on cancel.", killed);
+        }
         shutdown();
     }
 

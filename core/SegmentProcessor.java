@@ -48,6 +48,11 @@ public class SegmentProcessor {
     /** Default segment length used when the config value is ≤ 0. */
     private static final int DEFAULT_SEGMENT_DURATION_SECONDS = 30;
 
+    /** Max attempts (including the first) for a single segment before giving up. */
+    private static final int MAX_RETRIES = 3;
+    /** Base backoff between retry attempts; multiplied by the attempt number. */
+    private static final long RETRY_DELAY_MS = 2000;
+
     /** Orphaned work directories older than this are swept on startup. */
     private static final long ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1_000L; // 24 hours
 
@@ -176,8 +181,8 @@ public class SegmentProcessor {
             };
 
             long segStart = System.currentTimeMillis();
-            TranscriptionResult result = transcriptionService.transcribe(
-                    segment.toString(), segmentConfig, segmentProgress, segmentDuration);
+            TranscriptionResult result = transcribeSegmentWithRetry(
+                    segment, i, totalSegments, segmentConfig, segmentProgress, segmentDuration);
             long segDurationMs = System.currentTimeMillis() - segStart;
 
             if (timeEstimator != null) timeEstimator.recordSegmentCompletion(fileName, segDurationMs);
@@ -199,6 +204,48 @@ public class SegmentProcessor {
         cleanup();
 
         return merged;
+    }
+
+    /**
+     * Transcribe a single segment, retrying up to {@link #MAX_RETRIES} times
+     * (with a backoff proportional to the attempt number) before giving up.
+     * A transient failure on one segment (e.g. a flaky model load or a
+     * momentary resource spike) previously failed the whole file even though
+     * every other segment succeeded; this isolates that cost to one segment's
+     * retry delay instead.
+     */
+    private TranscriptionResult transcribeSegmentWithRetry(Path segment,
+                                                            int index,
+                                                            int totalSegments,
+                                                            TranscriptionConfig segmentConfig,
+                                                            AudioProcessor.ProgressCallback segmentProgress,
+                                                            int segmentDuration) throws Exception {
+        int retryCount = 0;
+        while (true) {
+            try {
+                if (retryCount > 0) {
+                    LOGGER.warn("Retrying segment {}/{} (attempt {}/{})",
+                            index + 1, totalSegments, retryCount + 1, MAX_RETRIES);
+                    Thread.sleep(RETRY_DELAY_MS * (retryCount + 1));
+                }
+                return transcriptionService.transcribe(
+                        segment.toString(), segmentConfig, segmentProgress, segmentDuration);
+            } catch (InterruptedException ie) {
+                // A sleep interruption means the batch is being cancelled —
+                // never swallow that as a retryable failure.
+                Thread.currentThread().interrupt();
+                throw ie;
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= MAX_RETRIES) {
+                    LOGGER.error("Segment {}/{} failed after {} attempts: {}",
+                            index + 1, totalSegments, MAX_RETRIES, e.getMessage());
+                    throw e;
+                }
+                LOGGER.warn("Segment {}/{} failed (attempt {}/{}): {} - retrying...",
+                        index + 1, totalSegments, retryCount, MAX_RETRIES, e.getMessage());
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

@@ -227,12 +227,31 @@ public class BatchProcessor implements SegmentProgressListener {
         catch (IOException e) { LOGGER.warn("Could not delete state file", e); }
     }
 
+    /**
+     * Load the persisted batch state, if any.
+     *
+     * <p>FIX: previously only caught {@link IOException}. A truncated or
+     * otherwise corrupted state file (e.g. from a crash mid-write) makes
+     * Gson throw an unchecked {@code JsonSyntaxException}/{@code JsonIOException},
+     * which passed straight through this method. The caller in
+     * {@code MainWindow} happens to wrap its restore flow in a generic
+     * {@code catch (Exception e)}, so this didn't crash the app — but it
+     * also never deleted the bad file, so the same corrupted state failed
+     * to load on every subsequent startup. Now a parse failure deletes the
+     * file (matching the existing corrupted-file handling below) so the
+     * app recovers cleanly instead of repeating the failure forever.</p>
+     */
     public BatchState loadBatchState() {
         if (!Files.exists(stateFilePath)) return null;
         try (Reader reader = Files.newBufferedReader(stateFilePath)) {
             return gson.fromJson(reader, BatchState.class);
-        } catch (IOException e) {
-            LOGGER.error("Failed to load batch state", e);
+        } catch (IOException | com.google.gson.JsonParseException e) {
+            LOGGER.error("Failed to load batch state — deleting corrupted file", e);
+            try {
+                Files.deleteIfExists(stateFilePath);
+            } catch (IOException ex) {
+                LOGGER.warn("Could not delete corrupted state file", ex);
+            }
             return null;
         }
     }
@@ -280,6 +299,10 @@ public class BatchProcessor implements SegmentProgressListener {
 
         LOGGER.info("Starting batch: {} files, max parallel: {}", totalFilesInBatch, maxParallel);
         log("🚀 Starting batch: " + totalFilesInBatch + " files");
+
+        boolean exportWordCopy = preferenceManager != null
+                && preferenceManager.getBoolean("export_word_copy", false);
+        parallelManager.setExportWordCopy(exportWordCopy);
 
         // FIX (consolidation): this used to spin up its own executor and run
         // a fully separate sequential implementation (executeBatch() /

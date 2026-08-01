@@ -274,18 +274,19 @@ public class DependencyManager {
     public Map<String, String> withFfmpegOnPath(Map<String, String> baseEnv) {
         Map<String, String> env = baseEnv != null ? new HashMap<>(baseEnv) : new HashMap<>();
 
-        File ffmpegFile = new File(getFFmpegPath());
-        File ffmpegDir = ffmpegFile.isAbsolute() ? ffmpegFile.getParentFile() : null;
+        String ffmpegPath = getFFmpegPath();
+        File ffmpegFile = new File(ffmpegPath);
+        File ffmpegDir = ffmpegFile.getParentFile();
 
         if (ffmpegDir != null && ffmpegDir.isDirectory()) {
-            String existingPath = System.getenv("PATH");
-            String newPath = ffmpegDir.getAbsolutePath()
-                    + File.pathSeparator
-                    + (existingPath != null ? existingPath : "");
+            // FIX: Use absolute path explicitly
+            String ffmpegDirAbs = ffmpegDir.getAbsolutePath();
+            String existingPath = env.getOrDefault("PATH", System.getenv("PATH"));
+            String newPath = ffmpegDirAbs + File.pathSeparator + existingPath;
             env.put("PATH", newPath);
-            LOGGER.debug("Injected FFmpeg directory onto child-process PATH: {}", ffmpegDir);
+            env.put("PYTHONPATH", env.getOrDefault("PYTHONPATH", ""));
+            LOGGER.info("Injected FFmpeg onto PATH for Python: {}", ffmpegDirAbs);
         }
-
         return env;
     }
 

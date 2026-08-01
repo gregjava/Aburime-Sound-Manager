@@ -39,6 +39,7 @@ public class ConfigurationPanel {
     private CheckBox noiseReductionCheckBox;
     private ComboBox<TranscriptionConfig.TimestampMode> timestampModeComboBox;
     private CheckBox confidenceCheckBox;
+    private CheckBox exportWordCopyCheckBox;
     private CheckBox keepProcessedCheckBox;
     private CheckBox enableTranscriptionCheckBox;
     private CheckBox autoRemoveCompletedCheckBox;
@@ -53,6 +54,7 @@ public class ConfigurationPanel {
     private Spinner<Integer> srtMaxCharsSpinner;
     private Spinner<Integer> srtMaxLinesSpinner;
     private Spinner<Double> maxSegmentDurationSpinner;
+    private ComboBox<String> logLevelComboBox;
 
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
@@ -126,6 +128,7 @@ public class ConfigurationPanel {
             // that could drift apart, which is exactly what happened.
             prefManager.setNoiseReductionEnabled(noiseReductionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.CONFIDENCE_ENABLED, confidenceCheckBox.isSelected());
+            prefManager.putBoolean("export_word_copy", exportWordCopyCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.KEEP_PROCESSED, keepProcessedCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, enableTranscriptionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, autoRemoveCompletedCheckBox.isSelected());
@@ -161,7 +164,11 @@ public class ConfigurationPanel {
             prefManager.putInt("srt_max_chars", srtMaxCharsSpinner.getValue());
             prefManager.putInt("srt_max_lines", srtMaxLinesSpinner.getValue());
             prefManager.putDouble("max_segment_duration", maxSegmentDurationSpinner.getValue());
-            
+
+            if (logLevelComboBox.getValue() != null) {
+                prefManager.putString("log_level", logLevelComboBox.getValue());
+            }
+
             prefManager.flush();
             LOGGER.debug("Configuration preferences saved successfully.");
         } catch (Exception e) {
@@ -220,6 +227,7 @@ public class ConfigurationPanel {
         // Checkboxes
         noiseReductionCheckBox = new CheckBox("Enable Noise Reduction");
         confidenceCheckBox = new CheckBox("Include Confidence Scores");
+        exportWordCopyCheckBox = new CheckBox("Also Save Word-Compatible (.docx) Copy");
         keepProcessedCheckBox = new CheckBox("Keep Processed Audio File");
         enableTranscriptionCheckBox = new CheckBox("Enable Transcription");
         autoRemoveCompletedCheckBox = new CheckBox("Auto-Remove Completed Files");
@@ -265,6 +273,12 @@ public class ConfigurationPanel {
         maxSegmentDurationSpinner.setPrefWidth(80);
         maxSegmentDurationSpinner.setEditable(true);
 
+        // Log level selector
+        logLevelComboBox = new ComboBox<>(FXCollections.observableArrayList(
+            "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+        ));
+        logLevelComboBox.setPrefWidth(100);
+
         // Set tooltips
         setTooltips();
     }
@@ -284,6 +298,7 @@ public class ConfigurationPanel {
             "paragraph: Paragraph-level timestamps\n" +
             "fixed: Fixed duration segments"));
         confidenceCheckBox.setTooltip(new Tooltip("Add confidence metrics to transcription"));
+        exportWordCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save a genuine .docx copy Word can open and edit directly"));
         keepProcessedCheckBox.setTooltip(new Tooltip("Keep processed audio files"));
         enableTranscriptionCheckBox.setTooltip(new Tooltip("Enable audio-to-text transcription"));
         autoRemoveCompletedCheckBox.setTooltip(new Tooltip("Remove files from queue after completion"));
@@ -295,6 +310,7 @@ public class ConfigurationPanel {
         srtMaxCharsSpinner.setTooltip(new Tooltip("Maximum characters per SRT line (20-1000)"));
         srtMaxLinesSpinner.setTooltip(new Tooltip("Maximum lines per subtitle (1-10)"));
         maxSegmentDurationSpinner.setTooltip(new Tooltip("Maximum segment duration in seconds (5-60)"));
+        logLevelComboBox.setTooltip(new Tooltip("Application log verbosity (affects the log file, not the on-screen Terminal)"));
     }
 
     public VBox createUISection() {
@@ -319,9 +335,100 @@ public class ConfigurationPanel {
         });
 
         fontBox.getChildren().addAll(fontLabel, fontSizeSlider, fontValueLabel);
-        section.getChildren().addAll(title, fontBox);
+
+        HBox logLevelBox = new HBox(10);
+        logLevelBox.setAlignment(Pos.CENTER_LEFT);
+        Label logLevelLabel = new Label("Log Level:");
+        logLevelLabel.setMinWidth(80);
+        logLevelBox.getChildren().addAll(logLevelLabel, logLevelComboBox);
+
+        logLevelComboBox.valueProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal != null) applyLogLevel(newVal);
+        });
+
+        section.getChildren().addAll(title, fontBox, logLevelBox);
 
         return section;
+    }
+
+    /**
+     * Apply a log level, without taking a hard compile-time dependency on
+     * any specific SLF4J backend.
+     *
+     * <p>FIX: the previous version imported {@code ch.qos.logback.classic.*}
+     * directly. That only compiles/works if Logback is actually the SLF4J
+     * backend on the classpath — for any other backend (e.g.
+     * {@code slf4j-simple}, {@code log4j-slf4j-impl}), the referenced
+     * classes don't exist at all, which is a classpath/build problem, not
+     * something a try/catch around already-loaded classes can paper over.
+     * This now reaches for Logback only via reflection (so the class is
+     * merely looked up, not linked, if it's absent) and falls back to
+     * {@code java.util.logging}'s root logger otherwise — which is always
+     * present on any JVM and is respected by SLF4J's jul-to-slf4j bridge,
+     * if one is installed, without requiring any specific backend.</p>
+     */
+    private void applyLogLevel(String levelName) {
+        if (tryApplyLogLevelViaLogback(levelName)) {
+            return;
+        }
+        applyLogLevelViaJUL(levelName);
+    }
+
+    /**
+     * Attempt to set the level via Logback's classes, purely through
+     * reflection so this class doesn't fail to compile/load when Logback
+     * isn't present.
+     *
+     * @return true if Logback was found and the level was applied through it
+     */
+    private boolean tryApplyLogLevelViaLogback(String levelName) {
+        try {
+            Class<?> logbackLoggerClass = Class.forName("ch.qos.logback.classic.Logger");
+            Class<?> levelClass = Class.forName("ch.qos.logback.classic.Level");
+
+            Object rootLogger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
+            if (!logbackLoggerClass.isInstance(rootLogger)) {
+                // SLF4J is bound to some other backend — Logback classes may
+                // happen to be on the classpath (e.g. a transitive dep) even
+                // though they're not the active binding.
+                return false;
+            }
+
+            Object level = levelClass.getMethod("toLevel", String.class).invoke(null, levelName);
+            logbackLoggerClass.getMethod("setLevel", levelClass).invoke(rootLogger, level);
+            LOGGER.info("Log level changed to {} (via Logback)", levelName);
+            return true;
+        } catch (ClassNotFoundException e) {
+            // Logback isn't on the classpath at all — expected on other backends.
+            return false;
+        } catch (Exception | LinkageError e) {
+            LOGGER.warn("Could not apply log level '{}' via Logback: {}", levelName, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Fallback that always works: sets the level on {@code java.util.logging}'s
+     * root logger. Respected automatically if a jul-to-slf4j (or similar)
+     * bridge is installed; otherwise it's a harmless no-op for whatever the
+     * actual SLF4J backend is, so the UI control never throws or silently
+     * does nothing without at least trying something.
+     */
+    private void applyLogLevelViaJUL(String levelName) {
+        try {
+            java.util.logging.Level level = switch (levelName) {
+                case "ERROR" -> java.util.logging.Level.SEVERE;
+                case "WARN"  -> java.util.logging.Level.WARNING;
+                case "INFO"  -> java.util.logging.Level.INFO;
+                case "DEBUG" -> java.util.logging.Level.FINE;
+                case "TRACE" -> java.util.logging.Level.FINEST;
+                default      -> java.util.logging.Level.INFO;
+            };
+            java.util.logging.Logger.getLogger("").setLevel(level);
+            LOGGER.info("Log level changed to {} (via java.util.logging)", levelName);
+        } catch (Exception e) {
+            LOGGER.warn("Could not apply log level '{}': {}", levelName, e.getMessage());
+        }
     }
 
     private void applyFontSize(double size) {
@@ -398,10 +505,13 @@ public class ConfigurationPanel {
         GridPane.setColumnSpan(confidenceCheckBox, 4);
         grid.add(confidenceCheckBox, 0, 3);
 
+        GridPane.setColumnSpan(exportWordCopyCheckBox, 4);
+        grid.add(exportWordCopyCheckBox, 0, 4);
+
         // Row 4: SRT settings
         Label srtLabel = new Label("SRT Settings:");
         srtLabel.setMinWidth(80);
-        grid.add(srtLabel, 0, 4);
+        grid.add(srtLabel, 0, 5);
         
         HBox srtBox = new HBox(10);
         srtBox.setAlignment(Pos.CENTER_LEFT);
@@ -410,12 +520,12 @@ public class ConfigurationPanel {
             new Label("Max chars:"), srtMaxCharsSpinner,
             new Label("Max lines:"), srtMaxLinesSpinner
         );
-        grid.add(srtBox, 1, 4, 3, 1);
+        grid.add(srtBox, 1, 5, 3, 1);
 
         // Row 5: Segment duration
         Label segmentLabel = new Label("Max Segment:");
         segmentLabel.setMinWidth(80);
-        grid.add(segmentLabel, 0, 5);
+        grid.add(segmentLabel, 0, 6);
         
         HBox segmentBox = new HBox(10);
         segmentBox.setAlignment(Pos.CENTER_LEFT);
@@ -424,7 +534,7 @@ public class ConfigurationPanel {
             maxSegmentDurationSpinner,
             new Label("seconds")
         );
-        grid.add(segmentBox, 1, 5, 3, 1);
+        grid.add(segmentBox, 1, 6, 3, 1);
 
         section.getChildren().addAll(title, grid);
         return section;
@@ -560,6 +670,7 @@ public class ConfigurationPanel {
         // that's the one that must be read back here.
         noiseReductionCheckBox.setSelected(prefManager.isNoiseReductionEnabled());
         confidenceCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.CONFIDENCE_ENABLED, false));
+        exportWordCopyCheckBox.setSelected(prefManager.getBoolean("export_word_copy", false));
         keepProcessedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.KEEP_PROCESSED, false));
         enableTranscriptionCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, true));
         autoRemoveCompletedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, false));
@@ -644,6 +755,10 @@ public class ConfigurationPanel {
         return enableTranscriptionCheckBox.isSelected();
     }
 
+    public boolean isExportWordCopyEnabled() {
+        return exportWordCopyCheckBox.isSelected();
+    }
+
     public boolean isAutoRemoveCompleted() {
         return autoRemoveCompletedCheckBox.isSelected();
     }
@@ -660,6 +775,7 @@ public class ConfigurationPanel {
         noiseReductionCheckBox.setDisable(!enabled);
         timestampModeComboBox.setDisable(!enabled);
         confidenceCheckBox.setDisable(!enabled);
+        exportWordCopyCheckBox.setDisable(!enabled);
         keepProcessedCheckBox.setDisable(!enabled);
         enableTranscriptionCheckBox.setDisable(!enabled);
         autoRemoveCompletedCheckBox.setDisable(!enabled);

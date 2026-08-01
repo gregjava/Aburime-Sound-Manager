@@ -12,6 +12,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -20,6 +22,59 @@ import java.util.function.Consumer;
  */
 public class ProcessRunner {
     private static final Logger LOGGER = LoggerFactory.getLogger(ProcessRunner.class);
+
+    /**
+     * FIX: previously, every {@code Process} started here was a purely local
+     * variable — nothing outside a given {@code runCommand} call could ever
+     * reach it. That meant "cancel" anywhere upstream (batch cancellation,
+     * app shutdown) could only interrupt the Java threads waiting on the
+     * process, never the process itself; a long-running WhisperX/ffmpeg
+     * subprocess would keep running to completion regardless of what the
+     * user clicked. Every process started by this class is now registered
+     * here for its lifetime so {@link #destroyAllActiveProcesses()} can be
+     * called from anywhere to forcibly kill everything currently running —
+     * see {@code ParallelProcessingManager.cancel()}.
+     */
+    private static final Set<Process> ACTIVE_PROCESSES = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Forcibly destroy every process currently tracked as active (i.e.
+     * started via this class and not yet finished/cleaned up). Safe to call
+     * even if nothing is running. Does not throw — a failure destroying one
+     * process must not prevent an attempt on the others.
+     *
+     * @return the number of processes an active destroy was attempted on
+     */
+    public static int destroyAllActiveProcesses() {
+        int count = 0;
+        for (Process process : Set.copyOf(ACTIVE_PROCESSES)) {
+            try {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                    count++;
+                    LOGGER.info("Forcibly terminated tracked process (pid={})", safePid(process));
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Failed to destroy tracked process: {}", e.getMessage());
+            } finally {
+                ACTIVE_PROCESSES.remove(process);
+            }
+        }
+        return count;
+    }
+
+    /** Number of processes currently tracked as active (for diagnostics/logging). */
+    public static int activeProcessCount() {
+        return ACTIVE_PROCESSES.size();
+    }
+
+    private static String safePid(Process process) {
+        try {
+            return String.valueOf(process.pid());
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
 
     /**
      * Run a command and return exit code
@@ -80,6 +135,7 @@ public static int runCommand(List<String> command, long timeout, TimeUnit unit,
         }
 
         final Process process = builder.start();
+        ACTIVE_PROCESSES.add(process);
         Thread outputReader = null;
         try {
             LOGGER.debug("Executing command: {}", String.join(" ", command));
@@ -145,6 +201,7 @@ public static int runCommand(List<String> command, long timeout, TimeUnit unit,
             LOGGER.error("Error executing command: {}", e.getMessage());
             throw e;
         } finally {
+            ACTIVE_PROCESSES.remove(process);
             if (process != null && process.isAlive()) {
                 try {
                     process.destroyForcibly();
@@ -297,6 +354,7 @@ public static int runCommand(List<String> command, long timeout, TimeUnit unit,
         Process process = null;
         try {
             process = builder.start();
+            ACTIVE_PROCESSES.add(process);
             
             // FIX: keep reading until EOF (readLine() returns null) instead of
             // returning as soon as the first matching line is found. Returning
@@ -330,8 +388,11 @@ public static int runCommand(List<String> command, long timeout, TimeUnit unit,
             return result;
             
         } finally {
-            if (process != null && process.isAlive()) {
-                process.destroyForcibly();
+            if (process != null) {
+                ACTIVE_PROCESSES.remove(process);
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                }
             }
         }
     }

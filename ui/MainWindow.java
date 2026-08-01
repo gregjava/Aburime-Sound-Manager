@@ -11,6 +11,10 @@ import audiomanager.model.*;
 import audiomanager.plugins.*;
 import audiomanager.util.*;
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import javafx.animation.*;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -21,6 +25,7 @@ import javafx.scene.control.*;
 import javafx.scene.image.Image;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
+import javafx.stage.DirectoryChooser;
 import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
@@ -42,6 +47,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 import javafx.scene.Node;
+import java.awt.SystemTray;
+import java.awt.Toolkit;
+import java.awt.TrayIcon;
 
 /**
  * Main application window
@@ -98,6 +106,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     private final Set<BatchFileItem> countedFailed =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private int originalBatchSize = 0;
+
+    // FIX (watch-folder feature): tracks the active FolderWatcher (if any) so
+    // it can be toggled off from the same menu item and cleanly stopped on exit.
+    private FolderWatcher folderWatcher;
+    private Thread folderWatcherThread;
+    private MenuItem watchFolderMenuItem;
     
     public MainWindow(Stage stage, PreferenceManager prefManager) {
         this.stage = stage;
@@ -271,28 +285,10 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             this::log
         );
 
-        // ========== ADD VOLUME ANALYSIS BUTTON TO FILE SELECTION PANEL ==========
-        Button analyzeVolumeButton = new Button("🔊 Analyze Volume");
-        analyzeVolumeButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
-        analyzeVolumeButton.setTooltip(new Tooltip("Analyze volume levels of selected file"));
-        analyzeVolumeButton.setPrefWidth(140);
-        analyzeVolumeButton.setOnAction(e -> analyzeSelectedFileVolume());
-
-        // Get the file selection controls and add the button
-        VBox fileSelectionControls = fileSelectionPanel.getFileSelectionControls();
-
-        // Find the second row (HBox) which contains clearQueueButton and outputDirButton
-        for (Node node : fileSelectionControls.getChildren()) {
-            if (node instanceof HBox hbox) {
-                // Check if this HBox contains the clearQueueButton
-                if (hbox.getChildren().contains(fileSelectionPanel.getClearQueueButton())) {
-                    // Add analyze button before the clear queue button
-                    hbox.getChildren().add(0, analyzeVolumeButton);
-                    break;
-                }
-            }
-        }
-        // ========== END VOLUME ANALYSIS BUTTON ADDITION ==========
+        // FIX (cleanup #4): removed the redundant "Analyze Volume" toolbar
+        // button (and its Tools-menu twin, removed below in createMenuBar())
+        // per cleanup request — a niche single-file action that cluttered
+        // the main file-selection toolbar.
 
         configurationPanel = new ConfigurationPanel(prefManager);
 
@@ -698,10 +694,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         Menu toolsMenu = new Menu("Tools");
         toolsMenu.setStyle("-fx-text-fill: #2c3e50;");
 
-        // Add Volume Analysis to Tools Menu
-        MenuItem volumeAnalysisItem = new MenuItem("🔊 Volume Analysis...");
-        volumeAnalysisItem.setOnAction(e -> analyzeSelectedFileVolume());
-
         MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
         batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
 
@@ -714,10 +706,13 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         MenuItem clearTimeDataItem = new MenuItem("Clear Time Estimation Data");
         clearTimeDataItem.setOnAction(e -> clearTimeEstimationData());
 
+        watchFolderMenuItem = new MenuItem("📁 Watch Folder...");
+        watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
+
         toolsMenu.getItems().addAll(
-            volumeAnalysisItem, new SeparatorMenuItem(),
-            batchSettingsItem, whisperSettingsItem, audioSettingsItem, 
-            new SeparatorMenuItem(), clearTimeDataItem
+            batchSettingsItem, whisperSettingsItem, audioSettingsItem,
+            new SeparatorMenuItem(), clearTimeDataItem,
+            new SeparatorMenuItem(), watchFolderMenuItem
         );
 
         Menu helpMenu = new Menu("Help");
@@ -729,7 +724,10 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         MenuItem dependenciesItem = new MenuItem("Check Dependencies");
         dependenciesItem.setOnAction(e -> checkDependencies());
 
-        helpMenu.getItems().addAll(aboutItem, dependenciesItem);
+        MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
+        setupAssistantItem.setOnAction(e -> showSetupAssistantDialog());
+
+        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem);
 
         menuBar.getMenus().addAll(fileMenu, toolsMenu, helpMenu);
 
@@ -784,6 +782,60 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 log("🧹 Time estimation data cleared - using default estimates");
             }
         }
+    }
+
+    /**
+     * Start or stop watching a folder for newly-created audio files. Files
+     * dropped into the watched folder are automatically added to the batch
+     * queue (not auto-started — the user still presses "Start Processing").
+     */
+    private void toggleFolderWatch() {
+        if (folderWatcher != null) {
+            stopFolderWatch();
+            return;
+        }
+
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Select Folder to Watch");
+        File dir = chooser.showDialog(stage);
+        if (dir == null) return;
+
+        try {
+            folderWatcher = new FolderWatcher(dir.getAbsolutePath(), file ->
+                    Platform.runLater(() -> {
+                        fileSelectionPanel.addFile(file);
+                        log("📁 Watch folder: added new file " + file.getName());
+                    }));
+            folderWatcherThread = new Thread(folderWatcher, "FolderWatcher");
+            folderWatcherThread.setDaemon(true);
+            folderWatcherThread.start();
+
+            watchFolderMenuItem.setText("📁 Stop Watching Folder");
+            log("📁 Watching folder for new files: " + dir.getAbsolutePath());
+        } catch (IOException e) {
+            LOGGER.error("Failed to start folder watcher", e);
+            log("❌ Could not watch folder: " + e.getMessage());
+            folderWatcher = null;
+        }
+    }
+
+    /** Stop the active folder watcher, if any. Safe to call even if nothing is being watched. */
+    private void stopFolderWatch() {
+        if (folderWatcher == null && folderWatcherThread == null) {
+            return;
+        }
+        if (folderWatcher != null) {
+            folderWatcher.stop();
+            folderWatcher = null;
+        }
+        if (folderWatcherThread != null) {
+            folderWatcherThread.interrupt();
+            folderWatcherThread = null;
+        }
+        if (watchFolderMenuItem != null) {
+            watchFolderMenuItem.setText("📁 Watch Folder...");
+        }
+        log("📁 Stopped watching folder");
     }
     
     private void showPreferencesDialog() {
@@ -923,6 +975,99 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.showAndWait();
     }
 
+    /**
+     * A guided, non-technical way to set the HuggingFace token needed for
+     * speaker diarisation — the alternative today is knowing to set an
+     * HF_TOKEN environment variable or hand-write a dotfile, which is a
+     * developer-shaped setup step in an otherwise end-user-facing app.
+     * Writes to the same {@code ~/.audiomanager/hf_token} file
+     * {@code WhisperXTranscriptionService} already reads from, so no other
+     * wiring is needed for a saved token to take effect (on next launch, or
+     * immediately for any file not yet started).
+     */
+    private void showSetupAssistantDialog() {
+        Path tokenFile = Paths.get(System.getProperty("user.home"), ".audiomanager", "hf_token");
+        boolean tokenFileExists = Files.exists(tokenFile);
+        boolean envTokenSet = System.getenv("HF_TOKEN") != null;
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Setup Assistant");
+        dialog.setHeaderText("Guided setup for speaker diarisation and dependencies");
+
+        VBox content = new VBox(12);
+        content.setPadding(new Insets(10));
+
+        Label ffmpegStatus = new Label("Checking FFmpeg...");
+        Label whisperStatus = new Label("Checking Whisper...");
+        CompletableFuture.runAsync(() -> {
+            DependencyManager.DependencyStatus ffmpeg = dependencyManager.checkFFmpeg();
+            DependencyManager.DependencyStatus whisper = dependencyManager.checkWhisper();
+            Platform.runLater(() -> {
+                ffmpegStatus.setText((ffmpeg.isAvailable() ? "✅ " : "❌ ") + ffmpeg.getMessage());
+                whisperStatus.setText((whisper.isAvailable() ? "✅ " : "❌ ") + whisper.getMessage());
+            });
+        });
+
+        Label hfLabel = new Label("HuggingFace Token (for speaker diarisation):");
+        hfLabel.setStyle("-fx-font-weight: bold;");
+
+        String currentStateText = envTokenSet
+                ? "✅ Currently set via the HF_TOKEN environment variable."
+                : tokenFileExists
+                    ? "✅ Currently set via ~/.audiomanager/hf_token."
+                    : "❌ Not set — speaker diarisation is disabled.";
+        Label hfCurrentState = new Label(currentStateText);
+
+        PasswordField tokenField = new PasswordField();
+        tokenField.setPromptText("Paste your HuggingFace access token here...");
+        tokenField.setPrefWidth(350);
+
+        Label hfHint = new Label(
+                "Get a token at huggingface.co/settings/tokens, accept the pyannote model terms, "
+                        + "then paste it here. It's saved locally to ~/.audiomanager/hf_token — never "
+                        + "transmitted anywhere by this app except to HuggingFace itself during diarisation.");
+        hfHint.setWrapText(true);
+        hfHint.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+
+        Button saveTokenButton = new Button("Save Token");
+        Label saveResultLabel = new Label();
+        saveTokenButton.setOnAction(e -> {
+            String token = tokenField.getText();
+            if (token == null || token.isBlank()) {
+                saveResultLabel.setText("❌ Enter a token first.");
+                saveResultLabel.setStyle("-fx-text-fill: #d32f2f;");
+                return;
+            }
+            try {
+                Files.createDirectories(tokenFile.getParent());
+                Files.writeString(tokenFile, token.trim());
+                saveResultLabel.setText("✅ Saved. Takes effect for new transcriptions.");
+                saveResultLabel.setStyle("-fx-text-fill: #2e7d32;");
+                log("🔑 HuggingFace token saved to " + tokenFile);
+                tokenField.clear();
+            } catch (IOException ex) {
+                LOGGER.error("Failed to save HF token", ex);
+                saveResultLabel.setText("❌ Could not save: " + ex.getMessage());
+                saveResultLabel.setStyle("-fx-text-fill: #d32f2f;");
+            }
+        });
+
+        content.getChildren().addAll(
+                new Label("Dependency Status:") {{ setStyle("-fx-font-weight: bold;"); }},
+                ffmpegStatus, whisperStatus,
+                new Separator(),
+                hfLabel, hfCurrentState, tokenField, saveTokenButton, saveResultLabel, hfHint
+        );
+
+        ScrollPane scrollPane = new ScrollPane(content);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefSize(450, 400);
+        dialog.getDialogPane().setContent(scrollPane);
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        dialog.showAndWait();
+    }
+
     private void applyCSSIfAvailable(Scene scene) {
         String defaultStyle = "-fx-font-family: 'Segoe UI', 'Roboto', 'Arial';";
         scene.getRoot().setStyle(defaultStyle);
@@ -960,6 +1105,8 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
     private void saveApplicationState() {
         LOGGER.info("Saving application state...");
+
+        stopFolderWatch();
 
         try {
             savePreferences();
@@ -1540,9 +1687,92 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                     "COMPLETED".equals(item.getStatus())
                 );
             }
+
+            // FIX (request #9/#10): surface batch completion beyond the log
+            // area — a system-tray notification for anyone who's alt-tabbed
+            // away, plus an on-demand statistics report. Skipped for a
+            // cancelled batch since "processed X files" would be misleading.
+            if (!result.wasCancelled()) {
+                showNotification("Batch Complete",
+                        String.format("%d of %d files succeeded, %d failed",
+                                result.getCompleted(), result.getTotal(), result.getFailed()));
+                showBatchStatistics(result);
+            }
         }
 
         fileSelectionPanel.updateBatchStatus(batchFiles);
+    }
+
+    /**
+     * Show a best-effort OS-level tray notification. Silently falls back to
+     * the on-screen log if the platform doesn't support a tray (headless
+     * environments, some Linux desktops) or the icon resource is missing —
+     * a missing notification should never interrupt or fail batch completion.
+     */
+    private void showNotification(String title, String message) {
+        if (!SystemTray.isSupported()) {
+            log("🔔 " + title + ": " + message);
+            return;
+        }
+        try {
+            SystemTray tray = SystemTray.getSystemTray();
+            InputStream iconStream = getClass().getResourceAsStream(AppConstants.ICON_PATH);
+            java.awt.Image image = (iconStream != null)
+                    ? Toolkit.getDefaultToolkit().createImage(iconStream.readAllBytes())
+                    : Toolkit.getDefaultToolkit().createImage(new byte[0]);
+            TrayIcon trayIcon = new TrayIcon(image, AppConstants.APP_TITLE);
+            trayIcon.setImageAutoSize(true);
+            tray.add(trayIcon);
+            trayIcon.displayMessage(title, message, TrayIcon.MessageType.INFO);
+            // Remove the icon shortly after so repeated batches don't pile up
+            // multiple tray icons.
+            CompletableFuture.delayedExecutor(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .execute(() -> tray.remove(trayIcon));
+        } catch (Exception e) {
+            LOGGER.debug("Tray notification unavailable, falling back to log: {}", e.getMessage());
+            log("🔔 " + title + ": " + message);
+        }
+    }
+
+    /** Format a millisecond duration as {@code H:MM:SS} (or {@code M:SS} under an hour). */
+    private String formatDurationMillis(long millis) {
+        long totalSeconds = millis / 1000;
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+        return hours > 0
+                ? String.format("%d:%02d:%02d", hours, minutes, seconds)
+                : String.format("%d:%02d", minutes, seconds);
+    }
+
+    /** Show a summary dialog with completion counts, duration, and output directory. */
+    private void showBatchStatistics(BatchProcessor.BatchResult result) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Batch Processing Report");
+        alert.setHeaderText("Processing Complete");
+
+        String stats = String.format(
+                "📊 Batch Processing Report%n" +
+                "===========================%n" +
+                "Total Files:     %d%n" +
+                "Completed:       %d ✅%n" +
+                "Failed:          %d ❌%n" +
+                "Duration:        %s%n" +
+                "Success Rate:    %.1f%%%n%n" +
+                "Output Directory:%n%s",
+                result.getTotal(),
+                result.getCompleted(),
+                result.getFailed(),
+                formatDurationMillis(result.getDurationMillis()),
+                result.getTotal() > 0 ? (result.getCompleted() * 100.0 / result.getTotal()) : 0,
+                configurationPanel.getProcessingConfig().getOutputDirectory()
+        );
+
+        TextArea textArea = new TextArea(stats);
+        textArea.setEditable(false);
+        textArea.setPrefSize(450, 250);
+        alert.getDialogPane().setContent(textArea);
+        alert.showAndWait();
     }
 
     // FIX (consolidation): cancelAnyRunningBatch() is gone —

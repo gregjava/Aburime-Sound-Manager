@@ -55,6 +55,8 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     private Button addFileButton;
     private Button browseButton;
     private Button clearQueueButton;
+    private Button playButton;
+    private javafx.scene.media.MediaPlayer mediaPlayer;
     private ListView<BatchFileItem> batchListView; // Keeping your ListView!
     private Label batchStatusLabel;
 
@@ -895,7 +897,13 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         addFileButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
         addFileButton.setPrefWidth(120);
 
-        firstRow.getChildren().addAll(filePathField, browseButton, addFileButton);
+        playButton = new Button("▶️ Play");
+        playButton.setOnAction(e -> playSelectedFile());
+        playButton.setDisable(true);
+        playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+        playButton.setPrefWidth(100);
+
+        firstRow.getChildren().addAll(filePathField, browseButton, addFileButton, playButton);
 
         // Second row: Clear Queue and Output Directory buttons
         HBox secondRow = new HBox(10);
@@ -941,6 +949,53 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     }
 
     /**
+     * Play (or stop) a simple preview of the currently selected file using
+     * JavaFX's MediaPlayer. Best-effort: some formats/codecs aren't supported
+     * by JavaFX Media out of the box, so failures are logged and surfaced
+     * without crashing the app.
+     */
+    private void playSelectedFile() {
+        if (selectedFile == null) return;
+
+        // If something is already playing, treat this click as "stop".
+        if (mediaPlayer != null) {
+            stopPlayback();
+            return;
+        }
+
+        try {
+            javafx.scene.media.Media media = new javafx.scene.media.Media(selectedFile.toURI().toString());
+            mediaPlayer = new javafx.scene.media.MediaPlayer(media);
+            mediaPlayer.setOnError(() -> {
+                log("❌ Cannot play audio: " + mediaPlayer.getError().getMessage());
+                stopPlayback();
+            });
+            mediaPlayer.setOnEndOfMedia(this::stopPlayback);
+            mediaPlayer.play();
+            playButton.setText("⏹️ Stop");
+        } catch (Exception e) {
+            log("❌ Cannot play audio: " + e.getMessage());
+            mediaPlayer = null;
+        }
+    }
+
+    /** Stop and dispose of any in-progress preview playback, resetting the button label. */
+    private void stopPlayback() {
+        if (mediaPlayer != null) {
+            try {
+                mediaPlayer.stop();
+                mediaPlayer.dispose();
+            } catch (Exception ignored) {
+                // best-effort cleanup
+            }
+            mediaPlayer = null;
+        }
+        if (playButton != null) {
+            playButton.setText("▶️ Play");
+        }
+    }
+
+    /**
      * Select multiple audio files
      */
     private void selectAudioFiles() {
@@ -973,10 +1028,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             if (selectedFiles.size() == 1) {
                 filePathField.setText(selectedFile.getAbsolutePath());
                 updateFileInfoLabels(selectedFile);
+                playButton.setDisable(false);
+                playButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-background-radius: 4;");
             } else {
                 filePathField.setText(selectedFiles.size() + " files selected");
                 fileSizeLabel.setText("📏 Multiple files selected");
                 fileDurationLabel.setText("");
+                stopPlayback();
+                playButton.setDisable(true);
+                playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
             }
 
             // Remember the directory for next time
@@ -988,6 +1048,9 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             updateAddToQueueButtonState(true);
         } else {
             updateAddToQueueButtonState(false);
+            stopPlayback();
+            playButton.setDisable(true);
+            playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
         }
     }
 
@@ -1045,6 +1108,9 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         fileSizeLabel.setText("");
         fileDurationLabel.setText("");
         updateAddToQueueButtonState(false);
+        stopPlayback();
+        playButton.setDisable(true);
+        playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
     }
 
     private void updateFileInfoLabels(File file) {
