@@ -175,6 +175,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     public void initialize() {
         configureStage();
         Scene scene = createScene();
+        scene.getAccelerators().put(
+                javafx.scene.input.KeyCombination.keyCombination("Shortcut+R"),
+                this::handleProcessButtonClick);
         stage.setScene(scene);
         configurationPanel.setFontSizeChangeListener(this::applyFontSize);
         loadPreferences();
@@ -218,34 +221,62 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         applyFontSizeToUIComponents(size);
     }
 
+    /**
+     * FIX: previously this called {@code node.setStyle(String.format(
+     * "-fx-font-size: %spx;", size))} for every button/label/text-field/
+     * text-area in the whole scene. {@code Node.setStyle()} REPLACES the
+     * entire inline style string — it doesn't merge with what's already
+     * there. Since most buttons throughout this app get their color/shape
+     * from an inline style set elsewhere (e.g.
+     * {@code "-fx-background-color: #e67e22; -fx-text-fill: white; ..."}),
+     * every one of those was being silently wiped back to default Modena
+     * styling on every "Apply" in Preferences — for ANY setting, not
+     * specifically the log level (that was just what the user happened to
+     * be changing when they noticed the whole window revert to plain
+     * default-looking buttons). Now it strips only a prior
+     * {@code -fx-font-size:...;} rule (if any) from the existing style and
+     * appends the new one, leaving every other inline rule untouched.
+     */
+    private static final java.util.regex.Pattern FONT_SIZE_RULE_PATTERN =
+            java.util.regex.Pattern.compile("-fx-font-size:\\s*[^;]+;?\\s*");
+
+    private void applyFontSizeRule(javafx.scene.Node node, double size) {
+        String existing = node.getStyle();
+        String withoutFontSize = (existing == null || existing.isBlank())
+                ? ""
+                : FONT_SIZE_RULE_PATTERN.matcher(existing).replaceAll("").trim();
+        String separator = withoutFontSize.isEmpty() || withoutFontSize.endsWith(";") ? " " : "; ";
+        node.setStyle(withoutFontSize + separator + String.format("-fx-font-size: %spx;", (int) size));
+    }
+
     private void applyFontSizeToUIComponents(double size) {
         try {
             MenuBar menuBar = (MenuBar) stage.getScene().lookup(".menu-bar");
             if (menuBar != null) {
-                menuBar.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+                applyFontSizeRule(menuBar, size);
             }
 
             stage.getScene().getRoot().lookupAll(".button").forEach(node -> {
-                if (node instanceof Button button) {
-                    button.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+                if (node instanceof Button) {
+                    applyFontSizeRule(node, size);
                 }
             });
 
             stage.getScene().getRoot().lookupAll(".label").forEach(node -> {
-                if (node instanceof Label label) {
-                    label.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+                if (node instanceof Label) {
+                    applyFontSizeRule(node, size);
                 }
             });
 
             stage.getScene().getRoot().lookupAll(".text-field").forEach(node -> {
-                if (node instanceof TextField textField) {
-                    textField.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+                if (node instanceof TextField) {
+                    applyFontSizeRule(node, size);
                 }
             });
 
             stage.getScene().getRoot().lookupAll(".text-area").forEach(node -> {
-                if (node instanceof TextArea textArea) {
-                    textArea.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+                if (node instanceof TextArea) {
+                    applyFontSizeRule(node, size);
                 }
             });
 
@@ -467,23 +498,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
                     LOGGER.error("Volume analysis failed", ex);
                     log("❌ Volume analysis failed: " + ex.getMessage());
-
-                    // FIX: unwrap the CompletionException to recover the typed
-                    // FfmpegException (if that's what actually failed) so the
-                    // dialog shows a specific, actionable message instead of
-                    // ex.getCause().getMessage(), which was often a raw
-                    // technical string (e.g. dumped ffmpeg stderr) unsuitable
-                    // for a user-facing dialog.
-                    Throwable cause = ex.getCause();
-                    String displayMessage = (cause instanceof FfmpegException fe)
-                            ? fe.getUserMessage()
-                            : (cause != null ? cause.getMessage() : ex.getMessage());
-
-                    Alert alert = new Alert(Alert.AlertType.ERROR);
-                    alert.setTitle("Analysis Failed");
-                    alert.setHeaderText("Volume Analysis Failed");
-                    alert.setContentText(displayMessage);
-                    alert.showAndWait();
+                    showFfmpegAwareErrorAlert("Analysis Failed", "Volume Analysis Failed", ex);
                 });
                 return null;
             });
@@ -555,17 +570,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
                     LOGGER.error("Amplification failed", ex);
                     log("❌ Amplification failed: " + ex.getMessage());
-
-                    Throwable cause = ex.getCause();
-                    String displayMessage = (cause instanceof FfmpegException fe)
-                            ? fe.getUserMessage()
-                            : (cause != null ? cause.getMessage() : ex.getMessage());
-
-                    Alert alert = new Alert(Alert.AlertType.ERROR);
-                    alert.setTitle("Amplification Failed");
-                    alert.setHeaderText("Could Not Amplify File");
-                    alert.setContentText(displayMessage);
-                    alert.showAndWait();
+                    showFfmpegAwareErrorAlert("Amplification Failed", "Could Not Amplify File", ex);
                 });
                 return null;
             });
@@ -682,12 +687,14 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         MenuItem preferencesItem = new MenuItem("Preferences...");
         preferencesItem.setOnAction(e -> showPreferencesDialog());
+        preferencesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+COMMA"));
 
         MenuItem clearSessionItem = new MenuItem("Clear Session Data");
         clearSessionItem.setOnAction(e -> clearSessionData());
 
         MenuItem exitItem = new MenuItem("Exit");
         exitItem.setOnAction(e -> handleExitButtonClick());
+        exitItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Q"));
 
         fileMenu.getItems().addAll(preferencesItem, clearSessionItem, new SeparatorMenuItem(), exitItem);
 
@@ -723,6 +730,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         MenuItem dependenciesItem = new MenuItem("Check Dependencies");
         dependenciesItem.setOnAction(e -> checkDependencies());
+        dependenciesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F5"));
 
         MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
         setupAssistantItem.setOnAction(e -> showSetupAssistantDialog());
@@ -1068,6 +1076,44 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         dialog.showAndWait();
     }
 
+    /**
+     * Build and show an error alert that recognizes {@link FfmpegException}
+     * specifically: uses its user-friendly message plus (if recognized) a
+     * specific hint for its exit code, with the raw stderr tail tucked into
+     * an expandable "Show Details" section rather than dumped straight into
+     * the main dialog text. Falls back to a generic message for any other
+     * exception type. Previously this logic was duplicated between the
+     * volume-analysis and amplification error handlers with no exit-code
+     * hint or stderr detail at all — just {@code getUserMessage()}.
+     */
+    private void showFfmpegAwareErrorAlert(String title, String header, Throwable ex) {
+        Throwable cause = ex.getCause();
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(header);
+
+        if (cause instanceof FfmpegException fe) {
+            String hint = fe.getExitCodeHint();
+            String message = fe.getUserMessage() + (hint != null ? "\n\n" + hint : "");
+            alert.setContentText(message);
+
+            if (fe.getStderrTail() != null && !fe.getStderrTail().isBlank()) {
+                TextArea detailsArea = new TextArea(fe.getStderrTail());
+                detailsArea.setEditable(false);
+                detailsArea.setWrapText(true);
+                detailsArea.setPrefSize(500, 200);
+                Label detailsLabel = new Label("FFmpeg output (exit code "
+                        + (fe.getExitCode() >= 0 ? fe.getExitCode() : "unknown") + "):");
+                VBox expandableContent = new VBox(5, detailsLabel, detailsArea);
+                alert.getDialogPane().setExpandableContent(expandableContent);
+            }
+        } else {
+            alert.setContentText(cause != null ? cause.getMessage() : ex.getMessage());
+        }
+
+        alert.showAndWait();
+    }
+
     private void applyCSSIfAvailable(Scene scene) {
         String defaultStyle = "-fx-font-family: 'Segoe UI', 'Roboto', 'Arial';";
         scene.getRoot().setStyle(defaultStyle);
@@ -1339,30 +1385,13 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
                 fileSelectionPanel.updateBatchStatus(batchFiles, liveCompleted, liveFailed, livePending, originalBatchSize);
 
-                // FIX: added — this is the smooth, per-item weighted overall
-                // progress calculation that already existed in ControlPanel
-                // but was never called from anywhere. The discrete
-                // updateProgress(completed, failed, total) driven by the
-                // statistics callback still fires on each whole-file
-                // completion; this fills in continuous movement between
-                // those events instead of the bar sitting still for the
-                // full duration of every file.
-                controlPanel.updateProgress(batchFiles);
-
-                // FIX: removed the redundant updateBatchProgress(liveCompleted,
-                // liveFailed, originalBatchSize) call that used to sit here.
-                // Both of its side effects — ControlPanel's numeric progress
-                // and FileSelectionPanel's completed/failed labels — are
-                // already covered every tick by the two calls above. Worse,
-                // it fed a different-format text into the same
-                // detailedStatusLabel that controlPanel.updateProgress(batchFiles)
-                // also writes to, so the label's text was being overwritten
-                // twice a second with two different phrasings — the actual
-                // cause of the "flashing" reported in the Ready to Process
-                // section. updateBatchProgress() itself is kept for the
-                // statistics-callback path (fires only on real completion
-                // events, not every second), which still wants a fast
-                // numeric bar update independent of this tick's timing.
+                // FIX: ControlPanel.updateProgress now takes the authoritative
+                // cumulative counts directly (see ControlPanel.java for the
+                // root-cause fix — it previously recomputed completed/failed/
+                // total by scanning batchFiles, which shrinks the moment
+                // auto-remove deletes a COMPLETED item, undercounting on every
+                // subsequent tick). No second call needed any more.
+                controlPanel.updateProgress(batchFiles, liveCompleted, liveFailed, originalBatchSize);
 
                 // FIX (request #4): previously auto-remove only ran once,
                 // in a bulk sweep, after the ENTIRE batch finished — not

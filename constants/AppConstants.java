@@ -13,13 +13,18 @@ public final class AppConstants {
     public static final String VERSION = "0.3.9";
     
     // File Constraints
-    public static final long MAX_FILE_SIZE = 1024L * 1024 * 1024; // 750MB
+    //
+    // FIX: MAX_FILE_SIZE was hardcoded to 1024L*1024*1024 (exactly 1024 MB /
+    // 1 GB) with a comment claiming "// 750MB" right next to it, while
+    // MAX_FILE_SIZE_MB (used in the user-facing "exceeds 750 MB limit"
+    // message in FileSelectionPanel) was correctly 750. The enforced byte
+    // limit was actually ~37% larger than what the UI told users the limit
+    // was — a file between 750MB and 1024MB would be silently accepted
+    // despite the displayed cap. Deriving MAX_FILE_SIZE from MAX_FILE_SIZE_MB
+    // makes them structurally impossible to disagree, instead of two
+    // independently-hardcoded numbers that already had drifted apart once.
     public static final int MAX_FILE_SIZE_MB = 750;
-    
-    // Processing Weights
-    public static final double STAGE_CONVERSION_WEIGHT = 0.1;
-    public static final double STAGE_TRANSCRIPTION_WEIGHT = 0.9;
-    public static final double CONVERSION_TIME_FACTOR = 1.5;
+    public static final long MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024L * 1024L;
     
     // Default Values
     public static final String DEFAULT_FORMAT = "mp3";
@@ -45,7 +50,7 @@ public final class AppConstants {
     public static final double MAX_DEPENDENCY_RETRIES = 2;
     public static final long RETRY_DELAY_MS = 2000;
     
-    // Supported Formats (Add these arrays)
+    // Supported Formats
     public static final String[] AUDIO_EXTENSIONS = {
         "*.mp3", "*.wav", "*.flac", "*.ogg", "*.m4a", "*.wma", 
         "*.aac", "*.opus", "*.alac", "*.aiff", "*.amr", "*.ac3"
@@ -98,9 +103,24 @@ public final class AppConstants {
     public static final boolean DEFAULT_NOISE_REDUCTION = true;
     public static final int DEFAULT_SRT_MAX_CHARS = 42;
     public static final int DEFAULT_SRT_MAX_LINES = 2;
-    public static final float DEFAULT_MAX_SEGMENT_DURATION = 12.0f;
     
     // Time estimation
     public static final double TRANSCRIPTION_TIME_FACTOR = 0.1; // 10% of audio duration
     public static final int WHISPER_TIMEOUT_MINUTES = 60;
+
+    // FIX (dead-code cleanup): removed four constants confirmed unused
+    // anywhere in the codebase I have visibility into:
+    //   - STAGE_CONVERSION_WEIGHT (0.1), STAGE_TRANSCRIPTION_WEIGHT (0.9),
+    //     CONVERSION_TIME_FACTOR (1.5) — ParallelProcessingManager's actual
+    //     pipeline uses different, independently hardcoded checkpoint values
+    //     (0.3 / 0.65 split) and never reads these at all.
+    //   - DEFAULT_MAX_SEGMENT_DURATION (12.0f) — TranscriptionConfig.Builder
+    //     hardcodes its own default of 30.0f directly and never reads this
+    //     constant either. Anyone reading this constant to understand actual
+    //     segment-duration behavior would be misled — the real default is
+    //     30s, not 12s.
+    // If real behavior should actually match these constants' original
+    // intent (e.g. segments really should default to 12s), that's a decision
+    // to make explicitly in TranscriptionConfig, not by resurrecting a
+    // constant nothing reads.
 }

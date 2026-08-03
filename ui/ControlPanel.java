@@ -286,10 +286,25 @@ public class ControlPanel {
         });
     }
 
-    public void updateProgress(ObservableList<BatchFileItem> items) {
+    /**
+     * FIX: previously this derived completed/failed/total AND the overall
+     * percentage purely by scanning {@code items} — {@code total =
+     * items.size()}, {@code completed}/{@code failed} counted by scanning
+     * current statuses. That's correct only if {@code items} never shrinks.
+     * But the caller (MainWindow) auto-removes COMPLETED items from that
+     * same list moments after each one finishes — so on every tick after
+     * the first, completed files simply aren't there to be counted anymore,
+     * and both the "done" count AND the total (hence "pending") silently
+     * went wrong together. PROCESSING items are never auto-removed, so
+     * deriving the live "currently processing" rows and their partial
+     * progress from {@code items} is still safe and kept; completed/failed/
+     * total now come from the caller's own cumulative, removal-proof
+     * counters instead of being re-derived here.
+     */
+    public void updateProgress(ObservableList<BatchFileItem> items,
+                                int cumulativeCompleted, int cumulativeFailed, int cumulativeTotal) {
         Platform.runLater(() -> {
-            long total = items.size();
-            if (total == 0) {
+            if (cumulativeTotal == 0) {
                 overallProgressBar.setProgress(0);
                 overallPercentageLabel.setText("0%");
                 detailedStatusLabel.setText("📊 No files in queue");
@@ -297,31 +312,39 @@ public class ControlPanel {
                 return;
             }
 
-            double weighted = 0.0;
-            int completed = 0, processing = 0, failed = 0;
+            double processingWeighted = 0.0;
+            int processing = 0;
             List<BatchFileItem> processingItems = new ArrayList<>();
-
             for (BatchFileItem item : items) {
-                String status = item.getStatus();
-                double progress = item.getProgress();
-                if ("COMPLETED".equals(status)) { weighted += 1.0; completed++; }
-                else if ("FAILED".equals(status))      { weighted += progress; failed++; }
-                else if ("PROCESSING".equals(status))  { weighted += progress; processing++; processingItems.add(item); }
+                if ("PROCESSING".equals(item.getStatus())) {
+                    processingWeighted += item.getProgress();
+                    processing++;
+                    processingItems.add(item);
+                }
             }
 
-            double overall = weighted / total;
+            // Completed and failed files are both "done being worked on" —
+            // each counts as a full 1.0 toward overall completion, same as
+            // the old code did for completed (failed previously counted its
+            // last partial progress instead of 1.0; since a failed file
+            // won't be retried automatically, treating it as fully resolved
+            // here is more representative of "how much of the batch is
+            // finished, successfully or not").
+            double overall = Math.min(1.0,
+                    (cumulativeCompleted + cumulativeFailed + processingWeighted) / (double) cumulativeTotal);
             overallProgressBar.setProgress(overall);
             overallPercentageLabel.setText(String.format("%.0f%%", overall * 100));
 
-            long pending = total - completed - failed - processing;
+            long pending = Math.max(0, cumulativeTotal - cumulativeCompleted - cumulativeFailed - processing);
             detailedStatusLabel.setText(String.format(
                     "📊 Queue: %d total | ⏳ %d pending | 🔄 %d processing | ✅ %d done | ❌ %d failed",
-                    total, pending, processing, completed, failed));
+                    cumulativeTotal, pending, processing, cumulativeCompleted, cumulativeFailed));
 
             individualProgressRows.getChildren().setAll(
                     processingItems.stream().map(this::buildIndividualProgressRow).toList());
 
-            LOGGER.debug("Queue progress updated: overall={:.1f}%", overall * 100);
+            LOGGER.debug("Queue progress updated: overall={}%, completed={}, failed={}, processing={}, pending={}",
+                    String.format("%.1f", overall * 100), cumulativeCompleted, cumulativeFailed, processing, pending);
         });
     }
 

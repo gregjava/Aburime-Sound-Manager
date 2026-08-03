@@ -234,17 +234,27 @@ public class DependencyManager {
                 );
             }
 
-            LOGGER.warn("WhisperX Python environment cannot see FFmpeg. python='{}', output='{}'",
+            LOGGER.warn("WhisperX Python environment cannot see FFmpeg in this advisory check. python='{}', output='{}'",
                     pythonExecutable, output);
+            // FIX: reworded per observed real-world behavior — this check has
+            // been seen to report "not visible" immediately before the actual
+            // transcription run (which independently re-resolves and injects
+            // FFmpeg onto PATH) succeeds moments later. The exact reason this
+            // specific advisory check can diverge from the real invocation
+            // isn't fully root-caused yet, but presenting it as a hard
+            // failure is misleading when the pipeline goes on to work anyway
+            // — soften to a heads-up rather than an alarm, and say so
+            // explicitly rather than implying this is a fatal problem.
             return new DependencyStatus(
                 "FFmpeg (WhisperX visibility)",
                 false,
-                "FFmpeg is installed but is not visible to the WhisperX Python environment.",
+                "FFmpeg wasn't confirmed visible to the WhisperX Python environment in this check — "
+                + "transcription will still attempt to inject it directly beforehand and often succeeds anyway.",
                 "Interpreter checked: " + pythonExecutable + "\n" +
                 "FFmpeg resolved to: " + getFFmpegPath() + "\n" +
-                "The FFmpeg directory is normally injected onto that process's PATH " +
-                "automatically — if this still fails, verify the interpreter above can " +
-                "start at all and that the resolved FFmpeg path is a real executable."
+                "This is an advisory check, not a guarantee of failure — if transcription " +
+                "later fails with an FFmpeg-not-found error from within WhisperX, that " +
+                "confirms a real problem; if it succeeds, this warning can be disregarded."
             );
         } catch (Exception e) {
             LOGGER.warn("Could not verify FFmpeg visibility inside the WhisperX Python environment", e);

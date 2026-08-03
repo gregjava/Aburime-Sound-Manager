@@ -750,6 +750,42 @@ public class ParallelProcessingManager {
         }
     }
 
+    /**
+     * FIX: the transcription progress callback only reflects the raw
+     * segment-completion fraction reported by {@code transcribe()}. For a
+     * model split into few, long segments (e.g. a "large" model's 10-segment
+     * split of a long file), that fraction can sit unchanged at 0 for the
+     * entire time a single segment is running — visibly minutes to hours on
+     * CPU — leaving the per-file progress bar frozen at the 0.3 ("just
+     * finished preprocessing") checkpoint the whole time. This estimates
+     * elapsed-time-based progress from the running average of this model's
+     * past transcription durations (already tracked in {@link #phaseTotalMs}/
+     * {@link #phaseCount} for the bottleneck-summary feature) and blends it
+     * with the real callback via {@code max(...)} — so a genuine
+     * segment-completion signal is never overridden by a worse time-based
+     * guess, but the bar still advances smoothly when segment updates are
+     * sparse. By construction, elapsed == estimated-remaining implies
+     * elapsed == half of the estimated total, i.e. the blended fraction
+     * reaches 0.5 at that point — matching the same 50%-at-the-midpoint
+     * expectation the "File Time Spent"/"File Time Left" labels imply.
+     */
+    private long estimateTranscriptionDurationMs(String phaseName, double fileSizeMB) {
+        LongAdder totalMs = phaseTotalMs.get(phaseName);
+        LongAdder count = phaseCount.get(phaseName);
+        if (totalMs != null && count != null && count.sum() > 0) {
+            return Math.max(1L, totalMs.sum() / count.sum());
+        }
+        // No learned average yet (first file of this model this session) —
+        // fall back to a conservative heuristic: ~45s per MB of 16-bit PCM
+        // WAV on CPU, which is a rough proxy for audio duration since we
+        // don't have the source audio duration at this call site. This is
+        // only ever used until the first real sample is recorded.
+        return Math.max(5_000L, (long) (fileSizeMB * 45_000));
+    }
+
+    private final ScheduledExecutorService progressTicker =
+            Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("Progress-Ticker"));
+
     private TranscriptionResult transcribeSync(File wavFile,
                                                TranscriptionConfig config,
                                                BatchFileItem item) {
@@ -789,17 +825,44 @@ public class ParallelProcessingManager {
             // as the first 30% and output-saving as the last 5%, so
             // transcription itself is mapped to the middle 65%.
             long transcribeStart = System.currentTimeMillis();
-            TranscriptionResult result = instance.transcribe(wavFile.getAbsolutePath(), config,
-                    p -> item.setProgress(0.3 + Math.max(0.0, Math.min(1.0, p)) * 0.65),
-                    0.0);
+            String phaseName = "transcription_" + model;
+            double sizeMB = wavFile.length() / (1024.0 * 1024.0);
+            long estimatedTotalMs = estimateTranscriptionDurationMs(phaseName, sizeMB);
+
+            final java.util.concurrent.atomic.AtomicReference<Double> latestCallbackFraction =
+                    new java.util.concurrent.atomic.AtomicReference<>(0.0);
+
+            java.util.concurrent.ScheduledFuture<?> ticker = progressTicker.scheduleAtFixedRate(() -> {
+                try {
+                    long elapsedMs = System.currentTimeMillis() - transcribeStart;
+                    double timeFraction = Math.min(0.99, elapsedMs / (double) estimatedTotalMs);
+                    double blended = Math.max(latestCallbackFraction.get(), timeFraction);
+                    item.setProgress(0.3 + Math.max(0.0, Math.min(1.0, blended)) * 0.65);
+                } catch (Exception e) {
+                    // A progress-display glitch must never interrupt the actual transcription.
+                    LOGGER.debug("Progress tick failed for {}: {}", wavFile.getName(), e.getMessage());
+                }
+            }, 1, 1, TimeUnit.SECONDS);
+
+            TranscriptionResult result;
+            try {
+                result = instance.transcribe(wavFile.getAbsolutePath(), config,
+                        p -> {
+                            double clamped = Math.max(0.0, Math.min(1.0, p));
+                            latestCallbackFraction.updateAndGet(prev -> Math.max(prev, clamped));
+                            item.setProgress(0.3 + latestCallbackFraction.get() * 0.65);
+                        },
+                        0.0);
+            } finally {
+                ticker.cancel(false);
+            }
 
             // FIX: added — was never recorded on this path, unlike the
             // (now-removed) standard path, which fed the adaptive
             // per-model learned-timing system every transcription. Without
             // this, the estimator's "transcription_<model>" learned samples
             // would only ever come from single-file (non-parallel) runs.
-            double sizeMB = wavFile.length() / (1024.0 * 1024.0);
-            recordPhaseTiming("transcription_" + model, transcribeStart, sizeMB);
+            recordPhaseTiming(phaseName, transcribeStart, sizeMB);
 
             return result;
 

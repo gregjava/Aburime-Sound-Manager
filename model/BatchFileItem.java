@@ -4,60 +4,53 @@
  */
 package audiomanager.model;
 
-import javafx.beans.property.*;
+import javafx.beans.property.SimpleDoubleProperty;
+import javafx.beans.property.SimpleStringProperty;
 
 import java.io.File;
 
 /**
- * Represents a file in the batch processing queue
+ * Represents a file in the batch processing queue.
+ *
+ * <p>FIX (dead-code cleanup): this class previously carried several fields
+ * and their accessors that were never read or written anywhere else in the
+ * codebase I have visibility into — a duplicate {@code status}/
+ * {@code statusProperty} pair tracking the same value twice, an
+ * always-broken {@code getDurationSeconds()} that other code had already
+ * fallen back away from (see the "FIX: was getDurationSeconds()..."
+ * comments still in {@code FileSelectionPanel}), an entirely unused "stage
+ * tracking" subsystem ({@code currentStageName}/{@code currentStageStartTime}/
+ * {@code currentStageEstimatedDuration}), an unused "enhanced properties"
+ * set ({@code individualProgress}/{@code estimatedTimeRemaining}/
+ * {@code fileDuration}), and an unused "dynamic weight" subsystem
+ * ({@code conversionWeight}/{@code transcriptionWeight}/
+ * {@code transcriptionConfig}). All removed. If any of these turn out to be
+ * used by a file outside what I've been given visibility into, they're
+ * recoverable from version control — but nothing in the reviewed codebase
+ * referenced them.</p>
  */
 public class BatchFileItem {
     private final File file;
     private final SimpleStringProperty status;
     private final SimpleDoubleProperty progress;
-    private final SimpleStringProperty statusProperty;
     private File result;
     private String errorMessage;
     private long startTime = 0;
-
-    // Stage tracking properties
-    private final SimpleStringProperty currentStageName = new SimpleStringProperty("PENDING");
-    private volatile long currentStageStartTime = 0;
-    private volatile double currentStageEstimatedDuration = 0.0;
     private volatile double totalAudioDurationSeconds = 0.0;
-
-    // 🚨 NEW: Enhanced properties for UI updates
-    private final DoubleProperty individualProgress = new SimpleDoubleProperty(0.0);
-    private final StringProperty estimatedTimeRemaining = new SimpleStringProperty("");
-    private final LongProperty fileDuration = new SimpleLongProperty(0); // in seconds
 
     public BatchFileItem(File file) {
         this.file = file;
         this.status = new SimpleStringProperty(ProcessingStatus.PENDING.name());
         this.progress = new SimpleDoubleProperty(0.0);
-        this.statusProperty = new SimpleStringProperty("PENDING");
     }
 
-    // Getters and setters
-    /**
-     * Retrieves the digital play duration of the audio file in seconds.
-     * Re-purposed to return the mutable field's value.
-     */
-    public double getDurationSeconds() { 
-        // This is the getter used by the UI table/status calculations.
-        return totalAudioDurationSeconds; 
-    }
-    
     public File getFile() { return file; }
     public String getFileName() { return file.getName(); }
-    
+
     public String getStatus() { return status.get(); }
-    public void setStatus(String status) { 
-        this.status.set(status);
-        this.statusProperty.set(status);
-    }
-    public SimpleStringProperty statusProperty() { return statusProperty; }
-    
+    public void setStatus(String status) { this.status.set(status); }
+    public SimpleStringProperty statusProperty() { return status; }
+
     public double getProgress() { return progress.get(); }
     public void setProgress(double progress) { this.progress.set(progress); }
     public SimpleDoubleProperty progressProperty() { return progress; }
@@ -71,58 +64,14 @@ public class BatchFileItem {
     public long getStartTime() { return startTime; }
     public void setStartTime(long startTime) { this.startTime = startTime; }
 
-    // Stage tracking methods
-    public String getCurrentStageName() { return currentStageName.get(); }
-    public void setCurrentStageName(String currentStageName) { this.currentStageName.set(currentStageName); }
-    public SimpleStringProperty currentStageNameProperty() { return currentStageName; }
-
-    public long getCurrentStageStartTime() { return currentStageStartTime; }
-    public void setCurrentStageStartTime(long currentStageStartTime) { this.currentStageStartTime = currentStageStartTime; }
-
-    public double getCurrentStageEstimatedDuration() { return currentStageEstimatedDuration; }
-    public void setCurrentStageEstimatedDuration(double currentStageEstimatedDuration) { 
-        this.currentStageEstimatedDuration = currentStageEstimatedDuration; 
-    }
-
     public double getTotalAudioDurationSeconds() { return totalAudioDurationSeconds; }
-    public void setTotalAudioDurationSeconds(double totalAudioDurationSeconds) { 
-        this.totalAudioDurationSeconds = totalAudioDurationSeconds; 
-        this.fileDuration.set((long) totalAudioDurationSeconds); // Sync with new property
-    }
-    
-    // 🚨 NEW: Enhanced property getters and setters
-    public double getIndividualProgress() { return individualProgress.get(); }
-    public void setIndividualProgress(double progress) { this.individualProgress.set(progress); }
-    public DoubleProperty individualProgressProperty() { return individualProgress; }
-    
-    public String getEstimatedTimeRemaining() { return estimatedTimeRemaining.get(); }
-    public void setEstimatedTimeRemaining(String eta) { this.estimatedTimeRemaining.set(eta); }
-    public StringProperty estimatedTimeRemainingProperty() { return estimatedTimeRemaining; }
-    
-    public long getFileDuration() { return fileDuration.get(); }
-    public void setFileDuration(long duration) { this.fileDuration.set(duration); }
-    public LongProperty fileDurationProperty() { return fileDuration; }
-
-    // Dynamic weight properties
-    private volatile double conversionWeight = 0.2;
-    private volatile double transcriptionWeight = 0.8;
-    private TranscriptionConfig transcriptionConfig;
-
-    // Add getters and setters
-    public double getConversionWeight() { return conversionWeight; }
-    public void setConversionWeight(double conversionWeight) { this.conversionWeight = conversionWeight; }
-    
-    public double getTranscriptionWeight() { return transcriptionWeight; }
-    public void setTranscriptionWeight(double transcriptionWeight) { this.transcriptionWeight = transcriptionWeight; }
-    
-    public TranscriptionConfig getTranscriptionConfig() { return transcriptionConfig; }
-    public void setTranscriptionConfig(TranscriptionConfig transcriptionConfig) { 
-        this.transcriptionConfig = transcriptionConfig; 
+    public void setTotalAudioDurationSeconds(double totalAudioDurationSeconds) {
+        this.totalAudioDurationSeconds = totalAudioDurationSeconds;
     }
 
     @Override
     public String toString() {
-        return String.format("BatchFileItem{file=%s, status=%s, progress=%.2f}", 
+        return String.format("BatchFileItem{file=%s, status=%s, progress=%.2f}",
                            file.getName(), getStatus(), getProgress());
     }
 }
