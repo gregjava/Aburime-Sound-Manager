@@ -31,6 +31,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.CheckMenuItem;
 import javafx.util.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -713,11 +714,39 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         fileMenu.getItems().addAll(preferencesItem, clearSessionItem, new SeparatorMenuItem(), exitItem);
 
+        // FIX (UI improvement — undo/redo menu): mirrors the Ctrl+Z/Ctrl+Shift+Z
+        // shortcuts already wired into the file queue's TableView
+        // (FileSelectionPanel.setupKeyboardShortcutsForTableView); this gives
+        // mouse-driven access to the same commands, and doubles as
+        // documentation of the shortcut for anyone who doesn't discover it
+        // by trying Ctrl+Z.
+        Menu editMenu = new Menu("Edit");
+        editMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        MenuItem undoItem = new MenuItem("Undo");
+        undoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Z"));
+        undoItem.setOnAction(e -> {
+            if (fileSelectionPanel != null && !fileSelectionPanel.undo()) {
+                log("Nothing to undo.");
+            }
+        });
+
+        MenuItem redoItem = new MenuItem("Redo");
+        redoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+Z"));
+        redoItem.setOnAction(e -> {
+            if (fileSelectionPanel != null && !fileSelectionPanel.redo()) {
+                log("Nothing to redo.");
+            }
+        });
+
+        editMenu.getItems().addAll(undoItem, redoItem);
+
         Menu toolsMenu = new Menu("Tools");
         toolsMenu.setStyle("-fx-text-fill: #2c3e50;");
 
         MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
         batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
+        batchSettingsItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+B"));
 
         MenuItem whisperSettingsItem = new MenuItem("Transcription Settings...");
         whisperSettingsItem.setOnAction(e -> showWhisperSettingsDialog());
@@ -730,15 +759,39 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         watchFolderMenuItem = new MenuItem("📁 Watch Folder...");
         watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
+        watchFolderMenuItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+W"));
 
         MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
         performanceReportItem.setOnAction(e -> showPerformanceReportDialog());
+        performanceReportItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+P"));
 
         toolsMenu.getItems().addAll(
             batchSettingsItem, whisperSettingsItem, audioSettingsItem,
             new SeparatorMenuItem(), clearTimeDataItem,
             new SeparatorMenuItem(), watchFolderMenuItem, performanceReportItem
         );
+
+        // FIX (UI improvement — dark mode): a best-effort dark theme. This
+        // app styles most components with inline setStyle(...) calls rather
+        // than CSS style-class selectors, and inline styles take priority
+        // over stylesheet rules in JavaFX — so this stylesheet reliably
+        // re-themes the scene background, MenuBar, TextArea/log, and any
+        // component that doesn't set its own inline background/text-fill,
+        // but can't override every hardcoded color throughout ControlPanel/
+        // FileSelectionPanel without migrating those to CSS classes (a
+        // larger, separate refactor). Treat this as a real but partial dark
+        // mode, not full coverage — panels with heavy inline styling (the
+        // Queue table, colored status buttons) will keep their light-theme
+        // colors for now.
+        Menu viewMenu = new Menu("View");
+        viewMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        CheckMenuItem darkModeItem = new CheckMenuItem("🌙 Dark Mode");
+        darkModeItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+D"));
+        darkModeItem.setSelected("Dark".equals(prefManager.getTheme()));
+        darkModeItem.setOnAction(e -> toggleTheme(darkModeItem.isSelected()));
+
+        viewMenu.getItems().add(darkModeItem);
 
         Menu helpMenu = new Menu("Help");
         helpMenu.setStyle("-fx-text-fill: #2c3e50;");
@@ -753,11 +806,51 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
         setupAssistantItem.setOnAction(e -> showSetupAssistantDialog());
 
-        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem);
+        MenuItem userManualItem = new MenuItem("User Manual...");
+        userManualItem.setOnAction(e -> new audiomanager.ui.DocumentationLauncher().open("USER_MANUAL.md"));
 
-        menuBar.getMenus().addAll(fileMenu, toolsMenu, helpMenu);
+        MenuItem troubleshootingItem = new MenuItem("Troubleshooting Guide...");
+        troubleshootingItem.setOnAction(e -> new audiomanager.ui.DocumentationLauncher().open("TROUBLESHOOTING.md"));
+        troubleshootingItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F1"));
+
+        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem,
+                new SeparatorMenuItem(), userManualItem, troubleshootingItem);
+
+        menuBar.getMenus().addAll(fileMenu, editMenu, toolsMenu, viewMenu, helpMenu);
 
         return menuBar;
+    }
+
+    /**
+     * Toggles the dark stylesheet on the current scene and persists the
+     * choice via PreferenceManager so it's restored on next launch. See the
+     * "FIX (UI improvement — dark mode)" note above createMenuBar() for the
+     * honest scope of what this does and doesn't re-theme.
+     */
+    private void toggleTheme(boolean dark) {
+        Scene scene = stage.getScene();
+        if (scene == null) return;
+
+        String stylesheetUri = getClass().getResource("/styles/dark.css") != null
+                ? getClass().getResource("/styles/dark.css").toExternalForm()
+                : null;
+
+        if (dark) {
+            if (stylesheetUri != null && !scene.getStylesheets().contains(stylesheetUri)) {
+                scene.getStylesheets().add(stylesheetUri);
+            } else if (stylesheetUri == null) {
+                LOGGER.warn("dark.css not found on the classpath at /styles/dark.css — dark mode stylesheet not applied. " +
+                        "Make sure dark.css is placed under src/main/resources/styles/.");
+            }
+            prefManager.setTheme("Dark");
+        } else {
+            if (stylesheetUri != null) {
+                scene.getStylesheets().remove(stylesheetUri);
+            }
+            prefManager.setTheme("Light");
+        }
+        prefManager.flush();
+        LOGGER.info("Theme set to: {}", prefManager.getTheme());
     }
 
     private void clearSessionData() {
@@ -1142,76 +1235,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
      * only ever reached a human as scattered log lines.
      */
     private void showPerformanceReportDialog() {
-        java.util.List<FileTimingReport> reports = batchProcessor.getRecentTimingReports();
-
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Performance Report");
-        dialog.setHeaderText(reports.isEmpty()
-                ? "No files processed yet this session"
-                : "Stage-by-stage timing for the last " + reports.size() + " file(s) processed");
-
-        TableView<FileTimingReport> table = new TableView<>();
-        table.setItems(FXCollections.observableArrayList(reports));
-        table.setPrefSize(900, 400);
-        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
-
-        table.getColumns().add(makeReportColumn("File", 220, r -> r.getFileName()));
-        table.getColumns().add(makeMillisColumn("Queue Wait", "queue_wait"));
-        table.getColumns().add(makeMillisColumn("Model Acq.", "model_acquisition"));
-        table.getColumns().add(makeMillisColumn("Model Load", "model_load"));
-        table.getColumns().add(makeMillisColumn("Audio Load", "audio_load"));
-        table.getColumns().add(makeMillisColumn("Preprocessing", "preprocessing"));
-        table.getColumns().add(makeMillisColumn("Transcription", "transcription"));
-        table.getColumns().add(makeMillisColumn("Alignment", "alignment"));
-        table.getColumns().add(makeMillisColumn("Diarization", "diarization"));
-        table.getColumns().add(makeReportColumn("Subtitle Gen", 100, r -> {
-            long srt = r.getStageMillis("subtitle_generation");
-            long txt = r.getStageMillis("txt_generation");
-            long total = Math.max(0, srt) + Math.max(0, txt);
-            return (srt >= 0 || txt >= 0) ? String.format("%.1fs", total / 1000.0) : "—";
-        }));
-        table.getColumns().add(makeMillisColumn("Output Saving", "output_saving"));
-        table.getColumns().add(makeMillisColumn("Total", "total_pipeline"));
-        // FIX: previously showed only a single JVM-wide system-CPU snapshot
-        // taken when the file finished (labelled "approximate" in the note
-        // below) and this JVM's own heap — neither is the actual resource
-        // usage of the transcription work the user asked to see. These two
-        // columns are the real thing: sampled throughout the whole
-        // transcribe() call by the Python script itself (RSS memory and
-        // CPU% of the Python process and any children it spawns).
-        table.getColumns().add(makeReportColumn("Peak Mem (MB)", 100,
-                r -> r.getPythonPeakMemoryMb() >= 0 ? String.format("%.0f", r.getPythonPeakMemoryMb()) : "—"));
-        table.getColumns().add(makeReportColumn("Avg CPU %", 90,
-                r -> r.getPythonAvgCpuPercent() >= 0 ? String.format("%.0f%%", r.getPythonAvgCpuPercent()) : "—"));
-
-        Label note = new Label(
-                "Peak Mem / Avg CPU are measured by the Python transcription process itself across the whole file "
-                + "(\u2014 if psutil isn't installed in that Python environment). Stages missing from a script "
-                + "without STAGE_TIMING instrumentation (e.g. a custom override script) also show as \u2014.");
-        note.setWrapText(true);
-        note.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
-
-        VBox content = new VBox(10, table, note);
-        content.setPadding(new Insets(10));
-        dialog.getDialogPane().setContent(content);
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
-        dialog.showAndWait();
-    }
-
-    private TableColumn<FileTimingReport, String> makeMillisColumn(String title, String stageKey) {
-        return makeReportColumn(title, 100, r -> {
-            long ms = r.getStageMillis(stageKey);
-            return ms >= 0 ? String.format("%.1fs", ms / 1000.0) : "—";
-        });
-    }
-
-    private TableColumn<FileTimingReport, String> makeReportColumn(
-            String title, double width, java.util.function.Function<FileTimingReport, String> extractor) {
-        TableColumn<FileTimingReport, String> col = new TableColumn<>(title);
-        col.setPrefWidth(width);
-        col.setCellValueFactory(cellData ->
-                new javafx.beans.property.SimpleStringProperty(extractor.apply(cellData.getValue())));
-        return col;
+        new audiomanager.ui.PerformanceReportDialog().show(batchProcessor.getRecentTimingReports());
     }
 
     private void applyCSSIfAvailable(Scene scene) {

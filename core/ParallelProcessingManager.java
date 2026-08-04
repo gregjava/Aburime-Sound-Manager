@@ -119,108 +119,16 @@ public class ParallelProcessingManager {
     private final Map<String, ModelInstancePool> modelPools;
     private final Map<String, PipelineStage> pipelineStages;
 
-    /** How many files are actively inside the pipeline right now — used by the 2s resource sampler and batch summary below. */
+    /** How many files are actively inside the pipeline right now — reported by the resource sampler. */
     private final AtomicInteger activeFileCount = new AtomicInteger(0);
 
-    // FIX (doc-review — "log CPU every 2 seconds" / batch summary): a
-    // lightweight, purely-observational sampler, separate from
-    // startResourceMonitor()'s existing 5-second adaptive-control cycle —
-    // this one never changes any pool size, it only records a time series
-    // and accumulates the stats needed for the end-of-batch summary
-    // (mean/peak CPU, mean/peak RAM). Started/stopped once per batch by
-    // doProcessBatch (see below).
-    private ScheduledExecutorService batchSamplerExecutor;
-    private DoubleSummaryStatistics batchCpuStats = new DoubleSummaryStatistics();
-    private DoubleSummaryStatistics batchMemStats = new DoubleSummaryStatistics();
-    private volatile long batchPeakHeapMB = 0;
-    private final AtomicInteger scalingEventCount = new AtomicInteger(0);
+    // FIX (file-size cleanup): CPU/RAM probing, the 2s batch sampler, and
+    // scaling-event tracking used to live here as ~90 lines of fields and
+    // methods — one of several separable concerns that had accumulated in
+    // this file. Extracted to ResourceMonitor, which this class now just
+    // delegates to; see that class for the sampler/summary logic itself.
+    private final ResourceMonitor resourceMonitor = new ResourceMonitor(LOGGER);
     private volatile int lastLoggedTarget = -1;
-
-    private void startBatchSampler() {
-        batchCpuStats = new DoubleSummaryStatistics();
-        batchMemStats = new DoubleSummaryStatistics();
-        batchPeakHeapMB = 0;
-        scalingEventCount.set(0);
-        lastLoggedTarget = -1;
-
-        batchSamplerExecutor = Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("Batch-Resource-Sampler"));
-        batchSamplerExecutor.scheduleAtFixedRate(() -> {
-            try {
-                double cpuPct = getSystemCpuLoadPercent();
-                double memPct = getSystemMemoryUsedPercent();
-                long heapMB = getUsedMemoryMB();
-                if (cpuPct >= 0) batchCpuStats.accept(cpuPct);
-                if (memPct >= 0) batchMemStats.accept(memPct);
-                batchPeakHeapMB = Math.max(batchPeakHeapMB, heapMB);
-
-                LOGGER.info("RESOURCE_SAMPLE: cpu={}% mem={}% heap={}MB activeFiles={}",
-                        cpuPct >= 0 ? String.format("%.0f", cpuPct) : "n/a",
-                        memPct >= 0 ? String.format("%.0f", memPct) : "n/a",
-                        heapMB, activeFileCount.get());
-            } catch (Exception e) {
-                LOGGER.debug("Batch resource sample failed: {}", e.getMessage());
-            }
-        }, 2, 2, TimeUnit.SECONDS);
-    }
-
-    private void stopBatchSampler() {
-        if (batchSamplerExecutor != null) {
-            batchSamplerExecutor.shutdownNow();
-            batchSamplerExecutor = null;
-        }
-    }
-
-    /**
-     * Logs the end-of-batch summary. Throughput is minutes of source audio
-     * processed per wall-clock hour. CPU/RAM figures come from the 2-second
-     * batch sampler above; "CPU idle" treats any time this batch's sampler
-     * wasn't observing >0% system CPU load as idle — a coarse measure, but
-     * a real, measured one rather than an assumption.
-     */
-    private void logBatchSummary(int filesProcessed, double totalAudioDurationSeconds, long elapsedMs) {
-        double elapsedHours = elapsedMs / 3_600_000.0;
-        double audioMinutes = totalAudioDurationSeconds / 60.0;
-        double throughputMinPerHour = elapsedHours > 0 ? audioMinutes / elapsedHours : 0;
-        double avgCpu = batchCpuStats.getCount() > 0 ? batchCpuStats.getAverage() : -1;
-        long cpuActiveMs = avgCpu >= 0 ? Math.round(elapsedMs * (avgCpu / 100.0)) : -1;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n========== Batch Summary ==========\n");
-        sb.append(String.format("Files processed:      %d%n", filesProcessed));
-        sb.append(String.format("Audio duration:       %s%n", formatDuration((long) (totalAudioDurationSeconds * 1000))));
-        sb.append(String.format("Elapsed time:          %s%n", formatDuration(elapsedMs)));
-        sb.append(String.format("Average throughput:    %.1f min audio / hour%n", throughputMinPerHour));
-        sb.append(String.format("Average CPU:           %s%n", avgCpu >= 0 ? String.format("%.1f%%", avgCpu) : "n/a"));
-        sb.append(String.format("Peak CPU:              %s%n",
-                batchCpuStats.getCount() > 0 ? String.format("%.1f%%", batchCpuStats.getMax()) : "n/a"));
-        sb.append(String.format("Average RAM:           %s%n",
-                batchMemStats.getCount() > 0 ? String.format("%.1f%%", batchMemStats.getAverage()) : "n/a"));
-        sb.append(String.format("Peak RAM:              %s%n",
-                batchMemStats.getCount() > 0 ? String.format("%.1f%%", batchMemStats.getMax()) : "n/a"));
-        sb.append(String.format("Peak Java heap:        %d MB%n", batchPeakHeapMB));
-        if (cpuActiveMs >= 0) {
-            sb.append(String.format("CPU active / idle:     %s / %s%n",
-                    formatDuration(cpuActiveMs), formatDuration(Math.max(0, elapsedMs - cpuActiveMs))));
-        }
-        sb.append(String.format("Scaling events:        %d (model-pool concurrency target changed this batch)%n",
-                scalingEventCount.get()));
-        sb.append("====================================");
-
-        String summary = sb.toString();
-        LOGGER.info(summary);
-        if (logger != null) logger.accept(summary);
-    }
-
-    private static String formatDuration(long ms) {
-        long totalSeconds = ms / 1000;
-        long h = totalSeconds / 3600;
-        long m = (totalSeconds % 3600) / 60;
-        long s = totalSeconds % 60;
-        if (h > 0) return String.format("%dh %dm %ds", h, m, s);
-        if (m > 0) return String.format("%dm %ds", m, s);
-        return String.format("%ds", s);
-    }
-
     // FIX: added — periodic CPU/heap sampling that live-adjusts each
     // model pool's target concurrency between 1 and its initial capacity,
     // instead of that capacity being a fixed decision made once at batch
@@ -307,7 +215,7 @@ public class ParallelProcessingManager {
                         LOGGER.warn("Low free heap ({}MB) detected — capping model threads at 1.", freeMemMB);
                     }
                     initialize(maxParallelFiles, model);
-                    LOGGER.info("Parallel manager initialised (heap used: {}MB).", getUsedMemoryMB());
+                    LOGGER.info("Parallel manager initialised (heap used: {}MB).", resourceMonitor.getUsedMemoryMB());
                 }
             }
         }
@@ -437,9 +345,9 @@ public class ParallelProcessingManager {
                 new NamedThreadFactory("Resource-Monitor"));
         resourceMonitorExecutor.scheduleAtFixedRate(() -> {
             try {
-                double cpuLoadPct = getSystemCpuLoadPercent();
+                double cpuLoadPct = resourceMonitor.getSystemCpuLoadPercent();
                 long maxHeapMB = Runtime.getRuntime().maxMemory() / (1024 * 1024);
-                double heapUsedPct = maxHeapMB > 0 ? (getUsedMemoryMB() * 100.0 / maxHeapMB) : 0.0;
+                double heapUsedPct = maxHeapMB > 0 ? (resourceMonitor.getUsedMemoryMB() * 100.0 / maxHeapMB) : 0.0;
 
                 // FIX: previously only ever looked at JVM heap pressure. But
                 // this app's actual memory-heavy work (WhisperX/torch model
@@ -454,7 +362,7 @@ public class ParallelProcessingManager {
                 // either one can be the actual bottleneck depending on
                 // whether it's JavaFX/UI state or a spawned model process
                 // that's under strain.
-                double systemMemUsedPct = getSystemMemoryUsedPercent();
+                double systemMemUsedPct = resourceMonitor.getSystemMemoryUsedPercent();
                 double memUsedPct = systemMemUsedPct >= 0
                         ? Math.max(heapUsedPct, systemMemUsedPct)
                         : heapUsedPct;
@@ -493,18 +401,12 @@ public class ParallelProcessingManager {
                     pool.adjustTarget(target);
                 }
 
-                // FIX (batch summary — "Scaling events"): count a scaling
-                // event whenever the computed target concurrency actually
-                // changes from the previous cycle, so the batch summary can
-                // report how many times this batch's model concurrency was
-                // throttled up/down, instead of that only being visible by
-                // manually diffing DEBUG logs.
+                // FIX (batch summary — "Scaling events"): delegated to
+                // ResourceMonitor.recordScalingEvent, which is a no-op on
+                // the first cycle (lastLoggedTarget == -1) and otherwise
+                // counts + logs whenever the target actually changes.
                 final int finalTarget = target;
-                if (lastLoggedTarget != -1 && lastLoggedTarget != finalTarget) {
-                    scalingEventCount.incrementAndGet();
-                    LOGGER.info("Adaptive scaling: model concurrency target changed {} -> {} (cpu={}%, mem={}%)",
-                            lastLoggedTarget, finalTarget, cpuLoadPct, memUsedPct);
-                }
+                resourceMonitor.recordScalingEvent(lastLoggedTarget, finalTarget, cpuLoadPct, memUsedPct);
                 lastLoggedTarget = finalTarget;
 
                 // FIX: dynamic resizing previously applied to model
@@ -533,52 +435,6 @@ public class ParallelProcessingManager {
                 LOGGER.warn("Resource monitor cycle failed: {}", e.getMessage());
             }
         }, 5, 5, TimeUnit.SECONDS);
-    }
-
-    /**
-     * CPU load as a 0-100 percentage, or -1 if unavailable on this
-     * JVM/platform. Uses the modern (JDK 14+) getCpuLoad() rather than the
-     * deprecated getSystemCpuLoad() an earlier, unfinished prototype
-     * (DynamicParallelismOrchestrator) used.
-     */
-    private double getSystemCpuLoadPercent() {
-        try {
-            java.lang.management.OperatingSystemMXBean osBean =
-                    java.lang.management.ManagementFactory.getOperatingSystemMXBean();
-            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
-                double load = sunBean.getCpuLoad();
-                return load >= 0 ? load * 100.0 : -1;
-            }
-        } catch (Exception e) {
-            LOGGER.debug("CPU load measurement unavailable: {}", e.getMessage());
-        }
-        return -1;
-    }
-
-    /**
-     * Percentage of total physical (system-wide) RAM currently in use, or
-     * {@code -1} if unavailable on this JVM/platform.
-     *
-     * <p>Added alongside the resource monitor's dynamic pool resizing —
-     * see {@link #startResourceMonitor} for why this matters: JVM heap
-     * usage alone is blind to the memory consumed by the external Python
-     * subprocesses this app actually spends most of its memory budget on.</p>
-     */
-    private double getSystemMemoryUsedPercent() {
-        try {
-            java.lang.management.OperatingSystemMXBean osBean =
-                    java.lang.management.ManagementFactory.getOperatingSystemMXBean();
-            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
-                long total = sunBean.getTotalMemorySize();
-                long free = sunBean.getFreeMemorySize();
-                if (total > 0) {
-                    return (total - free) * 100.0 / total;
-                }
-            }
-        } catch (Exception e) {
-            LOGGER.debug("System memory measurement unavailable: {}", e.getMessage());
-        }
-        return -1;
     }
 
     /**
@@ -622,7 +478,7 @@ public class ParallelProcessingManager {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 batchSemaphore.acquire();
-                LOGGER.info("Starting batch (heap used: {}MB)", getUsedMemoryMB());
+                LOGGER.info("Starting batch (heap used: {}MB)", resourceMonitor.getUsedMemoryMB());
                 return doProcessBatch(items, processingConfig, transcriptionConfig, maxParallelFiles);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -644,7 +500,9 @@ public class ParallelProcessingManager {
                 .mapToDouble(BatchFileItem::getTotalAudioDurationSeconds)
                 .sum();
 
-        startBatchSampler();
+        resourceMonitor.resetForNewBatch();
+        lastLoggedTarget = -1;
+        resourceMonitor.startSampling(activeFileCount::get, logger);
         try {
         // FIX (batch prioritization): sort by priority (HIGH before NORMAL
         // before LOW) before grouping/dispatch. This is a best-effort
@@ -677,7 +535,9 @@ public class ParallelProcessingManager {
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             LOGGER.error("Batch failed", e);
             long failedDuration = System.currentTimeMillis() - startTime;
-            logBatchSummary(0, totalAudioDurationSeconds, failedDuration);
+            String summary = resourceMonitor.buildBatchSummary(0, totalAudioDurationSeconds, failedDuration);
+            LOGGER.info(summary);
+            if (logger != null) logger.accept(summary);
             return new ParallelBatchResult(items.size(), 0, items.size(), failedDuration, true);
         }
 
@@ -697,11 +557,13 @@ public class ParallelProcessingManager {
         ParallelBatchResult result = new ParallelBatchResult(items.size(), completed, failed, duration, false);
         successNames.forEach(result::addSuccessfulFile);
         LOGGER.info("Batch complete: {}/{} files in {}ms (heap: {}MB)",
-                completed, items.size(), duration, getUsedMemoryMB());
-        logBatchSummary(completed, totalAudioDurationSeconds, duration);
+                completed, items.size(), duration, resourceMonitor.getUsedMemoryMB());
+        String summary = resourceMonitor.buildBatchSummary(completed, totalAudioDurationSeconds, duration);
+        LOGGER.info(summary);
+        if (logger != null) logger.accept(summary);
         return result;
         } finally {
-            stopBatchSampler();
+            resourceMonitor.stopSampling();
         }
     }
 
@@ -770,7 +632,7 @@ public class ParallelProcessingManager {
 
             long waited = 0;
             while (waited < MAX_ADMISSION_WAIT_MS) {
-                double memPct = getSystemMemoryUsedPercent();
+                double memPct = resourceMonitor.getSystemMemoryUsedPercent();
                 if (memPct < 0 || memPct < ADMISSION_PRESSURE_THRESHOLD) {
                     return; // no signal available, or pressure is acceptable — proceed
                 }
@@ -793,6 +655,12 @@ public class ParallelProcessingManager {
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         int index = 0;
         for (BatchFileItem item : items) {
+            // Admission staggering happens BEFORE the queue-wait timestamp
+            // is captured below, deliberately: this delay is intentional
+            // pacing to prevent a memory-pressure thundering-herd, not
+            // contention the "Waiting in queue" metric should be reporting
+            // as a bottleneck. Counting it there would conflate "we chose
+            // to wait" with "we were blocked waiting."
             awaitAdmissionSlot(index++);
 
             // FIX (doc-review — "Waiting in queue" timing): captured here,
@@ -876,8 +744,8 @@ public class ParallelProcessingManager {
                     if (pyResource[0] >= 0) timingReport.setPythonPeakMemoryMb(pyResource[0]);
                     if (pyResource[1] >= 0) timingReport.setPythonAvgCpuPercent(pyResource[1]);
                 }
-                timingReport.setPeakHeapUsedMB(getUsedMemoryMB());
-                double cpuSnapshot = getSystemCpuLoadPercent();
+                timingReport.setPeakHeapUsedMB(resourceMonitor.getUsedMemoryMB());
+                double cpuSnapshot = resourceMonitor.getSystemCpuLoadPercent();
                 if (cpuSnapshot >= 0) {
                     timingReport.setAvgCpuLoadPercent(cpuSnapshot);
                 }
@@ -1389,7 +1257,7 @@ public class ParallelProcessingManager {
             resourceMonitorExecutor.shutdownNow();
             resourceMonitorExecutor = null;
         }
-        stopBatchSampler();
+        resourceMonitor.stopSampling();
 
         // Signal all pools to stop accepting new work
         executors.forEach(ex -> { if (ex != null) ex.shutdownNow(); });
@@ -1465,11 +1333,6 @@ public class ParallelProcessingManager {
     // -------------------------------------------------------------------------
     //  Memory helpers
     // -------------------------------------------------------------------------
-
-    private long getUsedMemoryMB() {
-        Runtime r = Runtime.getRuntime();
-        return (r.totalMemory() - r.freeMemory()) / (1024 * 1024);
-    }
 
     // FIX: was `r.freeMemory() / (1024 * 1024)` — Runtime.freeMemory() is the
     // unused space within the heap the JVM has *currently committed*
