@@ -730,12 +730,71 @@ public class ParallelProcessingManager {
     //  File-group processing
     // -------------------------------------------------------------------------
 
+    /**
+     * FIX (real production evidence, not a hypothesis): a full log of a
+     * 16-file/8-parallel batch showed system memory sitting at 90–100% for
+     * literally thousands of consecutive 2-second samples, with
+     * {@code activeFiles} stuck at exactly 8 for the entire visible run —
+     * the adaptive concurrency controller never reduced it once, and the
+     * log simply stops mid-run with no completion.
+     *
+     * <p>The controller genuinely wasn't broken in the sense of "computes
+     * the wrong target" — it's a structural gap: all 8 files were
+     * submitted to the pipeline executor in one tight loop at batch start,
+     * before the resource monitor (sampling every 5s) ever got a single
+     * reading. By the time memory pressure became visible, all 8 slots
+     * were already irreversibly committed — the controller can gate
+     * *future* admissions, but has no way to preempt work already
+     * in-flight, and with maxParallel=8 there was no "future admission"
+     * left to gate until one of the 8 finished, which — under sustained
+     * near-100% memory contention — none of them ever did.</p>
+     *
+     * <p>The fix is admission-side, not throttle-side: stagger initial
+     * submission instead of bursting the full ceiling at once, checking
+     * memory pressure between each admission so the very scenario observed
+     * in production (8 simultaneous model loads spiking memory before any
+     * of them can be measured) can't recur. A minimum stagger delay is
+     * applied even when pressure looks fine, since each file's own memory
+     * footprint (model load) takes a few seconds to actually register —
+     * checking pressure with zero delay would still race the same way.</p>
+     */
+    private static final long MIN_ADMISSION_STAGGER_MS = 3000;
+    private static final double ADMISSION_PRESSURE_THRESHOLD = 80.0;
+    private static final long MAX_ADMISSION_WAIT_MS = 30000;
+
+    private void awaitAdmissionSlot(int indexInGroup) {
+        if (indexInGroup == 0) return; // first file in the batch: nothing to stagger against yet
+
+        try {
+            Thread.sleep(MIN_ADMISSION_STAGGER_MS);
+
+            long waited = 0;
+            while (waited < MAX_ADMISSION_WAIT_MS) {
+                double memPct = getSystemMemoryUsedPercent();
+                if (memPct < 0 || memPct < ADMISSION_PRESSURE_THRESHOLD) {
+                    return; // no signal available, or pressure is acceptable — proceed
+                }
+                LOGGER.info("Delaying next file admission — system memory at {}% (threshold {}%)",
+                        String.format("%.0f", memPct), (int) ADMISSION_PRESSURE_THRESHOLD);
+                Thread.sleep(2000);
+                waited += 2000;
+            }
+            LOGGER.warn("Proceeding with next file admission after {}ms despite sustained memory pressure "
+                    + "— waiting further risked stalling the batch indefinitely.", MAX_ADMISSION_WAIT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private CompletableFuture<Void> processFileGroup(List<BatchFileItem> items,
                                                       ProcessingConfig processingConfig,
                                                       TranscriptionConfig transcriptionConfig,
                                                       FileGroup group) {
         List<CompletableFuture<Void>> futures = new ArrayList<>();
+        int index = 0;
         for (BatchFileItem item : items) {
+            awaitAdmissionSlot(index++);
+
             // FIX (doc-review — "Waiting in queue" timing): captured here,
             // at the instant this file is handed off, not inside the async
             // task — the gap between this timestamp and the task actually
