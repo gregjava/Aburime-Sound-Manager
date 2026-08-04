@@ -264,6 +264,11 @@ public class BatchProcessor implements SegmentProgressListener {
     public void setIsProcessingCallback(Consumer<Boolean> callback)        { this.isProcessingCallback = callback; }
     public void setFileCompletedCallback(Consumer<BatchFileItem> callback) { this.fileCompletedCallback = callback; }
     public void setAutoRemoveCompleted(boolean autoRemoveCompleted)        { this.autoRemoveCompleted  = autoRemoveCompleted; }
+
+    /** Recent per-file stage-timing reports (see FileTimingReport), most-recent-first, for the UI's Performance Report view. */
+    public java.util.List<FileTimingReport> getRecentTimingReports() {
+        return parallelManager.getRecentTimingReports();
+    }
     public void updateSegmentProgress(int segmentIndex, int totalSegments) { saveBatchState(); }
     public ReadOnlyBooleanProperty isRunningProperty()                     { return isRunning; }
     public int getTotalFilesInBatch()                                      { return currentItems.size(); }

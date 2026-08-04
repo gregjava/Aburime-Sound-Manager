@@ -119,6 +119,108 @@ public class ParallelProcessingManager {
     private final Map<String, ModelInstancePool> modelPools;
     private final Map<String, PipelineStage> pipelineStages;
 
+    /** How many files are actively inside the pipeline right now — used by the 2s resource sampler and batch summary below. */
+    private final AtomicInteger activeFileCount = new AtomicInteger(0);
+
+    // FIX (doc-review — "log CPU every 2 seconds" / batch summary): a
+    // lightweight, purely-observational sampler, separate from
+    // startResourceMonitor()'s existing 5-second adaptive-control cycle —
+    // this one never changes any pool size, it only records a time series
+    // and accumulates the stats needed for the end-of-batch summary
+    // (mean/peak CPU, mean/peak RAM). Started/stopped once per batch by
+    // doProcessBatch (see below).
+    private ScheduledExecutorService batchSamplerExecutor;
+    private DoubleSummaryStatistics batchCpuStats = new DoubleSummaryStatistics();
+    private DoubleSummaryStatistics batchMemStats = new DoubleSummaryStatistics();
+    private volatile long batchPeakHeapMB = 0;
+    private final AtomicInteger scalingEventCount = new AtomicInteger(0);
+    private volatile int lastLoggedTarget = -1;
+
+    private void startBatchSampler() {
+        batchCpuStats = new DoubleSummaryStatistics();
+        batchMemStats = new DoubleSummaryStatistics();
+        batchPeakHeapMB = 0;
+        scalingEventCount.set(0);
+        lastLoggedTarget = -1;
+
+        batchSamplerExecutor = Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("Batch-Resource-Sampler"));
+        batchSamplerExecutor.scheduleAtFixedRate(() -> {
+            try {
+                double cpuPct = getSystemCpuLoadPercent();
+                double memPct = getSystemMemoryUsedPercent();
+                long heapMB = getUsedMemoryMB();
+                if (cpuPct >= 0) batchCpuStats.accept(cpuPct);
+                if (memPct >= 0) batchMemStats.accept(memPct);
+                batchPeakHeapMB = Math.max(batchPeakHeapMB, heapMB);
+
+                LOGGER.info("RESOURCE_SAMPLE: cpu={}% mem={}% heap={}MB activeFiles={}",
+                        cpuPct >= 0 ? String.format("%.0f", cpuPct) : "n/a",
+                        memPct >= 0 ? String.format("%.0f", memPct) : "n/a",
+                        heapMB, activeFileCount.get());
+            } catch (Exception e) {
+                LOGGER.debug("Batch resource sample failed: {}", e.getMessage());
+            }
+        }, 2, 2, TimeUnit.SECONDS);
+    }
+
+    private void stopBatchSampler() {
+        if (batchSamplerExecutor != null) {
+            batchSamplerExecutor.shutdownNow();
+            batchSamplerExecutor = null;
+        }
+    }
+
+    /**
+     * Logs the end-of-batch summary. Throughput is minutes of source audio
+     * processed per wall-clock hour. CPU/RAM figures come from the 2-second
+     * batch sampler above; "CPU idle" treats any time this batch's sampler
+     * wasn't observing >0% system CPU load as idle — a coarse measure, but
+     * a real, measured one rather than an assumption.
+     */
+    private void logBatchSummary(int filesProcessed, double totalAudioDurationSeconds, long elapsedMs) {
+        double elapsedHours = elapsedMs / 3_600_000.0;
+        double audioMinutes = totalAudioDurationSeconds / 60.0;
+        double throughputMinPerHour = elapsedHours > 0 ? audioMinutes / elapsedHours : 0;
+        double avgCpu = batchCpuStats.getCount() > 0 ? batchCpuStats.getAverage() : -1;
+        long cpuActiveMs = avgCpu >= 0 ? Math.round(elapsedMs * (avgCpu / 100.0)) : -1;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n========== Batch Summary ==========\n");
+        sb.append(String.format("Files processed:      %d%n", filesProcessed));
+        sb.append(String.format("Audio duration:       %s%n", formatDuration((long) (totalAudioDurationSeconds * 1000))));
+        sb.append(String.format("Elapsed time:          %s%n", formatDuration(elapsedMs)));
+        sb.append(String.format("Average throughput:    %.1f min audio / hour%n", throughputMinPerHour));
+        sb.append(String.format("Average CPU:           %s%n", avgCpu >= 0 ? String.format("%.1f%%", avgCpu) : "n/a"));
+        sb.append(String.format("Peak CPU:              %s%n",
+                batchCpuStats.getCount() > 0 ? String.format("%.1f%%", batchCpuStats.getMax()) : "n/a"));
+        sb.append(String.format("Average RAM:           %s%n",
+                batchMemStats.getCount() > 0 ? String.format("%.1f%%", batchMemStats.getAverage()) : "n/a"));
+        sb.append(String.format("Peak RAM:              %s%n",
+                batchMemStats.getCount() > 0 ? String.format("%.1f%%", batchMemStats.getMax()) : "n/a"));
+        sb.append(String.format("Peak Java heap:        %d MB%n", batchPeakHeapMB));
+        if (cpuActiveMs >= 0) {
+            sb.append(String.format("CPU active / idle:     %s / %s%n",
+                    formatDuration(cpuActiveMs), formatDuration(Math.max(0, elapsedMs - cpuActiveMs))));
+        }
+        sb.append(String.format("Scaling events:        %d (model-pool concurrency target changed this batch)%n",
+                scalingEventCount.get()));
+        sb.append("====================================");
+
+        String summary = sb.toString();
+        LOGGER.info(summary);
+        if (logger != null) logger.accept(summary);
+    }
+
+    private static String formatDuration(long ms) {
+        long totalSeconds = ms / 1000;
+        long h = totalSeconds / 3600;
+        long m = (totalSeconds % 3600) / 60;
+        long s = totalSeconds % 60;
+        if (h > 0) return String.format("%dh %dm %ds", h, m, s);
+        if (m > 0) return String.format("%dm %ds", m, s);
+        return String.format("%ds", s);
+    }
+
     // FIX: added — periodic CPU/heap sampling that live-adjusts each
     // model pool's target concurrency between 1 and its initial capacity,
     // instead of that capacity being a fixed decision made once at batch
@@ -391,6 +493,20 @@ public class ParallelProcessingManager {
                     pool.adjustTarget(target);
                 }
 
+                // FIX (batch summary — "Scaling events"): count a scaling
+                // event whenever the computed target concurrency actually
+                // changes from the previous cycle, so the batch summary can
+                // report how many times this batch's model concurrency was
+                // throttled up/down, instead of that only being visible by
+                // manually diffing DEBUG logs.
+                final int finalTarget = target;
+                if (lastLoggedTarget != -1 && lastLoggedTarget != finalTarget) {
+                    scalingEventCount.incrementAndGet();
+                    LOGGER.info("Adaptive scaling: model concurrency target changed {} -> {} (cpu={}%, mem={}%)",
+                            lastLoggedTarget, finalTarget, cpuLoadPct, memUsedPct);
+                }
+                lastLoggedTarget = finalTarget;
+
                 // FIX: dynamic resizing previously applied to model
                 // concurrency only — the IO/CPU/Pipeline pools were sized
                 // once at initialize() and left fixed for the rest of the
@@ -524,8 +640,26 @@ public class ParallelProcessingManager {
         safeInitialize(maxParallelFiles, transcriptionConfig.getModel());
         long startTime = System.currentTimeMillis();
         List<CompletableFuture<FileResult>> futures = new ArrayList<>();
+        double totalAudioDurationSeconds = items.stream()
+                .mapToDouble(BatchFileItem::getTotalAudioDurationSeconds)
+                .sum();
 
-        Map<FileGroup, List<BatchFileItem>> fileGroups = groupFilesByTypeAndSize(items);
+        startBatchSampler();
+        try {
+        // FIX (batch prioritization): sort by priority (HIGH before NORMAL
+        // before LOW) before grouping/dispatch. This is a best-effort
+        // ordering, not a hard guarantee — once files are grouped and
+        // submitted to the pipeline executor, several may already be
+        // running concurrently (up to maxParallelFiles at once), so a HIGH
+        // item queued after several LOW items are already mid-flight will
+        // still wait for an execution slot like anything else. What this
+        // does guarantee: among files not yet started, higher-priority ones
+        // are offered a free slot first. Collections.sort is stable, so
+        // within the same priority level, original queue order is preserved.
+        List<BatchFileItem> sortedItems = new ArrayList<>(items);
+        sortedItems.sort(Comparator.comparingInt(i -> i.getPriority().ordinal()));
+
+        Map<FileGroup, List<BatchFileItem>> fileGroups = groupFilesByTypeAndSize(sortedItems);
         LOGGER.info("Batch: {} files in {} groups", items.size(), fileGroups.size());
 
         for (Map.Entry<FileGroup, List<BatchFileItem>> entry : fileGroups.entrySet()) {
@@ -542,8 +676,9 @@ public class ParallelProcessingManager {
                     .get(24, TimeUnit.HOURS);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             LOGGER.error("Batch failed", e);
-            return new ParallelBatchResult(items.size(), 0, items.size(),
-                    System.currentTimeMillis() - startTime, true);
+            long failedDuration = System.currentTimeMillis() - startTime;
+            logBatchSummary(0, totalAudioDurationSeconds, failedDuration);
+            return new ParallelBatchResult(items.size(), 0, items.size(), failedDuration, true);
         }
 
         int completed = 0, failed = 0;
@@ -563,7 +698,11 @@ public class ParallelProcessingManager {
         successNames.forEach(result::addSuccessfulFile);
         LOGGER.info("Batch complete: {}/{} files in {}ms (heap: {}MB)",
                 completed, items.size(), duration, getUsedMemoryMB());
+        logBatchSummary(completed, totalAudioDurationSeconds, duration);
         return result;
+        } finally {
+            stopBatchSampler();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -597,19 +736,29 @@ public class ParallelProcessingManager {
                                                       FileGroup group) {
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (BatchFileItem item : items) {
-            futures.add(processFileWithPipelineParallelism(item, processingConfig, transcriptionConfig));
+            // FIX (doc-review — "Waiting in queue" timing): captured here,
+            // at the instant this file is handed off, not inside the async
+            // task — the gap between this timestamp and the task actually
+            // starting to run on pipelineExecutor IS the queue wait, which
+            // is what's needed to tell whether N "parallel" files are
+            // really running concurrently or queued behind a bottleneck.
+            long queueEnteredMs = System.currentTimeMillis();
+            futures.add(processFileWithPipelineParallelism(item, processingConfig, transcriptionConfig, queueEnteredMs));
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
     }
 
     private CompletableFuture<Void> processFileWithPipelineParallelism(BatchFileItem item,
                                                                         ProcessingConfig processingConfig,
-                                                                        TranscriptionConfig transcriptionConfig) {
+                                                                        TranscriptionConfig transcriptionConfig,
+                                                                        long queueEnteredMs) {
         return CompletableFuture.runAsync(() -> {
             File file = item.getFile();
             File preprocessed = null;
+            activeFileCount.incrementAndGet();
             try {
                 long start = System.currentTimeMillis();
+                long queueWaitMs = Math.max(0, start - queueEnteredMs);
 
                 // FIX: item.setStatus/setProgress are now called live, at
                 // every stage, on the actual BatchFileItem the UI is bound
@@ -618,20 +767,63 @@ public class ParallelProcessingManager {
                 item.setStatus("PROCESSING");
                 item.setProgress(0.0);
 
+                long preprocessStart = System.currentTimeMillis();
                 preprocessed = preprocessFile(file, processingConfig);
+                long preprocessMs = System.currentTimeMillis() - preprocessStart;
                 item.setProgress(0.3); // conversion/preprocessing done
 
-                TranscriptionResult result = transcribeSync(preprocessed, transcriptionConfig, item);
+                long transcribeWallStart = System.currentTimeMillis();
+                long preprocessedSizeMB = preprocessed.length() / (1024 * 1024);
+                TranscriptionResult result = preprocessedSizeMB > LARGE_FILE_THRESHOLD_MB
+                        ? transcribeWithSegmentation(preprocessed, transcriptionConfig, item)
+                        : transcribeSync(preprocessed, transcriptionConfig, item);
+                long transcribeWallMs = System.currentTimeMillis() - transcribeWallStart;
                 item.setProgress(0.95);
 
+                long saveStart = System.currentTimeMillis();
                 saveOutputDirectly(file, result, transcriptionConfig, processingConfig);
+                long saveMs = System.currentTimeMillis() - saveStart;
 
                 item.setProgress(1.0);
                 item.setStatus("COMPLETED");
                 item.setErrorMessage(null);
 
-                LOGGER.info("Pipeline complete for {} in {}ms",
-                        file.getName(), System.currentTimeMillis() - start);
+                long totalMs = System.currentTimeMillis() - start;
+                LOGGER.info("Pipeline complete for {} in {}ms", file.getName(), totalMs);
+
+                // FIX (timing instrumentation surfaced in UI, not just logs):
+                // assemble a structured per-file report combining Java-side
+                // stages measured here with the Python script's own
+                // "STAGE_TIMING:" lines (model load / audio load /
+                // transcription / alignment / diarization), captured via
+                // WhisperXTranscriptionService.getLastPythonStageTimingsMs()
+                // during transcribeSync(). Recorded regardless of whether the
+                // Python-side breakdown is present (older/custom user scripts
+                // without the instrumentation still get the Java-side stages).
+                FileTimingReport timingReport = new FileTimingReport(file.getName());
+                timingReport.setStage("queue_wait", queueWaitMs);
+                Long modelAcqMs = modelAcquisitionMsByItem.remove(item);
+                if (modelAcqMs != null) timingReport.setStage("model_acquisition", modelAcqMs);
+                timingReport.setStage("preprocessing", preprocessMs);
+                timingReport.setStage("transcription_wall_clock", transcribeWallMs);
+                timingReport.setStage("output_saving", saveMs);
+                timingReport.setStage("total_pipeline", totalMs);
+                Map<String, Long> pythonStages = lastPythonStageTimingsByItem.remove(item);
+                if (pythonStages != null) {
+                    pythonStages.forEach(timingReport::setStage);
+                }
+                double[] pyResource = pythonResourceUsageByItem.remove(item);
+                if (pyResource != null) {
+                    if (pyResource[0] >= 0) timingReport.setPythonPeakMemoryMb(pyResource[0]);
+                    if (pyResource[1] >= 0) timingReport.setPythonAvgCpuPercent(pyResource[1]);
+                }
+                timingReport.setPeakHeapUsedMB(getUsedMemoryMB());
+                double cpuSnapshot = getSystemCpuLoadPercent();
+                if (cpuSnapshot >= 0) {
+                    timingReport.setAvgCpuLoadPercent(cpuSnapshot);
+                }
+                recordTimingReport(timingReport);
+                if (logger != null) logger.accept(formatTimingReportBlock(timingReport));
 
                 // FIX: notify the completion callback (e.g. MainWindow ->
                 // auto-remove-completed) the instant this file is done,
@@ -644,6 +836,9 @@ public class ParallelProcessingManager {
                 item.setStatus("FAILED");
                 item.setErrorMessage(e.getMessage());
                 LOGGER.error("Pipeline failed for {}: {}", file.getName(), e.getMessage());
+                lastPythonStageTimingsByItem.remove(item);
+                modelAcquisitionMsByItem.remove(item);
+                pythonResourceUsageByItem.remove(item);
                 if (completionCallback != null) {
                     completionCallback.onFileCompleted(item, false);
                 }
@@ -654,21 +849,63 @@ public class ParallelProcessingManager {
                 // cleaned up after itself; this path silently left every
                 // preprocessed temp WAV on disk indefinitely.
                 cleanupTempFile(preprocessed);
+                activeFileCount.decrementAndGet();
             }
         }, pipelineExecutor);
     }
+
+    /** The exact per-file report format requested for the log/Terminal (doc-review item). */
+    private static String formatTimingReportBlock(FileTimingReport r) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("==================================================\n");
+        sb.append("Processing: ").append(r.getFileName()).append("\n\n");
+        sb.append(padLine("Waiting in queue", r.getStageMillis("queue_wait")));
+        sb.append(padLine("Model acquisition", r.getStageMillis("model_acquisition")));
+        sb.append(padLine("Audio/preprocessing", r.getStageMillis("preprocessing")));
+        sb.append(padLine("Model initialization", r.getStageMillis("model_load")));
+        sb.append(padLine("Whisper transcription", r.getStageMillis("transcription")));
+        sb.append(padLine("Word alignment", r.getStageMillis("alignment")));
+        sb.append(padLine("Speaker diarization", r.getStageMillis("diarization")));
+        sb.append(padLine("Subtitle generation", r.getStageMillis("subtitle_generation") >= 0 || r.getStageMillis("txt_generation") >= 0
+                ? Math.max(0, r.getStageMillis("subtitle_generation")) + Math.max(0, r.getStageMillis("txt_generation")) : -1));
+        sb.append(padLine("File writing", r.getStageMillis("output_saving")));
+        sb.append('\n');
+        sb.append(padLine("Total", r.getTotalMillis()));
+        sb.append(String.format("%-34s%s%n", "Peak memory",
+                r.getPythonPeakMemoryMb() >= 0 ? String.format("%.0f MB", r.getPythonPeakMemoryMb()) : "n/a"));
+        sb.append(String.format("%-34s%s%n", "Average CPU",
+                r.getPythonAvgCpuPercent() >= 0 ? String.format("%.1f%%", r.getPythonAvgCpuPercent()) : "n/a"));
+        sb.append("==================================================");
+        return sb.toString();
+    }
+
+    private static String padLine(String label, long ms) {
+        String value = ms >= 0 ? String.format("%.1f s", ms / 1000.0) : "n/a";
+        return String.format("%-34s%s%n", label, value);
+    }
+
+    /** Above this size, transcription is routed through {@link #transcribeWithSegmentation} instead of a single whole-file WhisperX call. */
+    private static final long LARGE_FILE_THRESHOLD_MB = 500;
 
     private File preprocessFile(File file, ProcessingConfig config) throws Exception {
         long sizeMB = file.length() / (1024 * 1024);
         long prepStart = System.currentTimeMillis();
         AudioProcessor.ProcessingResult result;
 
-        if (sizeMB > 500) {
-            LOGGER.info("Large file ({}MB) — using segmented preprocessing.", sizeMB);
-            File out = processLargeFileInSegments(file, config);
-            recordPhaseTiming("audio_preprocessing", prepStart, sizeMB);
-            return out;
-        }
+        // FIX (real gap found on review — SegmentProcessor was dead code):
+        // this used to special-case files over 500MB here, at the
+        // PREPROCESSING stage, by calling processLargeFileInSegments() —
+        // which was a stub that logged "Full data-parallel segmentation not
+        // implemented" and fell back to plain processAudioToWav(), silently
+        // discarding size as a signal entirely. Meanwhile a fully-built
+        // SegmentProcessor class (splitting, per-segment retry, resumable
+        // progress via progress.dat, orphan-directory sweeping) existed in
+        // the codebase and was never called from anywhere. Segmentation is
+        // a TRANSCRIPTION-stage decision, not a preprocessing one — this
+        // method now always just converts to WAV the normal way; large
+        // files are routed to SegmentProcessor from
+        // processFileWithPipelineParallelism (see transcribeWithSegmentation
+        // below), where the actual class already sits ready to use.
 
         // FIX: was unconditionally processAudioToWav() regardless of the
         // user's normalize/volume-boost settings — those were silently
@@ -683,13 +920,6 @@ public class ParallelProcessingManager {
             result = audioProcessor.processAudioToWav(file, config, p -> {});
             recordPhaseTiming("audio_preprocessing", prepStart, sizeMB);
         }
-        return new File(result.getOutputPath());
-    }
-
-    private File processLargeFileInSegments(File file, ProcessingConfig config) throws Exception {
-        LOGGER.warn("Full data-parallel segmentation not implemented; using standard processing for: {}",
-                file.getName());
-        AudioProcessor.ProcessingResult result = audioProcessor.processAudioToWav(file, config, p -> {});
         return new File(result.getOutputPath());
     }
 
@@ -786,6 +1016,31 @@ public class ParallelProcessingManager {
     private final ScheduledExecutorService progressTicker =
             Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("Progress-Ticker"));
 
+    /** Python stage timings captured per in-flight item, consumed by processFileWithPipelineParallelism right after transcribeSync returns. */
+    private final Map<BatchFileItem, Map<String, Long>> lastPythonStageTimingsByItem = new ConcurrentHashMap<>();
+
+    // FIX (doc-review — "Model acquisition" timing + real per-file resource
+    // usage): side-channel maps in the same style as
+    // lastPythonStageTimingsByItem above, for data transcribeSync()
+    // measures/captures but doesn't return directly.
+    private final Map<BatchFileItem, Long> modelAcquisitionMsByItem = new ConcurrentHashMap<>();
+    private final Map<BatchFileItem, double[]> pythonResourceUsageByItem = new ConcurrentHashMap<>(); // [0]=peakMemoryMb [1]=avgCpuPercent
+
+    /** Bounded, most-recent-first history of per-file timing reports, surfaced in the UI's Performance Report dialog. */
+    private final java.util.LinkedList<FileTimingReport> recentTimingReports = new java.util.LinkedList<>();
+    private static final int MAX_RECENT_TIMING_REPORTS = 100;
+
+    public synchronized java.util.List<FileTimingReport> getRecentTimingReports() {
+        return new java.util.ArrayList<>(recentTimingReports);
+    }
+
+    private synchronized void recordTimingReport(FileTimingReport report) {
+        recentTimingReports.addFirst(report);
+        while (recentTimingReports.size() > MAX_RECENT_TIMING_REPORTS) {
+            recentTimingReports.removeLast();
+        }
+    }
+
     private TranscriptionResult transcribeSync(File wavFile,
                                                TranscriptionConfig config,
                                                BatchFileItem item) {
@@ -805,7 +1060,17 @@ public class ParallelProcessingManager {
                         () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator), LOGGER));
         WhisperXTranscriptionService instance = null;
         try {
+            // FIX (doc-review — "Model acquisition" timing / "are files
+            // really running in parallel, or serialized on one shared model
+            // instance?"): times the pool.borrow() wait itself. If this
+            // consistently comes back non-trivial across a batch configured
+            // for maxParallel > 1, that's the measured, concrete answer to
+            // that question — not a guess from indirect gaps between
+            // completion timestamps in the log.
+            long acquireStart = System.currentTimeMillis();
             instance = pool.borrow();
+            modelAcquisitionMsByItem.put(item, System.currentTimeMillis() - acquireStart);
+            LOGGER.debug("Model pool '{}': {} instance(s), target {}", model, pool.size(), pool.targetConcurrency());
 
             // FIX: transcribe() already returns the fully-parsed TranscriptionResult
             // in memory — that's all we need. The old code additionally tried to
@@ -864,6 +1129,15 @@ public class ParallelProcessingManager {
             // would only ever come from single-file (non-parallel) runs.
             recordPhaseTiming(phaseName, transcribeStart, sizeMB);
 
+            // Capture the Python script's self-reported stage timings (model
+            // load, audio load, transcription, alignment, diarization) while
+            // this instance is still exclusively ours — must happen before
+            // pool.release() below, after which another thread may reuse
+            // this same instance and overwrite these values for its own file.
+            lastPythonStageTimingsByItem.put(item, instance.getLastPythonStageTimingsMs());
+            pythonResourceUsageByItem.put(item,
+                    new double[]{instance.getLastPythonPeakMemoryMb(), instance.getLastPythonAvgCpuPercent()});
+
             return result;
 
         } catch (InterruptedException e) {
@@ -871,6 +1145,72 @@ public class ParallelProcessingManager {
             throw new CompletionException("Interrupted waiting for a model instance: " + wavFile.getName(), e);
         } catch (Exception e) {
             throw new CompletionException("Transcription failed for: " + wavFile.getName(), e);
+        } finally {
+            if (instance != null) pool.release(instance);
+        }
+    }
+
+    /**
+     * FIX (real gap found on review): routes files over
+     * {@link #LARGE_FILE_THRESHOLD_MB} through the actual
+     * {@link SegmentProcessor} — splitting into segments, transcribing each
+     * with retry, and resuming from {@code progress.dat} if the app is
+     * restarted mid-file — instead of the previous behaviour, which
+     * silently ignored file size and ran the whole file through one
+     * WhisperX call regardless (`processLargeFileInSegments()` was a stub
+     * that always fell back to that; SegmentProcessor itself, despite being
+     * fully built with resume support and per-segment retry, was never
+     * called from anywhere in the pipeline).
+     *
+     * <p>Timing note: stage timings/resource usage below come from
+     * {@link SegmentProcessor#getAggregatedStageTimingsMs()} — summed
+     * across every segment actually transcribed this run (resumed/cached
+     * segments from a prior run don't contribute, since nothing was
+     * re-transcribed for them). Peak memory is the max across segments;
+     * average CPU is the mean of each segment's own average.</p>
+     */
+    private TranscriptionResult transcribeWithSegmentation(File wavFile,
+                                                            TranscriptionConfig config,
+                                                            BatchFileItem item) throws Exception {
+        String model = normalizeModelName(config.getModel());
+        ModelInstancePool pool = modelPools.computeIfAbsent(model,
+                m -> new ModelInstancePool(m, 1,
+                        () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator), LOGGER));
+        WhisperXTranscriptionService instance = null;
+        try {
+            long acquireStart = System.currentTimeMillis();
+            instance = pool.borrow();
+            modelAcquisitionMsByItem.put(item, System.currentTimeMillis() - acquireStart);
+            LOGGER.info("Large file ({}MB) — using segmented processing via SegmentProcessor for: {}",
+                    wavFile.length() / (1024 * 1024), wavFile.getName());
+
+            SegmentProcessor segmentProcessor = new SegmentProcessor(
+                    instance, new DependencyManager(), timeEstimator,
+                    (segmentIndex, totalSegments) -> LOGGER.debug(
+                            "Segment {}/{} complete for {}", segmentIndex + 1, totalSegments, wavFile.getName()));
+
+            double audioDurationSeconds = item.getTotalAudioDurationSeconds();
+            TranscriptionResult result = segmentProcessor.processWithSegments(
+                    wavFile.getAbsolutePath(), config,
+                    p -> item.setProgress(0.3 + Math.max(0.0, Math.min(1.0, p)) * 0.65),
+                    audioDurationSeconds);
+
+            // FIX (aggregation gap, closed): previously read
+            // instance.getLastPythonStageTimingsMs()/getLastPythonPeakMemoryMb()/
+            // getLastPythonAvgCpuPercent() here, which only ever reflected
+            // the LAST segment SegmentProcessor transcribed — a 20-segment
+            // file's report understated transcription/alignment/diarization
+            // time by ~20x. SegmentProcessor now sums each stage across
+            // every segment it actually transcribes this run (see
+            // SegmentProcessor.accumulateSegmentTiming/getAggregatedStageTimingsMs).
+            lastPythonStageTimingsByItem.put(item, segmentProcessor.getAggregatedStageTimingsMs());
+            pythonResourceUsageByItem.put(item,
+                    new double[]{segmentProcessor.getAggregatedPeakMemoryMb(), segmentProcessor.getAggregatedAvgCpuPercent()});
+
+            return result;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException("Interrupted during segmented transcription: " + wavFile.getName(), e);
         } finally {
             if (instance != null) pool.release(instance);
         }
@@ -990,6 +1330,7 @@ public class ParallelProcessingManager {
             resourceMonitorExecutor.shutdownNow();
             resourceMonitorExecutor = null;
         }
+        stopBatchSampler();
 
         // Signal all pools to stop accepting new work
         executors.forEach(ex -> { if (ex != null) ex.shutdownNow(); });
@@ -1228,6 +1569,9 @@ public class ParallelProcessingManager {
         }
 
         int size() { return liveCount.get(); }
+
+        /** Current live-adjusted concurrency ceiling (see {@link #adjustTarget}) — for observability/logging only. */
+        int targetConcurrency() { return concurrencyGate.getTargetPermits(); }
     }
 
     /**

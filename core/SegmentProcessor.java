@@ -67,6 +67,21 @@ public class SegmentProcessor {
 
     private Path workDir;
 
+    // FIX (aggregation gap): previously nothing in this class captured the
+    // Python-side per-segment STAGE_TIMING data at all — a caller reading
+    // transcriptionService.getLastPythonStageTimingsMs() after
+    // processWithSegments() returns only ever saw the LAST segment's
+    // numbers, silently understating a 20-segment file's real transcription/
+    // alignment/diarization time by a factor of ~20. Summed here as each
+    // segment completes (time-valued stages) or aggregated appropriately
+    // (peak memory: max across segments; CPU%: mean of per-segment means —
+    // a reasonable approximation, not a true whole-file average, since
+    // that's the finest granularity available).
+    private final Map<String, Long> aggregatedStageTimingsMs = new LinkedHashMap<>();
+    private double aggregatedPeakMemoryMb = -1;
+    private double cpuPercentSum = 0;
+    private int cpuPercentSampleCount = 0;
+
     // -------------------------------------------------------------------------
     //  Construction
     // -------------------------------------------------------------------------
@@ -85,6 +100,52 @@ public class SegmentProcessor {
         if (!orphanSweepDone) {
             orphanSweepDone = true;
             sweepOrphanedWorkDirs();
+        }
+    }
+
+    /**
+     * Sum of each Python-reported stage's time across every segment
+     * actually transcribed in the most recent {@link #processWithSegments}
+     * call. Segments resumed from a cached {@code result_N.json} (already
+     * completed in a previous run) don't contribute here — this run didn't
+     * re-transcribe them, so there's no fresh timing to add; the returned
+     * totals reflect only the work this run actually did.
+     */
+    public Map<String, Long> getAggregatedStageTimingsMs() {
+        return new LinkedHashMap<>(aggregatedStageTimingsMs);
+    }
+
+    /** Highest single-segment peak memory (MB) observed across the file, or -1 if unavailable for every segment. */
+    public double getAggregatedPeakMemoryMb() {
+        return aggregatedPeakMemoryMb;
+    }
+
+    /** Mean of each segment's own average CPU%, or -1 if unavailable for every segment. */
+    public double getAggregatedAvgCpuPercent() {
+        return cpuPercentSampleCount > 0 ? cpuPercentSum / cpuPercentSampleCount : -1;
+    }
+
+    private void resetAggregates() {
+        aggregatedStageTimingsMs.clear();
+        aggregatedPeakMemoryMb = -1;
+        cpuPercentSum = 0;
+        cpuPercentSampleCount = 0;
+    }
+
+    /** Folds one segment's Python-reported timing/resource data into the running file-level totals. Call right after a segment's transcribe() call returns (not for resumed/cached segments — there's nothing fresh to add). */
+    private void accumulateSegmentTiming() {
+        Map<String, Long> segmentStages = transcriptionService.getLastPythonStageTimingsMs();
+        for (Map.Entry<String, Long> e : segmentStages.entrySet()) {
+            aggregatedStageTimingsMs.merge(e.getKey(), e.getValue(), Long::sum);
+        }
+        double segPeakMb = transcriptionService.getLastPythonPeakMemoryMb();
+        if (segPeakMb >= 0) {
+            aggregatedPeakMemoryMb = Math.max(aggregatedPeakMemoryMb, segPeakMb);
+        }
+        double segAvgCpu = transcriptionService.getLastPythonAvgCpuPercent();
+        if (segAvgCpu >= 0) {
+            cpuPercentSum += segAvgCpu;
+            cpuPercentSampleCount++;
         }
     }
 
@@ -109,6 +170,7 @@ public class SegmentProcessor {
                                                    double audioDuration) throws Exception {
         workDir = createWorkDir(audioFile);
         LOGGER.info("Segment work dir: {}", workDir);
+        resetAggregates();
 
         // FIX: segment duration comes from config (defaults to 30 s if ≤ 0)
         int segmentDuration = config.getMaxSegmentDuration() > 0
@@ -184,6 +246,7 @@ public class SegmentProcessor {
             TranscriptionResult result = transcribeSegmentWithRetry(
                     segment, i, totalSegments, segmentConfig, segmentProgress, segmentDuration);
             long segDurationMs = System.currentTimeMillis() - segStart;
+            accumulateSegmentTiming();
 
             if (timeEstimator != null) timeEstimator.recordSegmentCompletion(fileName, segDurationMs);
 
@@ -328,6 +391,19 @@ public class SegmentProcessor {
         }
     }
 
+    /**
+     * FIX (doc-review item 10): previously accumulated
+     * {@code timeOffset += res.getDuration()} for every segment — but
+     * FFmpeg's {@code -segment_time} cuts don't land on exact boundaries
+     * (29.98s / 30.01s / 29.95s instead of a clean 30s each time), so
+     * summing each segment's *reported* duration drifts the merged
+     * timestamps further out of sync with the real audio the longer a file
+     * runs; on a long file with many segments this becomes a visible
+     * subtitle-sync error by the end. Anchoring to the actual END of the
+     * last real transcribed segment instead is self-correcting — it
+     * reflects where WhisperX itself placed the last word, not an
+     * assumption about how long the cut was supposed to be.
+     */
     private TranscriptionResult mergeResults(List<TranscriptionResult> results) {
         if (results.isEmpty()) {
             return new TranscriptionResult("", "unknown", 0, Collections.emptyList());
@@ -340,14 +416,24 @@ public class SegmentProcessor {
 
         for (TranscriptionResult res : results) {
             fullText.append(res.getText());
+            boolean addedAny = false;
             for (TranscriptionSegment seg : res.getSegments()) {
                 merged.add(new TranscriptionSegment(
                         seg.getStart() + timeOffset,
                         seg.getEnd()   + timeOffset,
                         seg.getText(),
                         seg.getConfidence()));
+                addedAny = true;
             }
-            timeOffset += res.getDuration();
+            if (addedAny) {
+                timeOffset = merged.get(merged.size() - 1).getEnd();
+            } else {
+                // No segments came back for this chunk (e.g. WhisperX
+                // detected silence) — nothing to anchor to, so fall back to
+                // its reported duration just to keep advancing the offset
+                // roughly correctly before the next chunk's segments land.
+                timeOffset += res.getDuration();
+            }
         }
 
         return new TranscriptionResult(fullText.toString(), language, timeOffset, merged);

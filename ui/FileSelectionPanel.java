@@ -1705,6 +1705,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
        MenuItem selectAllItem = new MenuItem("Select All");
        selectAllItem.setOnAction(e -> tableView.getSelectionModel().selectAll());
 
+       Menu priorityMenu = new Menu("Set Priority");
+       MenuItem highPriorityItem = new MenuItem("🔴 High");
+       highPriorityItem.setOnAction(e -> setSelectedPriority(tableView, BatchFileItem.Priority.HIGH));
+       MenuItem normalPriorityItem = new MenuItem("⚪ Normal");
+       normalPriorityItem.setOnAction(e -> setSelectedPriority(tableView, BatchFileItem.Priority.NORMAL));
+       MenuItem lowPriorityItem = new MenuItem("🔵 Low");
+       lowPriorityItem.setOnAction(e -> setSelectedPriority(tableView, BatchFileItem.Priority.LOW));
+       priorityMenu.getItems().addAll(highPriorityItem, normalPriorityItem, lowPriorityItem);
+
        contextMenu.getItems().addAll(
            removeSelectedItem,
            removeAllItem,
@@ -1712,10 +1721,28 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
            moveToTopItem,
            moveToBottomItem,
            new SeparatorMenuItem(),
+           priorityMenu,
+           new SeparatorMenuItem(),
            selectAllItem
        );
 
        tableView.setContextMenu(contextMenu);
+   }
+
+   /**
+    * Set priority on every currently-selected row. Only affects scheduling
+    * order for files still PENDING when the next batch starts — priority
+    * doesn't preempt a file already mid-processing.
+    */
+   private void setSelectedPriority(TableView<BatchFileItem> tableView, BatchFileItem.Priority priority) {
+       List<BatchFileItem> selected = new ArrayList<>(tableView.getSelectionModel().getSelectedItems());
+       for (BatchFileItem item : selected) {
+           item.setPriority(priority);
+       }
+       if (!selected.isEmpty()) {
+           log("🎯 Set priority to " + priority + " for " + selected.size() + " file(s)");
+           tableView.refresh();
+       }
    }
 
    /**

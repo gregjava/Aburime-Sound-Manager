@@ -157,7 +157,21 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     @Override
     public void onFileCompleted(BatchFileItem item, boolean wasSuccessful) {
         Platform.runLater(() -> {
+            // FIX: this is the actual root cause of the "done count never
+            // updates" bug, which survived an earlier fix to how ControlPanel
+            // *consumed* countedCompleted/countedFailed. The producer side was
+            // still wrong: countedCompleted/countedFailed used to be populated
+            // by scanning batchFiles once a second in the timeline tick below.
+            // But removeItemFromBatchQueue() (called a few lines down) removes
+            // the item from batchFiles immediately, via its own Platform.runLater
+            // — which reliably beats the once-per-second tick to the punch. By
+            // the time the tick's scan ran, the completed item was routinely
+            // already gone from the list, so it was never added to
+            // countedCompleted at all. onFileCompleted() fires exactly once per
+            // file, synchronously with the real completion event — count here,
+            // not by racing a 1-second poll against an immediate removal.
             if (wasSuccessful) {
+                countedCompleted.add(item);
                 log("✅ File completed successfully: " + item.getFileName());
                 // FIX: was calling removeItemFromBatchQueue(item) unconditionally
                 // for both success AND failure. removeItemFromBatchQueue() itself
@@ -167,6 +181,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 // so they can be investigated/retried).
                 fileSelectionPanel.removeItemFromBatchQueue(item);
             } else {
+                countedFailed.add(item);
                 log("❌ File failed processing: " + item.getFileName());
             }
         });
@@ -716,10 +731,13 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         watchFolderMenuItem = new MenuItem("📁 Watch Folder...");
         watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
 
+        MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
+        performanceReportItem.setOnAction(e -> showPerformanceReportDialog());
+
         toolsMenu.getItems().addAll(
             batchSettingsItem, whisperSettingsItem, audioSettingsItem,
             new SeparatorMenuItem(), clearTimeDataItem,
-            new SeparatorMenuItem(), watchFolderMenuItem
+            new SeparatorMenuItem(), watchFolderMenuItem, performanceReportItem
         );
 
         Menu helpMenu = new Menu("Help");
@@ -1114,6 +1132,88 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.showAndWait();
     }
 
+    /**
+     * Show a table of recent per-file stage-timing reports — model load,
+     * audio load, transcription, alignment, diarization (from the Python
+     * script's STAGE_TIMING lines), plus preprocessing/output-saving/total
+     * (measured in Java) and a peak-heap/CPU snapshot. This is the "surfaced
+     * in the UI, not just the log file" requirement: previously this data
+     * either didn't exist at all (no Python-side timing instrumentation) or
+     * only ever reached a human as scattered log lines.
+     */
+    private void showPerformanceReportDialog() {
+        java.util.List<FileTimingReport> reports = batchProcessor.getRecentTimingReports();
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Performance Report");
+        dialog.setHeaderText(reports.isEmpty()
+                ? "No files processed yet this session"
+                : "Stage-by-stage timing for the last " + reports.size() + " file(s) processed");
+
+        TableView<FileTimingReport> table = new TableView<>();
+        table.setItems(FXCollections.observableArrayList(reports));
+        table.setPrefSize(900, 400);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+
+        table.getColumns().add(makeReportColumn("File", 220, r -> r.getFileName()));
+        table.getColumns().add(makeMillisColumn("Queue Wait", "queue_wait"));
+        table.getColumns().add(makeMillisColumn("Model Acq.", "model_acquisition"));
+        table.getColumns().add(makeMillisColumn("Model Load", "model_load"));
+        table.getColumns().add(makeMillisColumn("Audio Load", "audio_load"));
+        table.getColumns().add(makeMillisColumn("Preprocessing", "preprocessing"));
+        table.getColumns().add(makeMillisColumn("Transcription", "transcription"));
+        table.getColumns().add(makeMillisColumn("Alignment", "alignment"));
+        table.getColumns().add(makeMillisColumn("Diarization", "diarization"));
+        table.getColumns().add(makeReportColumn("Subtitle Gen", 100, r -> {
+            long srt = r.getStageMillis("subtitle_generation");
+            long txt = r.getStageMillis("txt_generation");
+            long total = Math.max(0, srt) + Math.max(0, txt);
+            return (srt >= 0 || txt >= 0) ? String.format("%.1fs", total / 1000.0) : "—";
+        }));
+        table.getColumns().add(makeMillisColumn("Output Saving", "output_saving"));
+        table.getColumns().add(makeMillisColumn("Total", "total_pipeline"));
+        // FIX: previously showed only a single JVM-wide system-CPU snapshot
+        // taken when the file finished (labelled "approximate" in the note
+        // below) and this JVM's own heap — neither is the actual resource
+        // usage of the transcription work the user asked to see. These two
+        // columns are the real thing: sampled throughout the whole
+        // transcribe() call by the Python script itself (RSS memory and
+        // CPU% of the Python process and any children it spawns).
+        table.getColumns().add(makeReportColumn("Peak Mem (MB)", 100,
+                r -> r.getPythonPeakMemoryMb() >= 0 ? String.format("%.0f", r.getPythonPeakMemoryMb()) : "—"));
+        table.getColumns().add(makeReportColumn("Avg CPU %", 90,
+                r -> r.getPythonAvgCpuPercent() >= 0 ? String.format("%.0f%%", r.getPythonAvgCpuPercent()) : "—"));
+
+        Label note = new Label(
+                "Peak Mem / Avg CPU are measured by the Python transcription process itself across the whole file "
+                + "(\u2014 if psutil isn't installed in that Python environment). Stages missing from a script "
+                + "without STAGE_TIMING instrumentation (e.g. a custom override script) also show as \u2014.");
+        note.setWrapText(true);
+        note.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+
+        VBox content = new VBox(10, table, note);
+        content.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        dialog.showAndWait();
+    }
+
+    private TableColumn<FileTimingReport, String> makeMillisColumn(String title, String stageKey) {
+        return makeReportColumn(title, 100, r -> {
+            long ms = r.getStageMillis(stageKey);
+            return ms >= 0 ? String.format("%.1fs", ms / 1000.0) : "—";
+        });
+    }
+
+    private TableColumn<FileTimingReport, String> makeReportColumn(
+            String title, double width, java.util.function.Function<FileTimingReport, String> extractor) {
+        TableColumn<FileTimingReport, String> col = new TableColumn<>(title);
+        col.setPrefWidth(width);
+        col.setCellValueFactory(cellData ->
+                new javafx.beans.property.SimpleStringProperty(extractor.apply(cellData.getValue())));
+        return col;
+    }
+
     private void applyCSSIfAvailable(Scene scene) {
         String defaultStyle = "-fx-font-family: 'Segoe UI', 'Roboto', 'Arial';";
         scene.getRoot().setStyle(defaultStyle);
@@ -1361,23 +1461,18 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 // refreshes the table), and the overall bar all sat frozen
                 // until the batch finished.
                 //
-                // FIX: tally completed/failed into the identity sets BEFORE
-                // any removal happens below, so cumulative counts capture
-                // every item that reached COMPLETED/FAILED at least once —
-                // this has to happen first, or an item removed in this same
-                // tick would never get counted.
+                // FIX: COMPLETED/FAILED are no longer tallied here — that
+                // scan raced against onFileCompleted()'s immediate removal
+                // and routinely missed items (see the fix note on
+                // onFileCompleted() for the full explanation). Counting now
+                // happens exactly once, synchronously, at the real completion
+                // event. CANCELLED is still scanned here since cancellation
+                // doesn't go through onFileCompleted() at all (BatchProcessor.cancel()
+                // resets items to PENDING rather than firing the completion
+                // callback), so there's no equivalent single authoritative
+                // signal to hook for it.
                 for (BatchFileItem item : batchFiles) {
-                    if ("COMPLETED".equals(item.getStatus())) countedCompleted.add(item);
-                    else if ("FAILED".equals(item.getStatus())) countedFailed.add(item);
-                    // FIX: CANCELLED (a real ProcessingStatus value, confirmed against
-                    // ProcessingStatus.java) was never added to either set here, so a
-                    // cancelled item was permanently counted as "pending" in
-                    // livePending below — it would never clear, and the live pending
-                    // count would never reach zero for a batch containing a
-                    // cancelled item. Counting it alongside FAILED (terminal,
-                    // non-success) rather than COMPLETED, so it doesn't inflate the
-                    // "succeeded" count.
-                    else if ("CANCELLED".equals(item.getStatus())) countedFailed.add(item);
+                    if ("CANCELLED".equals(item.getStatus())) countedFailed.add(item);
                 }
                 int liveCompleted = countedCompleted.size();
                 int liveFailed = countedFailed.size();
@@ -1543,7 +1638,25 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
             Platform.runLater(() -> {
                 controlPanel.updateDependencyStatus(ffmpegStatus, whisperStatus);
-                
+
+                // FIX (reapplied — contradictory messaging + over-blocking):
+                // log the authoritative checks first, in the order they
+                // actually happened — "Checking FFmpeg visibility... FFmpeg
+                // verified. FFprobe verified." — instead of interleaving a
+                // ❌ from the advisory Python-visibility probe ahead of the
+                // ✅ from the real FFmpeg check below. Previously the ❌
+                // line for ffmpegVisibleToWhisperX appeared BEFORE the ✅
+                // line for ffmpegStatus, even though ffmpegStatus is
+                // authoritative and already known true at this point —
+                // reading as "FFmpeg is installed but is not visible"
+                // immediately followed by "FFmpeg found", exactly the
+                // confusing sequence reported.
+                log("Checking FFmpeg visibility...");
+                log("✅ " + ffmpegStatus.getMessage());
+                if (ffprobeStatus != null) {
+                    log((ffprobeStatus.isAvailable() ? "✅ " : "❌ ") + ffprobeStatus.getMessage());
+                }
+
                 if (!ffmpegStatus.isAvailable()) {
                     controlPanel.setProcessingEnabled(false);
                     if (ffmpegStatus.hasInstallationHint()) {
@@ -1563,22 +1676,31 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                     if (whisperStatus.hasInstallationHint()) {
                         log("💡 INFO: " + whisperStatus.getInstallationHint());
                     }
-                } else if (ffmpegVisibleToWhisperX != null && !ffmpegVisibleToWhisperX.isAvailable()) {
-                    controlPanel.setProcessingEnabled(false);
-                    log("❌ " + ffmpegVisibleToWhisperX.getMessage());
-                    if (ffmpegVisibleToWhisperX.hasInstallationHint()) {
-                        log("💡 INFO: " + ffmpegVisibleToWhisperX.getInstallationHint());
+                }
+
+                log("✅ " + whisperStatus.getMessage());
+
+                // FIX (reapplied): this is an ADVISORY check only —
+                // DependencyManager's own comment on
+                // checkFFmpegVisibleToWhisperX() states it "has been seen to
+                // report 'not visible' immediately before the actual
+                // transcription run ... succeeds moments later" and is
+                // explicitly "not a guarantee of failure". Disabling
+                // processing on it (the previous behaviour) blocked users
+                // from transcribing on setups where it would have worked
+                // fine. It's now reported as a heads-up (⚠️, not ❌) and
+                // never blocks the Start Processing button.
+                if (ffmpegVisibleToWhisperX != null) {
+                    if (ffmpegVisibleToWhisperX.isAvailable()) {
+                        log("✅ " + ffmpegVisibleToWhisperX.getMessage());
+                    } else {
+                        log("⚠️ " + ffmpegVisibleToWhisperX.getMessage());
+                        if (ffmpegVisibleToWhisperX.hasInstallationHint()) {
+                            log("💡 INFO: " + ffmpegVisibleToWhisperX.getInstallationHint());
+                        }
                     }
                 }
-                
-                log("✅ " + ffmpegStatus.getMessage());
-                if (ffprobeStatus != null) {
-                    log((ffprobeStatus.isAvailable() ? "✅ " : "❌ ") + ffprobeStatus.getMessage());
-                }
-                log("✅ " + whisperStatus.getMessage());
-                if (ffmpegVisibleToWhisperX != null && ffmpegVisibleToWhisperX.isAvailable()) {
-                    log("✅ " + ffmpegVisibleToWhisperX.getMessage());
-                }
+
                 log("🎉 Dependency check complete.");
             });
             
@@ -1658,10 +1780,23 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                              : "⚡ Starting batch...");
 
         // Wire real-time progress bar: fires on every file completion/failure
+        // FIX (done-count bug, reapplied): this called the 3-arg
+        // ControlPanel.updateProgress(completed, failed, total), which only
+        // updates the progress bar and percentage label — it never touches
+        // detailedStatusLabel, the "📊 Queue: N total | ... | ✅ N done |
+        // ❌ N failed" text in the Ready to Process section. That text was
+        // ONLY ever refreshed by the 1-second setupTimeUpdater() polling
+        // Timeline, which lags up to 1s behind what the Terminal shows
+        // immediately, and can miss the very last file of a batch entirely
+        // since finishBatchProcessing() stops the timeline essentially the
+        // same instant the final completion callback fires. Calling the
+        // 4-arg overload here makes the "done" count update immediately, on
+        // every single completion, independent of the polling timeline.
         batchProcessor.setStatisticsCallback(stats -> {
             // BatchProcessor already wraps this in Platform.runLater
             if (controlPanel != null) {
                 controlPanel.updateProgress(
+                    batchFiles,
                     stats.getCompletedFiles(),
                     stats.getFailedFiles(),
                     stats.getTotalFiles()

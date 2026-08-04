@@ -16,7 +16,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
@@ -52,6 +51,78 @@ import java.util.HashMap;
 public class WhisperXTranscriptionService implements TranscriptionService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WhisperXTranscriptionService.class);
+
+    /**
+     * Per-stage wall-clock time (milliseconds) reported by the Python
+     * script's {@code STAGE_TIMING:<stage>:<seconds>} log lines for the
+     * most recently completed {@link #transcribe} call on this instance.
+     * Populated live as output streams in, read by the caller immediately
+     * after {@link #transcribe} returns — safe because
+     * {@code ModelInstancePool} guarantees exclusive use of a given
+     * instance between {@code borrow()} and {@code release()}, so there's
+     * no cross-file interference despite this being instance state rather
+     * than a return value (changing {@code transcribe}'s return type would
+     * ripple through every caller for comparatively little benefit).
+     */
+    private final Map<String, Long> lastPythonStageTimingsMs = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // FIX: peak_memory_mb and avg_cpu_percent are the two STAGE_TIMING keys
+    // that are NOT second-valued durations (they're megabytes and a
+    // percentage respectively) — parseStageTimingLine() was previously
+    // dumping every matched key into lastPythonStageTimingsMs via
+    // Math.round(value * 1000), which is correct for turning seconds into
+    // milliseconds but silently corrupts these two: a real peak of 412.3MB
+    // was being stored as "412300" (as if it were 412.3 *seconds*, i.e.
+    // ~6.9 minutes), and an average CPU of 23.4% became "23400". Anything
+    // that later rendered these two keys via the generic ms-stage path
+    // would have shown wildly wrong numbers. They're captured here instead,
+    // at their real scale, with their own accessors.
+    private volatile double lastPythonPeakMemoryMb = -1;
+    private volatile double lastPythonAvgCpuPercent = -1;
+
+    private static final java.util.regex.Pattern STAGE_TIMING_PATTERN =
+            java.util.regex.Pattern.compile("STAGE_TIMING:([a-zA-Z_]+):(-?[0-9.]+)");
+
+    private void parseStageTimingLine(String line) {
+        java.util.regex.Matcher m = STAGE_TIMING_PATTERN.matcher(line);
+        if (m.find()) {
+            try {
+                String stage = m.group(1);
+                double value = Double.parseDouble(m.group(2));
+                if ("peak_memory_mb".equals(stage)) {
+                    lastPythonPeakMemoryMb = value;
+                } else if ("avg_cpu_percent".equals(stage)) {
+                    lastPythonAvgCpuPercent = value;
+                } else {
+                    lastPythonStageTimingsMs.put(stage, Math.round(value * 1000));
+                }
+            } catch (NumberFormatException e) {
+                LOGGER.debug("Could not parse STAGE_TIMING line: {}", line);
+            }
+        }
+    }
+
+    /** Peak RSS memory (MB) of the Python process (+ any children) during the most recent {@link #transcribe} call, or -1 if psutil wasn't available in that venv. */
+    public double getLastPythonPeakMemoryMb() {
+        return lastPythonPeakMemoryMb;
+    }
+
+    /** Average CPU utilisation (%) of the Python process (+ any children) during the most recent {@link #transcribe} call, or -1 if psutil wasn't available in that venv. */
+    public double getLastPythonAvgCpuPercent() {
+        return lastPythonAvgCpuPercent;
+    }
+
+    /**
+     * Stage timings (milliseconds) from the most recently completed
+     * {@link #transcribe} call on this instance — e.g. keys
+     * {@code model_load}, {@code audio_load}, {@code transcription},
+     * {@code alignment}, {@code diarization}, {@code total}. Empty if the
+     * Python script didn't emit any (e.g. an older script without this
+     * instrumentation, or the call failed before any stage completed).
+     */
+    public Map<String, Long> getLastPythonStageTimingsMs() {
+        return new java.util.LinkedHashMap<>(lastPythonStageTimingsMs);
+    }
 
     private final DependencyManager dependencyManager;
     private final Gson gson;
@@ -502,6 +573,24 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     //  Model management
     // -------------------------------------------------------------------------
 
+    /**
+     * FIX (item 4 — no online downloads, reapplied): this method used to
+     * fall through, on any local-lookup miss, into an unbounded
+     * {@code while(true)} retry loop calling {@link #attemptModelDownload}.
+     * Two problems: (1) {@code attemptModelDownload} is a stub that always
+     * returns {@code false} and never actually downloads anything, so a
+     * genuinely missing model hung the app in an exponential-backoff retry
+     * loop (capped at 300s between attempts) forever, with no actionable
+     * error; (2) even a working implementation would silently reach out to
+     * the network and pull multi-hundred-MB model files — expensive on a
+     * metered/limited connection, and something this app must never do
+     * without being asked.
+     *
+     * <p>This app now ONLY ever uses models the user has installed manually.
+     * If a model isn't found in any of the local search locations, this
+     * fails immediately with a message that says exactly where to put it —
+     * no network call is made, ever.</p>
+     */
     private void ensureModelAvailable(String modelName, String modelType,
                                       AudioProcessor.ProgressCallback progressCallback)
             throws ModelDownloadException, Exception {
@@ -511,64 +600,32 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             return;
         }
 
-        // FIX: if the model is locally available, just mark it as valid and return
         if (isModelLocallyAvailable(modelName, modelType)) {
             LOGGER.info("✓ Model '{}' found locally – marking as valid.", modelName);
-            // This will register the model and mark it as downloaded
             if (validateLocalModel(modelName, modelType)) {
                 return;
             }
         }
 
-        // Only then attempt download
-        LOGGER.info("Model '{}' not found locally – preparing download.", modelName);
-        
-        if (progressCallback instanceof AudioProcessor.StageAwareCallback stageAware) {
-            stageAware.onStageStart("Downloading Model", 30.0);
-        }
+        String message = String.format(
+                "Model '%s' is not installed locally, and this app does not download models "
+              + "automatically.%n%nPlace the model files in one of:%n"
+              + "  - %s%n"
+              + "  - %s%n%n"
+              + "(HuggingFace faster-whisper cache layout: a folder named "
+              + "'models--Systran--faster-whisper-%s' containing a 'snapshots' subfolder "
+              + "with the model's .bin/.safetensors files.)%n%n"
+              + "To install a model manually: download it once on any machine with network "
+              + "access (e.g. `huggingface-cli download Systran/faster-whisper-%s`), then copy "
+              + "that folder into one of the paths above.",
+                modelName,
+                modelManager.getStableCacheDir().resolve("models--Systran--faster-whisper-" + modelName),
+                Paths.get(System.getProperty("user.home"), ".cache", "huggingface", "hub",
+                        "models--Systran--faster-whisper-" + modelName.replace("-", "--")),
+                modelName, modelName);
 
-        if (!testNetworkConnectivity()) {
-            throw new ModelDownloadException(modelName,
-                    "No internet connection to download model", "network");
-        }
-
-        showModelCacheStatus();
-
-        int attemptCount = 0;
-        while (true) {
-            if (Thread.currentThread().isInterrupted()) {
-                throw new ModelDownloadException(modelName, "Download interrupted", "interrupted");
-            }
-            attemptCount++;
-            try {
-                LOGGER.info("Model download attempt {}/∞ for '{}'", attemptCount, modelName);
-                if (attemptModelDownload(modelName, modelType, attemptCount)) {
-                    LOGGER.info("Model '{}' downloaded on attempt {}.", modelName, attemptCount);
-                    break;
-                }
-            } catch (Exception e) {
-                String errorType = classifyError(e);
-                LOGGER.warn("Download attempt {} failed [{}]: {}", attemptCount, errorType, e.getMessage());
-                if (isPermanentError(e)) {
-                    LOGGER.error("Permanent error — aborting retries.");
-                    throw new ModelDownloadException(modelName,
-                            "Permanent error: " + e.getMessage(), errorType, e);
-                }
-            }
-            int delay = calculateExponentialDelay(attemptCount);
-            LOGGER.info("Waiting {}s before next retry…", delay);
-            try {
-                Thread.sleep(delay * 1000L);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new ModelDownloadException(modelName, "Download interrupted", "interrupted", ie);
-            }
-        }
-        showModelCacheStatus();
-    }
-
-    private int calculateExponentialDelay(int attempt) {
-        return (int) Math.max(1, Math.min(Math.pow(2, attempt - 1), 300));
+        LOGGER.error(message);
+        throw new ModelDownloadException(modelName, message, "not_installed_locally");
     }
 
     // -------------------------------------------------------------------------
@@ -706,6 +763,17 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             StringBuilder combinedLog = new StringBuilder();
             AtomicBoolean cancelled = new AtomicBoolean(false);
 
+            // FIX: surfaces the Python script's per-stage timing (model_load,
+            // audio_load, transcription, alignment, diarization, total) up to
+            // Java instead of it only existing inside the log file. Cleared
+            // per call so a caller reading this after transcribe() returns
+            // gets exactly this invocation's numbers, not a stale/merged
+            // value from a previous file processed by the same pooled
+            // instance.
+            lastPythonStageTimingsMs.clear();
+            lastPythonPeakMemoryMb = -1;
+            lastPythonAvgCpuPercent = -1;
+
             // FIX: progress-parsing callback fed through to the overall bar so
             // the bar advances in real time during a long single-file transcription.
             Consumer<String> outputConsumer = line -> {
@@ -720,6 +788,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
                 if (parsed >= 0 && progressCallback != null) {
                     progressCallback.updateProgress(parsed);
                 }
+                parseStageTimingLine(line);
             };
 
             // Build environment: token + standard memory/UTF-8 overrides
@@ -1048,45 +1117,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
-    private boolean attemptModelDownload(String modelName, String modelType, int attemptNumber)
-            throws Exception {
-        // Identical to original — see original WhisperXTranscriptionService.java
-        LOGGER.info("Downloading model '{}' attempt {}", modelName, attemptNumber);
-        return false;   // placeholder — copy full implementation from original
-    }
-
-    private boolean testNetworkConnectivity() {
-        try {
-            InetAddress address = InetAddress.getByName("huggingface.co");
-            return address.isReachable(5000); // 5 second timeout
-        } catch (IOException e) {
-            LOGGER.debug("Network test failed: {}", e.getMessage());
-            return false;
-        }
-    }
-
-    private String classifyError(Exception e) {
-        if (e.getMessage() == null) return "unknown";
-        String msg = e.getMessage().toLowerCase();
-        if (msg.contains("dns") || msg.contains("unknown host")) return "dns";
-        if (msg.contains("proxy"))   return "proxy";
-        if (msg.contains("timeout")) return "timeout";
-        if (msg.contains("corrupt") || msg.contains("hash")) return "corrupted";
-        return "network";
-    }
-
-    private boolean isPermanentError(Exception e) {
-        if (e.getMessage() == null) return false;
-        String msg = e.getMessage().toLowerCase();
-        return msg.contains("401") || msg.contains("403") || msg.contains("not found")
-                || msg.contains("does not exist");
-    }
-
     private List<String> buildWhisperXCommand(Path scriptFile, String audioFilePath,
                                               Path outputDir, TranscriptionConfig config,
                                               String modelName) {
-        // Builds the command to invoke the WhisperX Python script.
-        // Full implementation identical to original — copy from original file.
         List<String> cmd = new ArrayList<>();
         // FIX: use the venv-resolved interpreter instead of bare "python", which
         // Windows resolves via PATH and typically picks the wrong installation.
@@ -1098,9 +1131,36 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         cmd.add("--model");
         // modelName is already normalised by normaliseModelName() — no alias mapping needed here.
         cmd.add(modelName);
+
+        // FIX: parseWhisperXOutput() only ever reads the *.json file this
+        // script writes — the SRT/TXT files it can also generate are never
+        // read by Java (TranscriptionOutputWriter builds its own SRT/TXT
+        // from the parsed TranscriptionResult) and get deleted moments
+        // later by cleanupTempDir(). Requesting json-only avoids the wasted
+        // work of formatting subtitle files that are immediately discarded.
+        cmd.add("--output-format");
+        cmd.add("json");
+
+        // FIX (reapplied): --language was never passed, so the script always
+        // ran with language=None (auto-detect) regardless of user config.
+        if (config.getLanguage() != null && !config.getLanguage().isBlank()
+                && !"auto".equalsIgnoreCase(config.getLanguage())) {
+            cmd.add("--language");
+            cmd.add(config.getLanguage());
+        }
+
+        // FIX (reapplied): --diarize (the flag the script's
+        // `if diarize and hf_token:` check actually looks at) was never
+        // sent — only --hf-token was, on its own. Since the script defaults
+        // diarize=False (argparse store_true) with no way to infer it from
+        // the token's mere presence, diarization never ran even when a
+        // token was supplied and the user had enabled it. Both must be
+        // sent together.
         if (hfToken != null && !hfToken.isBlank() && config.isDiarizeEnabled()) {
+            cmd.add("--diarize");
             cmd.add("--hf-token");
             cmd.add(hfToken);
+            cmd.add("--include-speakers");
         }
         return cmd;
     }
@@ -1179,14 +1239,23 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     }
 
     private String buildFallbackTranscriptionScript(TranscriptionConfig config, String modelName) {
-        return "import sys, json\n"
+        // FIX: this fallback previously had no offline-mode enforcement at
+        // all, unlike the main transcribe.py — meaning if the classpath
+        // resource ever went missing, this path would happily fall back to
+        // downloading models, silently reintroducing the exact behavior the
+        // user explicitly asked to disable. It's just a last-resort fallback
+        // (should rarely execute — the classpath resource should always be
+        // present in a real build), but "rarely" isn't "never", so it gets
+        // the same HF_HUB_OFFLINE enforcement as the real script.
+        return "import sys, json, os\n"
+                + "os.environ.setdefault('HF_HUB_OFFLINE', '1')\n"
+                + "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')\n"
                 + "import whisperx\n"
                 + "audio_file = sys.argv[1]\n"
                 + "output_dir = sys.argv[sys.argv.index('--output-dir') + 1]\n"   // ← fixed: hyphen
                 + "model = whisperx.load_model('" + modelName + "', device='cpu', compute_type='int8')\n"
                 + "audio = whisperx.load_audio(audio_file)\n"
                 + "result = model.transcribe(audio, batch_size=16)\n"
-                + "import os\n"
                 + "out = os.path.join(output_dir, 'result.json')\n"
                 + "with open(out, 'w') as f:\n"
                 + "    json.dump(result, f)\n"

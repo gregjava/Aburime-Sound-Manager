@@ -30,6 +30,10 @@ import java.io.File;
  * referenced them.</p>
  */
 public class BatchFileItem {
+
+    /** Simple three-level priority — higher-priority pending files are processed first. */
+    public enum Priority { HIGH, NORMAL, LOW }
+
     private final File file;
     private final SimpleStringProperty status;
     private final SimpleDoubleProperty progress;
@@ -37,6 +41,7 @@ public class BatchFileItem {
     private String errorMessage;
     private long startTime = 0;
     private volatile double totalAudioDurationSeconds = 0.0;
+    private volatile Priority priority = Priority.NORMAL;
 
     public BatchFileItem(File file) {
         this.file = file;
@@ -68,6 +73,9 @@ public class BatchFileItem {
     public void setTotalAudioDurationSeconds(double totalAudioDurationSeconds) {
         this.totalAudioDurationSeconds = totalAudioDurationSeconds;
     }
+
+    public Priority getPriority() { return priority; }
+    public void setPriority(Priority priority) { this.priority = priority != null ? priority : Priority.NORMAL; }
 
     @Override
     public String toString() {
