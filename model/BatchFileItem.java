@@ -82,4 +82,10 @@ public class BatchFileItem {
         return String.format("BatchFileItem{file=%s, status=%s, progress=%.2f}",
                            file.getName(), getStatus(), getProgress());
     }
+    
+    private volatile double individualProgress = 0.0;
+
+    /** Fine-grained progress (0.0–1.0) within the current stage, distinct from the coarse pipeline-stage progress the existing progress property tracks. Used by BatchProgressAggregator for real-time overall-batch percentage. */
+    public double getIndividualProgress() { return individualProgress; }
+    public void setIndividualProgress(double individualProgress) { this.individualProgress = individualProgress; }
 }

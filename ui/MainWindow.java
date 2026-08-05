@@ -111,6 +111,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     // FIX (watch-folder feature): tracks the active FolderWatcher (if any) so
     // it can be toggled off from the same menu item and cleanly stopped on exit.
     private FolderWatcher folderWatcher;
+    private audiomanager.core.RestApiServer restApiServer;
     private Thread folderWatcherThread;
     private MenuItem watchFolderMenuItem;
     
@@ -761,6 +762,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
         watchFolderMenuItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+W"));
 
+        MenuItem restApiMenuItem = new MenuItem("🌐 Start REST API...");
+        restApiMenuItem.setOnAction(e -> toggleRestApi(restApiMenuItem));
+
         MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
         performanceReportItem.setOnAction(e -> showPerformanceReportDialog());
         performanceReportItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+P"));
@@ -768,7 +772,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         toolsMenu.getItems().addAll(
             batchSettingsItem, whisperSettingsItem, audioSettingsItem,
             new SeparatorMenuItem(), clearTimeDataItem,
-            new SeparatorMenuItem(), watchFolderMenuItem, performanceReportItem
+            new SeparatorMenuItem(), watchFolderMenuItem, restApiMenuItem, performanceReportItem
         );
 
         // FIX (UI improvement — dark mode): a best-effort dark theme. This
@@ -1238,6 +1242,60 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         new audiomanager.ui.PerformanceReportDialog().show(batchProcessor.getRecentTimingReports());
     }
 
+    /**
+     * Starts or stops the REST API (see {@link audiomanager.core.RestApiServer}
+     * for scope — localhost-only, uses whatever settings are currently
+     * configured in this window). Prompts for a port on first start.
+     */
+    private void toggleRestApi(MenuItem menuItem) {
+        if (restApiServer != null && restApiServer.isRunning()) {
+            restApiServer.stop();
+            restApiServer = null;
+            menuItem.setText("🌐 Start REST API...");
+            log("🌐 REST API stopped.");
+            return;
+        }
+
+        javafx.scene.control.TextInputDialog portDialog = new javafx.scene.control.TextInputDialog("8756");
+        portDialog.setTitle("Start REST API");
+        portDialog.setHeaderText("Start the local REST API for headless/scripted operation.\n"
+                + "Binds to 127.0.0.1 only — not reachable from other machines.");
+        portDialog.setContentText("Port:");
+        java.util.Optional<String> portInput = portDialog.showAndWait();
+        if (portInput.isEmpty()) return;
+
+        int port;
+        try {
+            port = Integer.parseInt(portInput.get().trim());
+        } catch (NumberFormatException e) {
+            showInfoAlert("Invalid port", "Enter a numeric port, e.g. 8756.");
+            return;
+        }
+
+        restApiServer = new audiomanager.core.RestApiServer(
+                batchProcessor,
+                () -> configurationPanel.getProcessingConfig(),
+                () -> configurationPanel.getTranscriptionConfig());
+        try {
+            restApiServer.start(port);
+            menuItem.setText("🌐 Stop REST API (port " + port + ")");
+            log("🌐 REST API started on http://127.0.0.1:" + port
+                    + " — POST /api/jobs with {\"filePath\":\"...\"} to submit a file using current settings.");
+        } catch (Exception e) {
+            LOGGER.error("Failed to start REST API on port {}: {}", port, e.getMessage());
+            showInfoAlert("Could not start REST API", "Port " + port + " may already be in use: " + e.getMessage());
+            restApiServer = null;
+        }
+    }
+
+    private void showInfoAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        alert.showAndWait();
+    }
+
     private void applyCSSIfAvailable(Scene scene) {
         String defaultStyle = "-fx-font-family: 'Segoe UI', 'Roboto', 'Arial';";
         scene.getRoot().setStyle(defaultStyle);
@@ -1277,6 +1335,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         LOGGER.info("Saving application state...");
 
         stopFolderWatch();
+        if (restApiServer != null && restApiServer.isRunning()) {
+            restApiServer.stop();
+        }
 
         try {
             savePreferences();

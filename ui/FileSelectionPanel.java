@@ -23,8 +23,10 @@ import javafx.stage.FileChooser;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Consumer;
@@ -57,6 +59,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     private Button clearQueueButton;
     private Button playButton;
     private javafx.scene.media.MediaPlayer mediaPlayer;
+    private audiomanager.ui.WaveformView waveformView;
     private ListView<BatchFileItem> batchListView; // Keeping your ListView!
     private Label batchStatusLabel;
 
@@ -73,6 +76,53 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     private String outputDirectory;
     private Label fileDurationLabel;
     private static final Logger LOGGER = LoggerFactory.getLogger(FileSelectionPanel.class);
+
+    // FIX (UI improvement — undo/redo): a small command-history stack for
+    // queue mutations (add, remove, move-to-top/bottom). Scoped
+    // deliberately to queue management, not to transcription itself —
+    // there's no meaningful "undo" for a file that's already been
+    // transcribed. Each command captures exactly what it needs to reverse
+    // itself; both stacks are cleared on a fresh command push after an
+    // undo (standard redo-invalidation behaviour).
+    private interface QueueCommand {
+        void undo();
+        void redo();
+        String description();
+    }
+    private final Deque<QueueCommand> undoStack = new ArrayDeque<>();
+    private final Deque<QueueCommand> redoStack = new ArrayDeque<>();
+    private static final int MAX_UNDO_HISTORY = 50;
+
+    private void pushCommand(QueueCommand command) {
+        undoStack.push(command);
+        while (undoStack.size() > MAX_UNDO_HISTORY) undoStack.removeLast();
+        redoStack.clear();
+    }
+
+    /** @return true if a queue change was undone. */
+    public boolean undo() {
+        if (undoStack.isEmpty()) return false;
+        QueueCommand command = undoStack.pop();
+        command.undo();
+        redoStack.push(command);
+        log("↩️ Undo: " + command.description());
+        updateBatchQueueTotals();
+        return true;
+    }
+
+    /** @return true if a previously-undone queue change was reapplied. */
+    public boolean redo() {
+        if (redoStack.isEmpty()) return false;
+        QueueCommand command = redoStack.pop();
+        command.redo();
+        undoStack.push(command);
+        log("↪️ Redo: " + command.description());
+        updateBatchQueueTotals();
+        return true;
+    }
+
+    public boolean canUndo() { return !undoStack.isEmpty(); }
+    public boolean canRedo() { return !redoStack.isEmpty(); }
     
     // Queue status labels that remain constant during processing
     private Label queueTotalLabel;
@@ -927,9 +977,18 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         secondRow.getChildren().addAll(spacer, clearQueueButton, outputDirButton);
 
+        // FIX (UI improvement — waveform preview): third row, a simple
+        // amplitude preview of the currently-selected file. Decoded via
+        // FFmpeg (already a hard dependency) on a background thread — see
+        // WaveformView for scope/limits (skips files over 200MB).
+        waveformView = new audiomanager.ui.WaveformView(dependencyManager, 600, 50);
+        HBox waveformRow = new HBox(waveformView);
+        waveformRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(waveformView, Priority.ALWAYS);
+
         // Combine both rows in a VBox
         VBox fileBox = new VBox(8);
-        fileBox.getChildren().addAll(firstRow, secondRow);
+        fileBox.getChildren().addAll(firstRow, secondRow, waveformRow);
 
         return fileBox;
     }
@@ -1030,6 +1089,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 updateFileInfoLabels(selectedFile);
                 playButton.setDisable(false);
                 playButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-background-radius: 4;");
+                if (waveformView != null) waveformView.loadAndRender(selectedFile);
             } else {
                 filePathField.setText(selectedFiles.size() + " files selected");
                 fileSizeLabel.setText("📏 Multiple files selected");
@@ -1037,6 +1097,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 stopPlayback();
                 playButton.setDisable(true);
                 playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+                if (waveformView != null) waveformView.clear();
             }
 
             // Remember the directory for next time
@@ -1051,6 +1112,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             stopPlayback();
             playButton.setDisable(true);
             playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+            if (waveformView != null) waveformView.clear();
         }
     }
 
@@ -1065,6 +1127,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         int added = 0;
         int skipped = 0;
+        List<BatchFileItem> addedItems = new ArrayList<>();
 
         for (File file : pendingFiles) {
             if (file.length() > AppConstants.MAX_FILE_SIZE) {
@@ -1092,10 +1155,19 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             }
 
             batchFiles.add(item);
+            addedItems.add(item);
             added++;
         }
 
         if (added > 0) {
+            List<BatchFileItem> committedItems = new ArrayList<>(addedItems);
+            pushCommand(new QueueCommand() {
+                @Override public void undo() { batchFiles.removeAll(committedItems); }
+                @Override public void redo() { batchFiles.addAll(committedItems); }
+                @Override public String description() {
+                    return "add " + committedItems.size() + " file(s) to queue";
+                }
+            });
             log("➕ Added " + added + " file(s) to queue" + (skipped > 0 ? " (" + skipped + " skipped)" : ""));
             updateBatchStatus(batchFiles);
             updateBatchQueueTotals(); // Make sure totals are updated
@@ -1802,6 +1874,16 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
            } else if (event.isControlDown() && event.getCode() == KeyCode.A) {
                tableView.getSelectionModel().selectAll();
                event.consume();
+           } else if (event.isControlDown() && !event.isShiftDown() && event.getCode() == KeyCode.Z) {
+               undo();
+               event.consume();
+           } else if (event.isControlDown() && event.isShiftDown() && event.getCode() == KeyCode.Z) {
+               redo();
+               event.consume();
+           } else if (event.isControlDown() && event.getCode() == KeyCode.Y) {
+               // Common alternate redo binding (Windows convention).
+               redo();
+               event.consume();
            }
        });
    }
@@ -1812,7 +1894,31 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
    private void removeSelectedFilesFromTableView(TableView<BatchFileItem> tableView) {
        ObservableList<BatchFileItem> selectedItems = tableView.getSelectionModel().getSelectedItems();
        if (!selectedItems.isEmpty()) {
-           batchFiles.removeAll(selectedItems);
+           // FIX (undo/redo): capture each removed item's original index so
+           // undo can restore exact positions, not just append them back at
+           // the end (which would silently reorder the queue on undo).
+           List<BatchFileItem> removed = new ArrayList<>(selectedItems);
+           List<Integer> originalIndices = new ArrayList<>();
+           for (BatchFileItem item : removed) {
+               originalIndices.add(batchFiles.indexOf(item));
+           }
+
+           batchFiles.removeAll(removed);
+           pushCommand(new QueueCommand() {
+               @Override public void undo() {
+                   // Re-insert in ascending index order so earlier insertions
+                   // don't shift the target index for later ones.
+                   List<Integer> order = new ArrayList<>();
+                   for (int i = 0; i < removed.size(); i++) order.add(i);
+                   order.sort((a, b) -> Integer.compare(originalIndices.get(a), originalIndices.get(b)));
+                   for (int i : order) {
+                       int idx = Math.min(originalIndices.get(i), batchFiles.size());
+                       batchFiles.add(idx, removed.get(i));
+                   }
+               }
+               @Override public void redo() { batchFiles.removeAll(removed); }
+               @Override public String description() { return "remove " + removed.size() + " file(s)"; }
+           });
            log("🗑️ Removed " + selectedItems.size() + " file(s) from queue");
            updateBatchQueueTotals();
        }
@@ -1824,9 +1930,21 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
    private void moveSelectedToTopInTableView(TableView<BatchFileItem> tableView) {
        int selectedIndex = tableView.getSelectionModel().getSelectedIndex();
        if (selectedIndex > 0) {
+           final int originalIndex = selectedIndex;
            BatchFileItem item = batchFiles.remove(selectedIndex);
            batchFiles.add(0, item);
            tableView.getSelectionModel().select(0);
+           pushCommand(new QueueCommand() {
+               @Override public void undo() {
+                   batchFiles.remove(item);
+                   batchFiles.add(Math.min(originalIndex, batchFiles.size()), item);
+               }
+               @Override public void redo() {
+                   batchFiles.remove(item);
+                   batchFiles.add(0, item);
+               }
+               @Override public String description() { return "move " + item.getFileName() + " to top"; }
+           });
            log("⬆️ Moved file to top");
        }
    }
@@ -1837,9 +1955,21 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
    private void moveSelectedToBottomInTableView(TableView<BatchFileItem> tableView) {
        int selectedIndex = tableView.getSelectionModel().getSelectedIndex();
        if (selectedIndex < batchFiles.size() - 1 && selectedIndex >= 0) {
+           final int originalIndex = selectedIndex;
            BatchFileItem item = batchFiles.remove(selectedIndex);
            batchFiles.add(item);
            tableView.getSelectionModel().select(batchFiles.size() - 1);
+           pushCommand(new QueueCommand() {
+               @Override public void undo() {
+                   batchFiles.remove(item);
+                   batchFiles.add(Math.min(originalIndex, batchFiles.size()), item);
+               }
+               @Override public void redo() {
+                   batchFiles.remove(item);
+                   batchFiles.add(item);
+               }
+               @Override public String description() { return "move " + item.getFileName() + " to bottom"; }
+           });
            log("⬇️ Moved file to bottom");
        }
    }

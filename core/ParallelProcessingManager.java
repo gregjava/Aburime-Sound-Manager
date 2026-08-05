@@ -523,7 +523,7 @@ public class ParallelProcessingManager {
         for (Map.Entry<FileGroup, List<BatchFileItem>> entry : fileGroups.entrySet()) {
             List<BatchFileItem> groupItems = entry.getValue();
             CompletableFuture<Void> groupFuture =
-                    processFileGroup(groupItems, processingConfig, transcriptionConfig, entry.getKey());
+                    processFileGroup(groupItems, processingConfig, transcriptionConfig, entry.getKey(), startTime);
             for (BatchFileItem item : groupItems) {
                 futures.add(groupFuture.thenApply(v -> new FileResult(item.getFile(), true, "Success")));
             }
@@ -651,7 +651,8 @@ public class ParallelProcessingManager {
     private CompletableFuture<Void> processFileGroup(List<BatchFileItem> items,
                                                       ProcessingConfig processingConfig,
                                                       TranscriptionConfig transcriptionConfig,
-                                                      FileGroup group) {
+                                                      FileGroup group,
+                                                      long batchStartEpochMs) {
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         int index = 0;
         for (BatchFileItem item : items) {
@@ -670,15 +671,43 @@ public class ParallelProcessingManager {
             // is what's needed to tell whether N "parallel" files are
             // really running concurrently or queued behind a bottleneck.
             long queueEnteredMs = System.currentTimeMillis();
-            futures.add(processFileWithPipelineParallelism(item, processingConfig, transcriptionConfig, queueEnteredMs));
+            futures.add(processFileWithPipelineParallelism(
+                    item, processingConfig, transcriptionConfig, queueEnteredMs, batchStartEpochMs));
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    }
+
+    /**
+     * FIX (integration gap found on review): BatchProgressAggregator reads
+     * {@code item.getIndividualProgress()}, but every progress update in
+     * this pipeline was calling {@code item.setProgress(...)} — a
+     * DIFFERENT property. In production, individualProgress therefore
+     * stayed permanently at 0.0 for every in-flight file, silently
+     * defeating the whole point of the aggregator (it works correctly in
+     * its unit tests because those set individualProgress directly, but
+     * nothing wired it to real pipeline updates). Rather than duplicate a
+     * second setter call at every one of the ~7 progress-update call sites
+     * — fragile, and exactly the kind of two-sources-of-truth split that
+     * caused the earlier "done count" bug in this codebase — every update
+     * now goes through this one method so the two properties can't drift
+     * apart again by omission.
+     *
+     * <p>{@code progress}/{@code progressProperty()} stays as its own
+     * property rather than being removed, since UI code may already be
+     * bound to it directly (e.g. a TableView progress-bar column) and
+     * removing it is a larger, riskier change than keeping both in sync
+     * here.</p>
+     */
+    private void setItemProgress(BatchFileItem item, double value) {
+        item.setProgress(value);
+        item.setIndividualProgress(value);
     }
 
     private CompletableFuture<Void> processFileWithPipelineParallelism(BatchFileItem item,
                                                                         ProcessingConfig processingConfig,
                                                                         TranscriptionConfig transcriptionConfig,
-                                                                        long queueEnteredMs) {
+                                                                        long queueEnteredMs,
+                                                                        long batchStartEpochMs) {
         return CompletableFuture.runAsync(() -> {
             File file = item.getFile();
             File preprocessed = null;
@@ -692,12 +721,12 @@ public class ParallelProcessingManager {
                 // to — previously this method only ever touched a bare
                 // File with no path back to the UI at all.
                 item.setStatus("PROCESSING");
-                item.setProgress(0.0);
+                setItemProgress(item, 0.0);
 
                 long preprocessStart = System.currentTimeMillis();
                 preprocessed = preprocessFile(file, processingConfig);
                 long preprocessMs = System.currentTimeMillis() - preprocessStart;
-                item.setProgress(0.3); // conversion/preprocessing done
+                setItemProgress(item, 0.3); // conversion/preprocessing done
 
                 long transcribeWallStart = System.currentTimeMillis();
                 long preprocessedSizeMB = preprocessed.length() / (1024 * 1024);
@@ -705,17 +734,18 @@ public class ParallelProcessingManager {
                         ? transcribeWithSegmentation(preprocessed, transcriptionConfig, item)
                         : transcribeSync(preprocessed, transcriptionConfig, item);
                 long transcribeWallMs = System.currentTimeMillis() - transcribeWallStart;
-                item.setProgress(0.95);
+                setItemProgress(item, 0.95);
 
                 long saveStart = System.currentTimeMillis();
                 saveOutputDirectly(file, result, transcriptionConfig, processingConfig);
                 long saveMs = System.currentTimeMillis() - saveStart;
 
-                item.setProgress(1.0);
+                setItemProgress(item, 1.0);
                 item.setStatus("COMPLETED");
                 item.setErrorMessage(null);
 
                 long totalMs = System.currentTimeMillis() - start;
+                long completedEpoch = System.currentTimeMillis();
                 LOGGER.info("Pipeline complete for {} in {}ms", file.getName(), totalMs);
 
                 // FIX (timing instrumentation surfaced in UI, not just logs):
@@ -749,6 +779,24 @@ public class ParallelProcessingManager {
                 if (cpuSnapshot >= 0) {
                     timingReport.setAvgCpuLoadPercent(cpuSnapshot);
                 }
+
+                // FIX (wall-clock timeline): every one of these epoch values
+                // was already sitting in a local variable above — this
+                // isn't new instrumentation, it's just not throwing them
+                // away. Answers "how far into the batch was this file at
+                // stage X?" directly, instead of requiring the reader to
+                // sum every prior file's/stage's duration by hand.
+                timingReport.setBatchStartEpochMs(batchStartEpochMs);
+                timingReport.setStageEpoch("queue_entered", queueEnteredMs);
+                timingReport.setStageEpoch("preprocess_start", preprocessStart);
+                Long modelAcquiredEpoch = modelAcquiredEpochByItem.remove(item);
+                if (modelAcquiredEpoch != null) {
+                    timingReport.setStageEpoch("model_acquired", modelAcquiredEpoch);
+                }
+                timingReport.setStageEpoch("transcribe_start", transcribeWallStart);
+                timingReport.setStageEpoch("save_start", saveStart);
+                timingReport.setStageEpoch("completed", completedEpoch);
+
                 recordTimingReport(timingReport);
                 if (logger != null) logger.accept(formatTimingReportBlock(timingReport));
 
@@ -765,6 +813,7 @@ public class ParallelProcessingManager {
                 LOGGER.error("Pipeline failed for {}: {}", file.getName(), e.getMessage());
                 lastPythonStageTimingsByItem.remove(item);
                 modelAcquisitionMsByItem.remove(item);
+                modelAcquiredEpochByItem.remove(item);
                 pythonResourceUsageByItem.remove(item);
                 if (completionCallback != null) {
                     completionCallback.onFileCompleted(item, false);
@@ -802,8 +851,31 @@ public class ParallelProcessingManager {
                 r.getPythonPeakMemoryMb() >= 0 ? String.format("%.0f MB", r.getPythonPeakMemoryMb()) : "n/a"));
         sb.append(String.format("%-34s%s%n", "Average CPU",
                 r.getPythonAvgCpuPercent() >= 0 ? String.format("%.1f%%", r.getPythonAvgCpuPercent()) : "n/a"));
+
+        // FIX (wall-clock timeline): answers "how far into the batch was
+        // this file at stage X?" directly — elapsed-since-batch-start per
+        // stage boundary — instead of requiring the reader to manually sum
+        // every prior stage's duration to reconstruct it after the fact.
+        // Additive only: appended after the existing report content, so any
+        // existing log parser or the UI's Performance Report view (which
+        // reads individual stage durations, not this block) is unaffected.
+        if (r.getBatchStartEpochMs() >= 0) {
+            sb.append("\nWall-clock timeline (elapsed since batch start):\n");
+            sb.append(timelineLine("Queue entered", r.getElapsedSinceBatchStartMs("queue_entered")));
+            sb.append(timelineLine("Preprocessing started", r.getElapsedSinceBatchStartMs("preprocess_start")));
+            sb.append(timelineLine("Model acquired", r.getElapsedSinceBatchStartMs("model_acquired")));
+            sb.append(timelineLine("Transcription started", r.getElapsedSinceBatchStartMs("transcribe_start")));
+            sb.append(timelineLine("Saving started", r.getElapsedSinceBatchStartMs("save_start")));
+            sb.append(timelineLine("Completed", r.getElapsedSinceBatchStartMs("completed")));
+        }
+
         sb.append("==================================================");
         return sb.toString();
+    }
+
+    private static String timelineLine(String label, long elapsedMs) {
+        String value = elapsedMs >= 0 ? ResourceMonitor.formatDuration(elapsedMs) + " in" : "n/a";
+        return String.format("%-34s%s%n", label, value);
     }
 
     private static String padLine(String label, long ms) {
@@ -951,6 +1023,11 @@ public class ParallelProcessingManager {
     // lastPythonStageTimingsByItem above, for data transcribeSync()
     // measures/captures but doesn't return directly.
     private final Map<BatchFileItem, Long> modelAcquisitionMsByItem = new ConcurrentHashMap<>();
+    // FIX (wall-clock timeline): companion map for the epoch model
+    // acquisition COMPLETED at (i.e. when pool.borrow() returned), not just
+    // how long it took. Populated at the same two call sites as the
+    // duration map above (transcribeSync and transcribeWithSegmentation).
+    private final Map<BatchFileItem, Long> modelAcquiredEpochByItem = new ConcurrentHashMap<>();
     private final Map<BatchFileItem, double[]> pythonResourceUsageByItem = new ConcurrentHashMap<>(); // [0]=peakMemoryMb [1]=avgCpuPercent
 
     /** Bounded, most-recent-first history of per-file timing reports, surfaced in the UI's Performance Report dialog. */
@@ -997,6 +1074,7 @@ public class ParallelProcessingManager {
             long acquireStart = System.currentTimeMillis();
             instance = pool.borrow();
             modelAcquisitionMsByItem.put(item, System.currentTimeMillis() - acquireStart);
+            modelAcquiredEpochByItem.put(item, System.currentTimeMillis());
             LOGGER.debug("Model pool '{}': {} instance(s), target {}", model, pool.size(), pool.targetConcurrency());
 
             // FIX: transcribe() already returns the fully-parsed TranscriptionResult
@@ -1029,7 +1107,7 @@ public class ParallelProcessingManager {
                     long elapsedMs = System.currentTimeMillis() - transcribeStart;
                     double timeFraction = Math.min(0.99, elapsedMs / (double) estimatedTotalMs);
                     double blended = Math.max(latestCallbackFraction.get(), timeFraction);
-                    item.setProgress(0.3 + Math.max(0.0, Math.min(1.0, blended)) * 0.65);
+                    setItemProgress(item, 0.3 + Math.max(0.0, Math.min(1.0, blended)) * 0.65);
                 } catch (Exception e) {
                     // A progress-display glitch must never interrupt the actual transcription.
                     LOGGER.debug("Progress tick failed for {}: {}", wavFile.getName(), e.getMessage());
@@ -1042,7 +1120,7 @@ public class ParallelProcessingManager {
                         p -> {
                             double clamped = Math.max(0.0, Math.min(1.0, p));
                             latestCallbackFraction.updateAndGet(prev -> Math.max(prev, clamped));
-                            item.setProgress(0.3 + latestCallbackFraction.get() * 0.65);
+                            setItemProgress(item, 0.3 + latestCallbackFraction.get() * 0.65);
                         },
                         0.0);
             } finally {
@@ -1108,6 +1186,7 @@ public class ParallelProcessingManager {
             long acquireStart = System.currentTimeMillis();
             instance = pool.borrow();
             modelAcquisitionMsByItem.put(item, System.currentTimeMillis() - acquireStart);
+            modelAcquiredEpochByItem.put(item, System.currentTimeMillis());
             LOGGER.info("Large file ({}MB) — using segmented processing via SegmentProcessor for: {}",
                     wavFile.length() / (1024 * 1024), wavFile.getName());
 
@@ -1119,7 +1198,7 @@ public class ParallelProcessingManager {
             double audioDurationSeconds = item.getTotalAudioDurationSeconds();
             TranscriptionResult result = segmentProcessor.processWithSegments(
                     wavFile.getAbsolutePath(), config,
-                    p -> item.setProgress(0.3 + Math.max(0.0, Math.min(1.0, p)) * 0.65),
+                    p -> setItemProgress(item, 0.3 + Math.max(0.0, Math.min(1.0, p)) * 0.65),
                     audioDurationSeconds);
 
             // FIX (aggregation gap, closed): previously read

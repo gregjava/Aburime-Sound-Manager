@@ -26,6 +26,49 @@ public class FileTimingReport {
     private long peakHeapUsedMB = -1;
     private double avgCpuLoadPercent = -1;
 
+    // FIX (wall-clock timeline): stageMillis stores DURATIONS (how long a
+    // stage took), which is what most consumers of this class actually
+    // want — but it can't answer "what time did this stage start, relative
+    // to when the batch itself started?" A duration-only report makes you
+    // manually reconstruct that by summing every prior stage's duration,
+    // which is exactly the "screenshot-cross-referencing exercise" this
+    // was built to eliminate. Kept as a SEPARATE map rather than
+    // overloading setStage/getStageMillis (which are typed and named for
+    // durations throughout the existing UI/log code) — this is purely
+    // additive, so nothing that reads durations today is affected.
+    private long batchStartEpochMs = -1;
+    private final Map<String, Long> stageStartEpochMs = new LinkedHashMap<>();
+
+    /** The wall-clock time (epoch ms) the whole batch this file belongs to started — set once, shared across every file in that batch. */
+    public void setBatchStartEpochMs(long epochMs) {
+        this.batchStartEpochMs = epochMs;
+    }
+
+    public long getBatchStartEpochMs() {
+        return batchStartEpochMs;
+    }
+
+    /** Records the wall-clock time (epoch ms) a named stage boundary was reached — e.g. "queue_entered", "preprocess_start", "model_acquired", "transcribe_start", "save_start". */
+    public void setStageEpoch(String stageName, long epochMs) {
+        stageStartEpochMs.put(stageName, epochMs);
+    }
+
+    /** Epoch ms for a stage boundary previously recorded via {@link #setStageEpoch}, or -1 if that stage wasn't recorded (e.g. a script without STAGE_TIMING instrumentation, or a stage this file's path skipped). */
+    public long getStageEpoch(String stageName) {
+        return stageStartEpochMs.getOrDefault(stageName, -1L);
+    }
+
+    /** Milliseconds from batch start to this stage boundary, or -1 if either isn't known. This is the number that answers "how far into the batch was this file at stage X?" without the caller having to do the subtraction themselves. */
+    public long getElapsedSinceBatchStartMs(String stageName) {
+        long stageEpoch = getStageEpoch(stageName);
+        if (stageEpoch < 0 || batchStartEpochMs < 0) return -1;
+        return stageEpoch - batchStartEpochMs;
+    }
+
+    public Map<String, Long> getStageStartEpochMs() {
+        return stageStartEpochMs;
+    }
+
     // FIX (doc-review — "Average CPU utilization" / "Peak memory usage"):
     // the fields above are a single JVM-side system-CPU snapshot taken when
     // the file finished, and this JVM's own heap usage — neither is what
