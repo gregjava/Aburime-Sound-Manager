@@ -59,12 +59,14 @@ public class FileCombinerTool {
         controlsContainer.setPrefWidth(400);
 
         Label titleLabel = new Label("📄 Text File Combiner");
-        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #2c3e50;");
+        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px;");
+        titleLabel.getStyleClass().add("panel-heading");
 
         // File selection section
         VBox fileSection = new VBox(8);
         Label fileLabel = new Label("Selected Files:");
-        fileLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #34495e;");
+        fileLabel.setStyle("-fx-font-weight: bold;");
+        fileLabel.getStyleClass().add("tool-subheading");
 
         fileListView = new ListView<>();
         fileListView.setPrefHeight(120);
@@ -74,15 +76,18 @@ public class FileCombinerTool {
 
         HBox fileButtonBox = new HBox(10);
         Button selectFilesButton = new Button("📄 Add Files");
-        selectFilesButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-font-weight: bold;");
+        selectFilesButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        selectFilesButton.getStyleClass().add("tool-button-blue");
         selectFilesButton.setOnAction(e -> selectTextFiles());
 
         Button clearFilesButton = new Button("🗑️ Clear All");
-        clearFilesButton.setStyle("-fx-background-color: #e67e22; -fx-text-fill: white; -fx-font-weight: bold;");
+        clearFilesButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        clearFilesButton.getStyleClass().add("tool-button-orange");
         clearFilesButton.setOnAction(e -> clearFileList());
 
         Button removeFileButton = new Button("➖ Remove");
-        removeFileButton.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white;");
+        removeFileButton.setStyle("-fx-text-fill: white;");
+        removeFileButton.getStyleClass().add("tool-button-red");
         removeFileButton.setOnAction(e -> removeSelectedFile());
 
         fileButtonBox.getChildren().addAll(selectFilesButton, clearFilesButton, removeFileButton);
@@ -91,7 +96,8 @@ public class FileCombinerTool {
         // Output section
         VBox outputSection = new VBox(8);
         Label outputLabel = new Label("Output File:");
-        outputLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #34495e;");
+        outputLabel.setStyle("-fx-font-weight: bold;");
+        outputLabel.getStyleClass().add("tool-subheading");
 
         HBox outputBox = new HBox(10);
         outputPathField = new TextField();
@@ -99,7 +105,8 @@ public class FileCombinerTool {
         HBox.setHgrow(outputPathField, Priority.ALWAYS);
 
         Button browseOutputButton = new Button("📂 Choose");
-        browseOutputButton.setStyle("-fx-background-color: #9b59b6; -fx-text-fill: white; -fx-font-weight: bold;");
+        browseOutputButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        browseOutputButton.getStyleClass().add("tool-button-purple");
         browseOutputButton.setOnAction(e -> chooseOutputLocation());
 
         outputBox.getChildren().addAll(outputPathField, browseOutputButton);
@@ -107,7 +114,8 @@ public class FileCombinerTool {
 
         // Combine button
         Button combineButton = new Button("🔗 Combine Files");
-        combineButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;");
+        combineButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;");
+        combineButton.getStyleClass().add("tool-button-green");
         combineButton.setPrefHeight(40);
         combineButton.setMaxWidth(Double.MAX_VALUE);
         combineButton.setOnAction(e -> combineFiles());
@@ -118,10 +126,11 @@ public class FileCombinerTool {
         VBox previewContainer = new VBox(10);
         previewContainer.setPadding(new Insets(10));
         previewContainer.setMinWidth(300);
-        previewContainer.setStyle("-fx-background-color: #f8f9fa;");
+        previewContainer.getStyleClass().add("tool-preview-surface");
 
         Label previewLabel = new Label("Combined Texts Preview");
-        previewLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 14px;");
+        previewLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        previewLabel.getStyleClass().add("panel-heading");
 
         // Preview text area
         TextArea previewTextArea = new TextArea();
@@ -134,7 +143,8 @@ public class FileCombinerTool {
 
         // Preview info label
         Label previewInfoLabel = new Label("No files selected");
-        previewInfoLabel.setStyle("-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+        previewInfoLabel.setStyle("-fx-font-size: 11px;");
+        previewInfoLabel.getStyleClass().add("tool-muted-text");
         previewInfoLabel.setWrapText(true);
 
         previewContainer.getChildren().addAll(previewLabel, previewTextArea, previewInfoLabel);

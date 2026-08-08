@@ -5,6 +5,7 @@
 package audiomanager.ui;
 
 import audiomanager.core.DependencyManager;
+import audiomanager.ui.ThemeManager;
 import audiomanager.model.BatchFileItem;
 import audiomanager.util.TimeLeftEstimator;
 import java.util.ArrayList;
@@ -23,6 +24,12 @@ import org.slf4j.LoggerFactory;
  * and action buttons.
  */
 public class ControlPanel {
+
+    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
+    private static void setStyled(javafx.scene.Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ControlPanel.class);
 
@@ -74,25 +81,27 @@ public class ControlPanel {
 
     private VBox buildUI(Runnable onProcessClick, Runnable onExitClick) {
         VBox container = new VBox(10);
-        container.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; "
+        setStyled(container, "-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; "
                 + "-fx-padding: 15; -fx-background-color: white;");
 
         VBox statusBox = new VBox(8);
-        statusBox.setStyle("-fx-padding: 10; -fx-background-color: #f8f9fa; -fx-border-radius: 5;");
+        setStyled(statusBox, "-fx-padding: 10; -fx-background-color: #f8f9fa; -fx-border-radius: 5;");
+        statusBox.getStyleClass().add("theme-fix-surface-alt");  // ← add
 
-        statusLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #2c3e50;");
+        setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
+        statusLabel.getStyleClass().setAll("panel-heading");
         detailedStatusLabel.setWrapText(true);
-        detailedStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #7f8c8d;");
+        setStyled(detailedStatusLabel, "-fx-font-size: 12px; -fx-text-fill: #7f8c8d;");
         resourceStatusLabel.setWrapText(true);
-        resourceStatusLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #95a5a6; -fx-font-style: italic;");
+        setStyled(resourceStatusLabel, "-fx-font-size: 11px; -fx-text-fill: #95a5a6; -fx-font-style: italic;");
         resourceStatusLabel.setManaged(false);
         resourceStatusLabel.setVisible(false);
 
         overallProgressBar.setMaxWidth(Double.MAX_VALUE);
-        overallProgressBar.setStyle("-fx-accent: #27ae60; -fx-background-color: #ecf0f1;");
+        setStyled(overallProgressBar, "-fx-accent: #27ae60; -fx-background-color: #ecf0f1;");
         HBox.setHgrow(overallProgressBar, Priority.ALWAYS);
 
-        overallPercentageLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #27ae60;");
+        setStyled(overallPercentageLabel, "-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #27ae60;");
 
         HBox progressBox = new HBox(10, overallProgressBar, overallPercentageLabel);
         progressBox.setAlignment(Pos.CENTER_LEFT);
@@ -110,12 +119,12 @@ public class ControlPanel {
 
     private VBox buildIndividualProgressSection() {
         VBox section = new VBox(6);
-        section.setStyle("-fx-padding: 8 0 0 0;");
+        setStyled(section, "-fx-padding: 8 0 0 0;");
 
         Label header = new Label("🔄 Currently Processing");
-        header.setStyle("-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 13px;");
+        setStyled(header, "-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 13px;");
 
-        individualProgressRows.setStyle("-fx-padding: 4 0 0 8;");
+        setStyled(individualProgressRows, "-fx-padding: 4 0 0 8;");
 
         section.getChildren().addAll(header, individualProgressRows);
 
@@ -126,17 +135,17 @@ public class ControlPanel {
 
     private HBox buildIndividualProgressRow(BatchFileItem item) {
         Label nameLabel = new Label(item.getFileName());
-        nameLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #34495e;");
+        setStyled(nameLabel, "-fx-font-size: 11px; -fx-text-fill: #34495e;");
         nameLabel.setMaxWidth(220);
         nameLabel.setMinWidth(220);
 
         ProgressBar bar = new ProgressBar(item.getProgress());
         bar.setPrefWidth(140);
-        bar.setStyle("-fx-accent: #2196F3;");
+        setStyled(bar, "-fx-accent: #2196F3;");
         HBox.setHgrow(bar, Priority.ALWAYS);
 
         Label pct = new Label(String.format("%.0f%%", item.getProgress() * 100));
-        pct.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+        setStyled(pct, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
         pct.setMinWidth(36);
 
         HBox row = new HBox(8, nameLabel, bar, pct);
@@ -148,7 +157,7 @@ public class ControlPanel {
         VBox section = new VBox(5);
 
         Label header = new Label("⏱️ Time Report");
-        header.setStyle("-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 13px;");
+        setStyled(header, "-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 13px;");
 
         GridPane grid = new GridPane();
         grid.setHgap(15);
@@ -164,12 +173,19 @@ public class ControlPanel {
         grid.add(titleLabel("Total Time Left:"),  6, 0);
         grid.add(totalTimeLeftLabel,              7, 0);
 
-        styleTimeValue(fileTimeSpentLabel,  "#2c3e50");
-        styleTimeValue(fileTimeLeftLabel,   "#e74c3c");
-        styleTimeValue(totalTimeSpentLabel, "#2c3e50");
-        styleTimeValue(totalTimeLeftLabel,  "#e74c3c");
+        setStyled(fileTimeSpentLabel,  "-fx-font-weight: bold; -fx-font-size: 11px;");
+        fileTimeSpentLabel.getStyleClass().add("tool-subheading");
 
-        dataStatusLabel.setStyle("-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
+        setStyled(fileTimeLeftLabel,   "-fx-font-weight: bold; -fx-font-size: 11px;");
+        fileTimeLeftLabel.getStyleClass().add("status-negative");
+
+        setStyled(totalTimeSpentLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
+        totalTimeSpentLabel.getStyleClass().add("tool-subheading");
+
+        setStyled(totalTimeLeftLabel,  "-fx-font-weight: bold; -fx-font-size: 11px;");
+        totalTimeLeftLabel.getStyleClass().add("status-negative");
+
+        setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
 
         section.getChildren().addAll(header, grid, dataStatusLabel);
         return section;
@@ -178,17 +194,18 @@ public class ControlPanel {
     private HBox buildButtonBox(Runnable onProcessClick, Runnable onExitClick) {
         HBox box = new HBox(15);
         box.setAlignment(Pos.CENTER);
-        box.setStyle("-fx-padding: 0 0 10 0;");
+        setStyled(box, "-fx-padding: 0 0 10 0;");
 
-        processButton.setStyle(startStyle());
+        setStyled(processButton, "");
+        processButton.getStyleClass().add("action-btn-start");
         processButton.setOnAction(e -> onProcessClick.run());
         processButton.setMinWidth(180);
 
-        clearLogButton.setStyle("-fx-background-color: linear-gradient(to bottom, #95a5a6, #7f8c8d); "
-                + "-fx-text-fill: white; -fx-padding: 12 30; -fx-background-radius: 8;");
+        setStyled(clearLogButton, "");
+        clearLogButton.getStyleClass().add("action-btn-clear-log");
 
-        exitButton.setStyle("-fx-background-color: linear-gradient(to bottom, #e74c3c, #c0392b); "
-                + "-fx-text-fill: white; -fx-padding: 12 30; -fx-background-radius: 8;");
+        setStyled(exitButton, "");
+        exitButton.getStyleClass().add("action-btn-exit");
         exitButton.setOnAction(e -> onExitClick.run());
 
         box.getChildren().addAll(processButton, clearLogButton, exitButton);
@@ -197,12 +214,12 @@ public class ControlPanel {
 
     private Label titleLabel(String text) {
         Label l = new Label(text);
-        l.setStyle("-fx-font-weight: bold; -fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+        setStyled(l, "-fx-font-weight: bold; -fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
         return l;
     }
 
     private void styleTimeValue(Label label, String color) {
-        label.setStyle("-fx-font-weight: bold; -fx-text-fill: " + color + "; -fx-font-size: 11px;");
+        setStyled(label, "-fx-font-weight: bold; -fx-text-fill: " + color + "; -fx-font-size: 11px;");
     }
 
     public void updateStatus(String main, String detail) {
@@ -232,12 +249,12 @@ public class ControlPanel {
         Platform.runLater(() -> {
             if (processing) {
                 processButton.setText("⏹️ Cancel Processing");
-                processButton.setStyle(cancelStyle());
-                overallProgressBar.setStyle("-fx-accent: #2196F3; -fx-background-color: #E3F2FD;");
+                processButton.getStyleClass().setAll("action-btn-cancel");
+                setStyled(overallProgressBar, "-fx-accent: #2196F3; -fx-background-color: #E3F2FD;");
             } else {
                 processButton.setText("🚀 Start Processing");
-                processButton.setStyle(startStyle());
-                overallProgressBar.setStyle("-fx-accent: #4CAF50; -fx-background-color: #E8F5E8;");
+                processButton.getStyleClass().setAll("action-btn-start");
+                setStyled(overallProgressBar, "-fx-accent: #4CAF50; -fx-background-color: #E8F5E8;");
             }
             individualProgressSection.setVisible(processing);
             individualProgressSection.setManaged(processing);
@@ -267,17 +284,20 @@ public class ControlPanel {
         Platform.runLater(() -> {
             if (ffmpegStatus == null || whisperStatus == null) {
                 statusLabel.setText("Dependency Check Failed");
-                statusLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #F44336;");
+                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
+                statusLabel.getStyleClass().setAll("status-negative");
                 detailedStatusLabel.setText("Could not verify system dependencies.");
                 return;
             }
 
             if (ffmpegStatus.isAvailable()) {
                 statusLabel.setText("Ready to Process");
-                statusLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #4CAF50;");
+                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
+                statusLabel.getStyleClass().setAll("status-success");   // new class, see CSS below
             } else {
                 statusLabel.setText("FFmpeg Missing");
-                statusLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #F44336;");
+                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
+                statusLabel.getStyleClass().setAll("status-negative");
             }
 
             String detail = ffmpegStatus.getMessage();
@@ -384,25 +404,11 @@ public class ControlPanel {
             if (learnedProcesses > 0) {
                 dataStatusLabel.setText("Using learned estimates (" + learnedProcesses
                         + " process type" + (learnedProcesses == 1 ? "" : "s") + " learned)");
-                dataStatusLabel.setStyle("-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-style: italic;");
+                setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-style: italic;");
             } else {
                 dataStatusLabel.setText("Using default estimates");
-                dataStatusLabel.setStyle("-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
+                setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
             }
         });
-    }
-
-    private static String startStyle() {
-        return "-fx-background-color: linear-gradient(to bottom, #27ae60, #219a52); "
-                + "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12 30; "
-                + "-fx-font-size: 14px; -fx-background-radius: 8; "
-                + "-fx-effect: dropshadow(three-pass-box, rgba(39,174,96,0.3), 5, 0, 0, 2);";
-    }
-
-    private static String cancelStyle() {
-        return "-fx-background-color: linear-gradient(to bottom, #F44336, #D32F2F); "
-                + "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10 25; "
-                + "-fx-font-size: 14px; -fx-background-radius: 8; "
-                + "-fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.3), 5, 0, 0, 2);";
     }
 }

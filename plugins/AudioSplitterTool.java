@@ -68,12 +68,14 @@ public class AudioSplitterTool {
         controlsContainer.setPrefWidth(400);
 
         Label titleLabel = new Label("🎵 Audio Splitter");
-        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px; -fx-text-fill: #2c3e50;");
+        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 16px;");
+        titleLabel.getStyleClass().add("panel-heading");
 
         // File selection section
         VBox fileSection = new VBox(8);
         Label fileLabel = new Label("Audio File:");
-        fileLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #34495e;");
+        fileLabel.setStyle("-fx-font-weight: bold;");
+        fileLabel.getStyleClass().add("tool-subheading");
 
         HBox fileSelectionBox = new HBox(10);
         filePathField = new TextField();
@@ -82,7 +84,8 @@ public class AudioSplitterTool {
         HBox.setHgrow(filePathField, Priority.ALWAYS);
 
         Button browseButton = new Button("📁 Browse");
-        browseButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-font-weight: bold;");
+        browseButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        browseButton.getStyleClass().add("tool-button-blue");
         browseButton.setOnAction(e -> browseAudioFile());
 
         fileSelectionBox.getChildren().addAll(filePathField, browseButton);
@@ -91,7 +94,8 @@ public class AudioSplitterTool {
         // Settings section
         VBox settingsSection = new VBox(8);
         Label settingsLabel = new Label("Split Settings:");
-        settingsLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #34495e;");
+        settingsLabel.setStyle("-fx-font-weight: bold;");
+        settingsLabel.getStyleClass().add("tool-subheading");
 
         GridPane settingsGrid = new GridPane();
         settingsGrid.setHgap(10);
@@ -109,7 +113,8 @@ public class AudioSplitterTool {
         HBox.setHgrow(outputDirField, Priority.ALWAYS);
 
         Button outputBrowseButton = new Button("📂 Choose");
-        outputBrowseButton.setStyle("-fx-background-color: #9b59b6; -fx-text-fill: white;");
+        outputBrowseButton.setStyle("-fx-text-fill: white;");
+        outputBrowseButton.getStyleClass().add("tool-button-purple");
         outputBrowseButton.setOnAction(e -> chooseOutputDirectory());
 
         settingsGrid.add(durationLabel, 0, 0);
@@ -122,7 +127,8 @@ public class AudioSplitterTool {
 
         // Action button
         splitButton = new Button("✂️ Split Audio File");
-        splitButton.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;");
+        splitButton.setStyle("-fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;");
+        splitButton.getStyleClass().add("tool-button-red");
         splitButton.setPrefHeight(40);
         splitButton.setMaxWidth(Double.MAX_VALUE);
         splitButton.setOnAction(e -> splitAudioFile());
@@ -133,10 +139,11 @@ public class AudioSplitterTool {
         VBox previewContainer = new VBox(10);
         previewContainer.setPadding(new Insets(20));
         previewContainer.setPrefWidth(300);
-        previewContainer.setStyle("-fx-background-color: #f8f9fa;");
+        previewContainer.getStyleClass().add("tool-preview-surface");
 
         Label previewLabel = new Label("Split Files Preview");
-        previewLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 14px;");
+        previewLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        previewLabel.getStyleClass().add("panel-heading");
 
         // Preview list for split files
         ListView<String> previewList = new ListView<>();
@@ -145,7 +152,8 @@ public class AudioSplitterTool {
 
         // Preview info label
         Label previewInfoLabel = new Label("No file selected");
-        previewInfoLabel.setStyle("-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+        previewInfoLabel.setStyle("-fx-font-size: 11px;");
+        previewInfoLabel.getStyleClass().add("tool-muted-text");
         previewInfoLabel.setWrapText(true);
 
         previewContainer.getChildren().addAll(previewLabel, previewList, previewInfoLabel);

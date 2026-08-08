@@ -4,6 +4,7 @@
  */
 package audiomanager.core;
 
+import audiomanager.exceptions.OutputIntegrityException;
 import audiomanager.model.BatchFileItem;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
@@ -340,6 +341,33 @@ public class ParallelProcessingManager {
      * frequent enough to react within a file or two of transcription, cheap
      * enough to be irrelevant next to the actual transcription workload.
      */
+    /**
+     * Controls whether {@link #startResourceMonitor} actually throttles
+     * concurrency based on measured pressure, or holds every pool pinned at
+     * its full static ceiling regardless of what's measured. Added
+     * specifically to allow a true fixed-concurrency baseline run for
+     * controlled comparison against the adaptive behavior — without this,
+     * there was no way to isolate "did adaptive scaling help" from "how
+     * does this workload behave at all" in a measurement.
+     */
+    private volatile boolean adaptiveScalingEnabled = true;
+
+    /**
+     * @param enabled false pins every pool (model, IO, CPU, pipeline) at its
+     *                full static ceiling for the remainder of the batch,
+     *                ignoring measured CPU/memory pressure entirely — use
+     *                this to collect a fixed-concurrency baseline run.
+     *                true (default) restores normal adaptive throttling.
+     */
+    public void setAdaptiveScalingEnabled(boolean enabled) {
+        this.adaptiveScalingEnabled = enabled;
+        LOGGER.info("Adaptive concurrency scaling {}", enabled ? "ENABLED" : "DISABLED (fixed-concurrency baseline mode)");
+    }
+
+    public boolean isAdaptiveScalingEnabled() {
+        return adaptiveScalingEnabled;
+    }
+
     private void startResourceMonitor(int ceilingThreads) {
         resourceMonitorExecutor = Executors.newSingleThreadScheduledExecutor(
                 new NamedThreadFactory("Resource-Monitor"));
@@ -381,7 +409,15 @@ public class ParallelProcessingManager {
                 // genuinely extreme, sustained saturation (98%+).
                 int target;
                 double scaleFactor; // 1.0 = full ceiling, 0.5 = half, etc.
-                if (cpuLoadPct < 0 && systemMemUsedPct < 0) {
+                if (!adaptiveScalingEnabled) {
+                    // Fixed-concurrency baseline mode: ignore every pressure
+                    // signal below and hold at the full static ceiling, so
+                    // this cycle's only remaining job is the raw logging
+                    // (still valuable for a baseline run — you want to know
+                    // what pressure a *fixed* concurrency level produces).
+                    target = ceilingThreads;
+                    scaleFactor = 1.0;
+                } else if (cpuLoadPct < 0 && systemMemUsedPct < 0) {
                     // Neither measurement available on this JVM/platform —
                     // keep the static capacity rather than guessing.
                     target = ceilingThreads;
@@ -396,6 +432,21 @@ public class ParallelProcessingManager {
                     target = ceilingThreads;
                     scaleFactor = 1.0;
                 }
+
+                // FIX (raw per-cycle resource logging — previously this cycle
+                // only ever logged a *decision* (the target, and only when it
+                // changed via recordScalingEvent below) — never the raw inputs
+                // that produced it, every cycle, regardless of whether the
+                // decision changed. Without this, there was no way to
+                // reconstruct the actual memory/CPU trace over a run — e.g.
+                // to plot it, or to check whether pressure was sustained vs.
+                // a brief spike. One structured line per cycle, always
+                // emitted (not just on change), in an easily-greppable/
+                // parseable format.
+                LOGGER.info("RESOURCE_CYCLE: cpuPct={} heapUsedPct={} systemMemPct={} " +
+                                "decisionMemPct={} target={} scaleFactor={} adaptiveEnabled={}",
+                        fmt(cpuLoadPct), fmt(heapUsedPct), fmt(systemMemUsedPct),
+                        fmt(memUsedPct), target, String.format("%.2f", scaleFactor), adaptiveScalingEnabled);
 
                 for (ModelInstancePool pool : modelPools.values()) {
                     pool.adjustTarget(target);
@@ -448,6 +499,10 @@ public class ParallelProcessingManager {
      * order throws {@link IllegalArgumentException} depending on which
      * direction the pool is already sized in.</p>
      */
+    private static String fmt(double value) {
+        return value < 0 ? "unavailable" : String.format("%.2f", value);
+    }
+
     private void resizePool(ThreadPoolExecutor pool, int base, double factor) {
         if (pool == null || pool.isShutdown()) return;
         int newSize = Math.max(1, (int) Math.round(base * factor));
@@ -1230,11 +1285,24 @@ public class ParallelProcessingManager {
      * {@code recordOutputDir} approach.
      */
     private void saveOutputDirectly(File originalFile, TranscriptionResult result,
-                                    TranscriptionConfig transcriptionConfig, ProcessingConfig config) {
+                                    TranscriptionConfig transcriptionConfig, ProcessingConfig config)
+            throws OutputIntegrityException {
         long start = System.currentTimeMillis();
         try {
             File out = outputWriter.save(originalFile.getName(), result,
                     transcriptionConfig, config.getOutputDirectory());
+
+            // FIX (the actual gap OutputIntegrityException was designed for,
+            // now closed): this codebase has a documented history of steps
+            // reporting success while their real output was missing, empty,
+            // or written to a temp directory that got cleaned up before use
+            // — nothing distinguished "this step threw" from "this step
+            // lied about succeeding". outputWriter.save() returning without
+            // throwing was previously treated as proof the file exists;
+            // it's now actually verified before this method logs success or
+            // lets the caller mark the item COMPLETED.
+            assertRealOutput(out, originalFile.getName());
+
             recordPhaseTiming("saving_transcription", start, originalFile.length() / (1024.0 * 1024.0));
             LOGGER.info("Saved output for {}: {}", originalFile.getName(), out);
 
@@ -1247,7 +1315,17 @@ public class ParallelProcessingManager {
                     String baseName = dot > 0 ? outName.substring(0, dot) : outName;
                     String wordPath = Paths.get(config.getOutputDirectory(), baseName + ".docx").toString();
                     outputWriter.exportToWord(result, wordPath);
-                    LOGGER.info("Saved Word-compatible (.docx) copy for {}: {}", originalFile.getName(), wordPath);
+                    // The .docx export is optional/best-effort (caught and logged as a
+                    // warning below on failure) — so its integrity check is advisory
+                    // only: log if it's missing/empty, but don't fail the whole file
+                    // over a supplementary copy the primary output doesn't depend on.
+                    File wordFile = new File(wordPath);
+                    if (!wordFile.exists() || wordFile.length() == 0) {
+                        LOGGER.warn("Word-compatible copy for {} reported success but is missing/empty: {}",
+                                originalFile.getName(), wordPath);
+                    } else {
+                        LOGGER.info("Saved Word-compatible (.docx) copy for {}: {}", originalFile.getName(), wordPath);
+                    }
                 } catch (IOException e) {
                     // A failed optional export must never fail the whole file — the
                     // primary .srt/.txt output above already succeeded.
@@ -1257,6 +1335,34 @@ public class ParallelProcessingManager {
         } catch (IOException e) {
             LOGGER.error("Failed to save output for {}: {}", originalFile.getName(), e.getMessage());
             throw new CompletionException(e);
+        }
+    }
+
+    /**
+     * The shared assertion helper referenced in OutputIntegrityException's
+     * own Javadoc ({@code OutputIntegrityChecks}) — kept here as a private
+     * method rather than a separate class for now, since this is currently
+     * its only call site; promote to a standalone class if/when
+     * TranscriptionOutputWriter or other save paths need the same check.
+     */
+    private void assertRealOutput(File expected, String sourceFileName) throws OutputIntegrityException {
+        if (expected == null) {
+            throw new OutputIntegrityException(
+                    "null",
+                    "Output writer for " + sourceFileName + " returned null instead of the written file",
+                    "Saving the transcript for \"" + sourceFileName + "\" appeared to succeed, but no output file was reported. This file needs to be reprocessed.");
+        }
+        if (!expected.exists()) {
+            throw new OutputIntegrityException(
+                    expected.getAbsolutePath(),
+                    "Output writer for " + sourceFileName + " reported success but " + expected.getAbsolutePath() + " does not exist",
+                    "The transcript for \"" + sourceFileName + "\" wasn't found after saving — it may have been written to a location that was cleaned up, or the write silently failed. This file needs to be reprocessed.");
+        }
+        if (expected.length() == 0) {
+            throw new OutputIntegrityException(
+                    expected.getAbsolutePath(),
+                    "Output writer for " + sourceFileName + " reported success but " + expected.getAbsolutePath() + " is empty (0 bytes)",
+                    "The transcript file for \"" + sourceFileName + "\" was created but is empty. This file needs to be reprocessed.");
         }
     }
 

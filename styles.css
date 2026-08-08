@@ -291,3 +291,106 @@
     -fx-text-fill: white;
     -fx-background-radius: 8;
 }
+
+.theme-fix-surface {
+    -fx-background-color: white;
+}
+
+.theme-fix-surface-alt {
+    -fx-background-color: #f8f9fa;
+}
+
+.panel-heading {
+    -fx-text-fill: #2c3e50;
+}
+
+.panel-heading-pane > .title {
+    -fx-text-fill: #2c3e50;
+}
+
+.status-negative {
+    -fx-text-fill: #d32f2f;
+}
+
+.status-accent {
+    -fx-text-fill: #1565c0;
+}
+
+.status-success {
+    -fx-text-fill: #4CAF50;
+}
+
+.tool-subheading {
+    -fx-text-fill: #34495e;
+}
+
+.tool-muted-text {
+    -fx-text-fill: #7f8c8d;
+}
+
+.tool-preview-surface {
+    -fx-background-color: #f8f9fa;
+}
+
+.tool-button-blue    { -fx-background-color: #3498db; }
+.tool-button-purple  { -fx-background-color: #9b59b6; }
+.tool-button-red     { -fx-background-color: #e74c3c; }
+.tool-button-green   { -fx-background-color: #27ae60; }
+.tool-button-orange  { -fx-background-color: #e67e22; }
+
+/* Branded action buttons — same colors as dark mode, theme-independent */
+.action-btn-browse {
+    -fx-background-color: #3498db;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-output-dir {
+    -fx-background-color: #9b59b6;
+    -fx-text-fill: white;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-clear-queue-active {
+    -fx-background-color: #e67e22;
+    -fx-text-fill: white;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-clear-queue-disabled {
+    -fx-background-color: #bdc3c7;
+    -fx-text-fill: #7f8c8d;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-start {
+    -fx-background-color: linear-gradient(to bottom, #27ae60, #219a52);
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 12 30;
+    -fx-font-size: 14px;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow(three-pass-box, rgba(39,174,96,0.3), 5, 0, 0, 2);
+}
+.action-btn-cancel {
+    -fx-background-color: linear-gradient(to bottom, #F44336, #D32F2F);
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 10 25;
+    -fx-font-size: 14px;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.3), 5, 0, 0, 2);
+}
+.action-btn-clear-log {
+    -fx-background-color: linear-gradient(to bottom, #95a5a6, #7f8c8d);
+    -fx-text-fill: white;
+    -fx-padding: 12 30;
+    -fx-background-radius: 8;
+}
+.action-btn-exit {
+    -fx-background-color: linear-gradient(to bottom, #e74c3c, #c0392b);
+    -fx-text-fill: white;
+    -fx-padding: 12 30;
+    -fx-background-radius: 8;
+}

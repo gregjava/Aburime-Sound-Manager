@@ -6,6 +6,7 @@ package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.core.*;
+import audiomanager.ui.ThemeManager;
 import audiomanager.exceptions.FfmpegException;
 import audiomanager.model.*;
 import audiomanager.plugins.*;
@@ -56,6 +57,12 @@ import java.awt.TrayIcon;
  * Main application window
  */
 public class MainWindow implements BatchProcessor.FileCompletionCallback {
+
+    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
+    private static void setStyled(javafx.scene.Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
     private static final Logger LOGGER = LoggerFactory.getLogger(MainWindow.class);
     
     private final Stage stage;
@@ -196,6 +203,16 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 javafx.scene.input.KeyCombination.keyCombination("Shortcut+R"),
                 this::handleProcessButtonClick);
         stage.setScene(scene);
+
+        // FIX: darkModeItem.setSelected(...) only set the *checkbox's*
+        // visual state to match the saved preference — it never actually
+        // called toggleTheme(), so a saved "Dark" preference showed a
+        // checked menu item while the app still rendered in light mode
+        // until the user manually toggled it off and on again. Applying it
+        // for real here, after the scene exists (toggleTheme() needs
+        // stage.getScene() to be non-null).
+        toggleTheme("Dark".equals(prefManager.getTheme()));
+
         configurationPanel.setFontSizeChangeListener(this::applyFontSize);
         loadPreferences();
         debugPreferences();
@@ -231,7 +248,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         }
 
         if (logArea != null) {
-            logArea.setStyle(String.format("-fx-font-size: %spx;", (int) size));
+            setStyled(logArea, String.format("-fx-font-size: %spx;", (int) size));
             LOGGER.debug("Applied font size to log area");
         }
 
@@ -239,9 +256,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     }
 
     /**
-     * FIX: previously this called {@code node.setStyle(String.format(
-     * "-fx-font-size: %spx;", size))} for every button/label/text-field/
-     * text-area in the whole scene. {@code Node.setStyle()} REPLACES the
+     * FIX: previously this called {@code setStyled(node, String.format(
+     * "-fx-font-size: %spx;", size));} for every button/label/text-field/
+     * text-area in the whole scene. {@code setStyled(Node, );} REPLACES the
      * entire inline style string — it doesn't merge with what's already
      * there. Since most buttons throughout this app get their color/shape
      * from an inline style set elsewhere (e.g.
@@ -263,7 +280,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 ? ""
                 : FONT_SIZE_RULE_PATTERN.matcher(existing).replaceAll("").trim();
         String separator = withoutFontSize.isEmpty() || withoutFontSize.endsWith(";") ? " " : "; ";
-        node.setStyle(withoutFontSize + separator + String.format("-fx-font-size: %spx;", (int) size));
+        setStyled(node, withoutFontSize + separator + String.format("-fx-font-size: %spx;", (int) size));
     }
 
     private void applyFontSizeToUIComponents(double size) {
@@ -350,15 +367,17 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         logArea.setEditable(false);
         logArea.setPrefHeight(150);
         logArea.setWrapText(true);
-        logArea.setStyle("-fx-control-inner-background: #2c3e50; -fx-text-fill: white; -fx-font-family: 'Consolas', 'Monaco', monospace;");
+        setStyled(logArea, "-fx-control-inner-background: #2c3e50; -fx-text-fill: white; -fx-font-family: 'Consolas', 'Monaco', monospace;");
 
         VBox toolsSection = createToolsSection();
 
         VBox logSection = new VBox(0);
         Label logLabel = new Label("📝 Terminal");
-        logLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #2c3e50; -fx-padding: 10 15 5 15;");
+        setStyled(logLabel, "-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10 15 5 15;"); // color removed
+        logLabel.getStyleClass().add("panel-heading");
         logSection.getChildren().addAll(logLabel, logArea);
-        logSection.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 1 0 0 0; -fx-background-color: white;");
+        setStyled(logSection, "-fx-border-color: #bdc3c7; -fx-border-width: 1 0 0 0; -fx-background-color: white;");
+        logSection.getStyleClass().add("theme-fix-surface");   // ← add (was missed last time)
 
         VBox mainContent = new VBox(0);
         mainContent.getChildren().addAll(
@@ -374,7 +393,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scrollPane.setFitToHeight(false);
         scrollPane.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
         scrollPane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        scrollPane.setStyle("-fx-background-color: #ecf0f1; -fx-border-width: 0;");
+        setStyled(scrollPane, "-fx-background-color: #ecf0f1; -fx-border-width: 0;");
 
         root.setTop(menuBar);
         root.setCenter(scrollPane);
@@ -413,6 +432,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             // Custom renderer to show filenames clearly
             dialog.getDialogPane().lookupButton(ButtonType.OK).setDisable(false);
 
+            
+            ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
             Optional<BatchFileItem> result = dialog.showAndWait();
             if (result.isPresent()) {
                 return result.get().getFile();
@@ -433,6 +455,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             alert.setTitle("No File Available");
             alert.setHeaderText("Cannot Analyze Volume");
             alert.setContentText("Please add at least one file to the batch queue before analyzing.");
+                        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
             alert.showAndWait();
             return;
         }
@@ -503,6 +526,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                         alert.getButtonTypes().setAll(closeButton);
                     }
 
+                    
+                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+
                     alert.showAndWait();
 
                     log("✅ Volume analysis complete for: " + selectedFile.getName());
@@ -569,6 +595,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                     ButtonType noButton = new ButtonType("No", ButtonBar.ButtonData.NO);
                     alert.getButtonTypes().setAll(yesButton, noButton);
 
+                    
+                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+
                     Optional<ButtonType> result = alert.showAndWait();
                     if (result.isPresent() && result.get() == yesButton) {
                         File amplifiedFile = new File(outputPath);
@@ -605,7 +634,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
     private VBox createToolsSection() {
         VBox toolsContainer = new VBox(0);
-        toolsContainer.setStyle("-fx-background-color: white; -fx-border-color: #bdc3c7; -fx-border-width: 1 0 1 0;");
+        setStyled(toolsContainer, "-fx-background-color: white; -fx-border-color: #bdc3c7; -fx-border-width: 1 0 1 0;");
 
         TitledPane splitterPane = createAudioSplitterPane();
         TitledPane combinerPane = createTextFileCombinerPane();
@@ -618,6 +647,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     private TitledPane createAudioSplitterPane() {
         TitledPane pane = new TitledPane();
         pane.setText("🎵 Audio Splitter");
+        pane.getStyleClass().add("panel-heading-pane");   // ← add, right after setText, both panes
         pane.setCollapsible(true);
         pane.setExpanded(false);
 
@@ -629,7 +659,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         contentContainer.setPrefHeight(320);
 
         pane.setContent(contentContainer);
-        pane.setStyle("-fx-border-color: #e0e0e0; -fx-border-width: 0 0 1 0; -fx-background-color: #f8f9fa;");
+        setStyled(pane, "-fx-border-color: #e0e0e0; -fx-border-width: 0 0 1 0; -fx-background-color: #f8f9fa;");
 
         pane.expandedProperty().addListener((obs, wasExpanded, isExpanded) -> {
             if (isExpanded) {
@@ -660,7 +690,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         contentContainer.setPrefHeight(270);
 
         pane.setContent(contentContainer);
-        pane.setStyle("-fx-border-color: #e0e0e0; -fx-border-width: 0; -fx-background-color: #f8f9fa;");
+        setStyled(pane, "-fx-border-color: #e0e0e0; -fx-border-width: 0; -fx-background-color: #f8f9fa;");
 
         pane.expandedProperty().addListener((obs, wasExpanded, isExpanded) -> {
             if (isExpanded) {
@@ -679,25 +709,27 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
     private VBox createStyledFileSelectionSection() {
         VBox fileSelection = fileSelectionPanel.getFileSelectionControls();
-        fileSelection.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-padding: 15; -fx-background-color: white;");
+        setStyled(fileSelection, "-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-padding: 15; -fx-background-color: white;");
         return fileSelection;
     }
 
     private VBox createStyledBatchQueueSection() {
         VBox batchQueue = fileSelectionPanel.getBatchQueueSection();
-        batchQueue.setStyle("-fx-padding: 10; -fx-background-color: white;");
+        setStyled(batchQueue, "-fx-padding: 10; -fx-background-color: white;");
+        batchQueue.getStyleClass().add("theme-fix-surface");     // ← add
         return batchQueue;
     }
 
     private VBox createStyledControlSection() {
         VBox controlSection = controlPanel.getRoot();
-        controlSection.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-background-color: white;");
+        setStyled(controlSection, "-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-background-color: white;");
+        controlSection.getStyleClass().add("theme-fix-surface"); // ← add
         return controlSection;
     }
 
     private MenuBar createMenuBar() {
         MenuBar menuBar = new MenuBar();
-        menuBar.setStyle("-fx-padding: 0; -fx-background-color: #ecf0f1; -fx-border-width: 0 0 1 0; -fx-border-color: #bdc3c7;");
+        setStyled(menuBar, "-fx-padding: 0; -fx-background-color: #ecf0f1; -fx-border-width: 0 0 1 0; -fx-border-color: #bdc3c7;");
 
         Menu fileMenu = new Menu("File");
         fileMenu.setStyle("-fx-text-fill: #2c3e50;");
@@ -853,6 +885,17 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             }
             prefManager.setTheme("Light");
         }
+
+        // FIX: previously this only touched the stylesheet — anything with
+        // an inline style (background-color/text-fill set directly via
+        // setStyle(), which is most buttons/panels in this app) never
+        // picked up the dark theme at all. ThemeManager.sweep() walks the
+        // whole scene graph and strips/restores just the color portion of
+        // each node's inline style, letting the stylesheet's type-selector
+        // rules take over for color while everything else about the node's
+        // styling (radius, padding, font-weight) stays exactly as it was.
+        ThemeManager.sweep(scene, dark);
+
         prefManager.flush();
         LOGGER.info("Theme set to: {}", prefManager.getTheme());
     }
@@ -862,6 +905,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.setTitle("Clear Session Data");
         alert.setHeaderText("Clear Current Session");
         alert.setContentText("This will clear the current batch queue and reset the application state. Continue?");
+
+        
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
 
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
@@ -897,6 +943,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                              This will reset all learned time estimates to default values. This action cannot be undone.
                              
                              Are you sure you want to continue?""");
+        
+                
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
@@ -981,6 +1030,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         applyFontSizeToDialog(dialog, prefManager.getFontSize());
 
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
         dialog.showAndWait().ifPresent(result -> {
             if (result == applyButton) {
                 configurationPanel.savePreferences();
@@ -1020,6 +1075,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scrollPane.setPrefHeight(120);
         dialog.getDialogPane().setContent(scrollPane);
 
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
         dialog.showAndWait().ifPresent(result -> {
             if (result == applyButton) {
                 configurationPanel.savePreferences();
@@ -1045,6 +1106,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scrollPane.setFitToWidth(true);
         scrollPane.setPrefHeight(200);
         dialog.getDialogPane().setContent(scrollPane);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
 
         dialog.showAndWait().ifPresent(result -> {
             if (result == applyButton) {
@@ -1072,6 +1139,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scrollPane.setPrefHeight(300);
         dialog.getDialogPane().setContent(scrollPane);
 
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
         dialog.showAndWait().ifPresent(result -> {
             if (result == applyButton) {
                 configurationPanel.savePreferences();
@@ -1095,6 +1168,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                              \u2022 Volume analysis and optimization
                              
                              Built with JavaFX and FFmpeg""");
+                ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         alert.showAndWait();
     }
 
@@ -1132,7 +1206,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         });
 
         Label hfLabel = new Label("HuggingFace Token (for speaker diarisation):");
-        hfLabel.setStyle("-fx-font-weight: bold;");
+        setStyled(hfLabel, "-fx-font-weight: bold;");
 
         String currentStateText = envTokenSet
                 ? "✅ Currently set via the HF_TOKEN environment variable."
@@ -1150,7 +1224,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                         + "then paste it here. It's saved locally to ~/.audiomanager/hf_token — never "
                         + "transmitted anywhere by this app except to HuggingFace itself during diarisation.");
         hfHint.setWrapText(true);
-        hfHint.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+        setStyled(hfHint, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
 
         Button saveTokenButton = new Button("Save Token");
         Label saveResultLabel = new Label();
@@ -1158,20 +1232,21 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             String token = tokenField.getText();
             if (token == null || token.isBlank()) {
                 saveResultLabel.setText("❌ Enter a token first.");
-                saveResultLabel.setStyle("-fx-text-fill: #d32f2f;");
+                setStyled(saveResultLabel, "-fx-text-fill: #d32f2f;");
                 return;
             }
             try {
                 Files.createDirectories(tokenFile.getParent());
                 Files.writeString(tokenFile, token.trim());
                 saveResultLabel.setText("✅ Saved. Takes effect for new transcriptions.");
-                saveResultLabel.setStyle("-fx-text-fill: #2e7d32;");
+                setStyled(saveResultLabel, "-fx-text-fill: #2e7d32;");
                 log("🔑 HuggingFace token saved to " + tokenFile);
                 tokenField.clear();
             } catch (IOException ex) {
                 LOGGER.error("Failed to save HF token", ex);
                 saveResultLabel.setText("❌ Could not save: " + ex.getMessage());
-                saveResultLabel.setStyle("-fx-text-fill: #d32f2f;");
+                setStyled(saveResultLabel, "");
+                saveResultLabel.getStyleClass().add("status-negative");
             }
         });
 
@@ -1187,6 +1262,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scrollPane.setPrefSize(450, 400);
         dialog.getDialogPane().setContent(scrollPane);
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
 
         dialog.showAndWait();
     }
@@ -1225,6 +1306,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         } else {
             alert.setContentText(cause != null ? cause.getMessage() : ex.getMessage());
         }
+
+        
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
 
         alert.showAndWait();
     }
@@ -1293,6 +1377,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.setTitle(title);
         alert.setHeaderText(null);
         alert.setContentText(message);
+                ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         alert.showAndWait();
     }
 
@@ -1481,6 +1566,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                     alert.setTitle("Resume Previous Batch");
                     alert.setHeaderText("An incomplete batch was found");
                     alert.setContentText("Do you want to resume processing from where you left off?");
+                                        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
                     Optional<ButtonType> result = alert.showAndWait();
                     if (result.isPresent() && result.get() == ButtonType.OK) {
                         // Restart batch processing
@@ -2021,6 +2107,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         textArea.setEditable(false);
         textArea.setPrefSize(450, 250);
         alert.getDialogPane().setContent(textArea);
+                ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         alert.showAndWait();
     }
 
@@ -2038,6 +2125,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.setHeaderText("Batch processing is currently running");
         alert.setContentText("Are you sure you want to cancel all running processes?");
         
+                
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
             log("⏹️ Cancelling batch processing...");
@@ -2052,6 +2142,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             alert.setTitle("Exit Confirmation");
             alert.setHeaderText("Processing is active");
             alert.setContentText("Exiting will cancel all running processes. Continue?");
+                        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
             Optional<ButtonType> result = alert.showAndWait();
             if (result.isPresent() && result.get() == ButtonType.OK) {
                 batchProcessor.cancel();

@@ -8,6 +8,7 @@ import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
 import audiomanager.core.BatchProcessor;
 import audiomanager.core.DependencyManager;
+import audiomanager.ui.ThemeManager;
 import audiomanager.model.BatchFileItem;
 import audiomanager.model.ProcessingStatus;
 import audiomanager.plugins.AudioSplitterTool;
@@ -47,6 +48,29 @@ import org.slf4j.LoggerFactory;
  * Panel for file selection and batch queue management
  */
 public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback {
+
+    /**
+     * FIX (dark mode partial-revert bug): every {@code node.setStyle(...)}
+     * call in this class now goes through here instead of calling
+     * {@code setStyle} directly. The bug: {@link ThemeManager}'s sweep only
+     * strips inline colors from nodes that exist in the scene graph *at the
+     * moment dark mode is toggled* — any code that sets an inline style
+     * dynamically AFTER that (e.g. re-coloring a button when it becomes
+     * enabled/disabled based on selection state) puts the light-mode color
+     * straight back, with no idea dark mode is even active. Confirmed by a
+     * real screenshot: Browse/Add to Queue/Clear Queue/Output Directory
+     * stayed in their bright light-mode colors after toggling dark mode,
+     * specifically because their color is re-applied by state-change
+     * handlers, not just at construction. Routing every call through here
+     * means any future dynamic re-styling automatically gets the same
+     * dark-mode treatment as the initial sweep, with no special-casing
+     * required at each call site.
+     */
+    private static void setStyled(javafx.scene.Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
+
     private final VBox root;
     private final ObservableList<BatchFileItem> batchFiles;
     private final PreferenceManager prefManager;
@@ -193,10 +217,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         clearQueueButton.disableProperty().addListener((obs, oldVal, newVal) -> {
             if (newVal) {
                 // Button is disabled
-                clearQueueButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+                clearQueueButton.getStyleClass().setAll("action-btn-clear-queue-disabled");
             } else {
                 // Button is enabled
-                clearQueueButton.setStyle("-fx-background-color: #e67e22; -fx-text-fill: white; -fx-background-radius: 4;");
+                clearQueueButton.getStyleClass().setAll("action-btn-clear-queue-active");
             }
         });
 
@@ -543,10 +567,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     // Style the value labels
     private void initializeStatusLabels() {
         String valueStyle = "-fx-font-weight: bold; -fx-text-fill: #2c3e50; -fx-font-size: 11px;";
-        totalFilesValue.setStyle(valueStyle);
-        totalDurationValue.setStyle(valueStyle);
-        completedValue.setStyle(valueStyle);
-        failedValue.setStyle(valueStyle);
+        setStyled(totalFilesValue, valueStyle);
+        setStyled(totalDurationValue, valueStyle);
+        setStyled(completedValue, valueStyle);
+        setStyled(failedValue, valueStyle);
     }
 
     /**
@@ -556,10 +580,11 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     public VBox getBatchQueueSection() {
         VBox section = new VBox(10);
         section.setPadding(new Insets(15, -5, 15, -5));
-        section.setStyle("-fx-border-color: #e0e0e0; -fx-border-width: 1; -fx-border-radius: 5;");
+        setStyled(section, "-fx-border-color: #e0e0e0; -fx-border-width: 1; -fx-border-radius: 5;");
 
         Label title = new Label("📊 Batch Queue Status");
-        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");        // color removed
+        title.getStyleClass().add("panel-heading");
 
         // Queue status grid - these values remain constant during processing
         GridPane statusGrid = new GridPane();
@@ -569,32 +594,34 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         // Total files (constant during batch)
         Label totalTitle = new Label("Total Files:");
-        totalTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(totalTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
         queueTotalLabel = new Label("0");
-        queueTotalLabel.setStyle("-fx-font-size: 12px;");
+        setStyled(queueTotalLabel, "-fx-font-size: 12px;");
 
         // Total duration (constant during batch)  
         Label durationTitle = new Label("Total Duration:");
-        durationTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(durationTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
         queueDurationLabel = new Label("0s");
-        queueDurationLabel.setStyle("-fx-font-size: 12px;");
+        setStyled(queueDurationLabel, "-fx-font-size: 12px;");
 
         // Completion counts (updated in real-time)
         Label completedTitle = new Label("Completed:");
-        completedTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(completedTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
         completedCountLabel = new Label("0");
-        completedCountLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #2e7d32;");
+        setStyled(completedCountLabel, "-fx-font-size: 12px; -fx-text-fill: #2e7d32;");
 
         Label failedTitle = new Label("Failed:");
-        failedTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(failedTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
         failedCountLabel = new Label("0");
-        failedCountLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #d32f2f;");
+        setStyled(failedCountLabel, "-fx-font-size: 12px;");
+        failedCountLabel.getStyleClass().add("status-negative");
 
         // Pending (added — total remaining to be processed: total - completed - failed)
         Label pendingTitle = new Label("Pending:");
-        pendingTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(pendingTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
         pendingCountLabel = new Label("0");
-        pendingCountLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #1565c0;");
+        setStyled(pendingCountLabel, "-fx-font-size: 12px;");
+        pendingCountLabel.getStyleClass().add("status-accent");
 
         statusGrid.add(totalTitle, 0, 0);
         statusGrid.add(queueTotalLabel, 1, 0);
@@ -627,7 +654,8 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         removeSelectedButton.setOnAction(e -> removeSelectedFilesFromTableView(fileTableView));
 
         Button clearAllButton = new Button("Clear All");
-        clearAllButton.setStyle("-fx-text-fill: #d32f2f;");
+        setStyled(clearAllButton, "");
+        clearAllButton.getStyleClass().add("status-negative");
         clearAllButton.setOnAction(e -> clearAllFiles());
 
         actionBox.getChildren().addAll(clearCompletedButton, removeSelectedButton, clearAllButton);
@@ -644,11 +672,13 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     VBox getFileSelectionControls() {
         VBox fileControls = new VBox(8);
         fileControls.setPadding(new Insets(15));
-        fileControls.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-background-color: white;");
+        setStyled(fileControls, "-fx-border-color: #bdc3c7; -fx-border-width: 0 0 1 0; -fx-background-color: white;");
+        fileControls.getStyleClass().add("theme-fix-surface");   // ← add
 
         // Row 1: Title Label
         Label titleLabel = new Label("🎵 Audio File Selection");
-        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #2c3e50;");
+        setStyled(titleLabel, "-fx-font-weight: bold; -fx-font-size: 14px;");   // color removed
+        titleLabel.getStyleClass().add("panel-heading");
 
         // Row 2: File input box and buttons
         HBox fileInputRow = new HBox(10);
@@ -657,18 +687,20 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         filePathField = new TextField();
         filePathField.setPromptText("🎵 Select audio file...");
         filePathField.setEditable(false);
-        filePathField.setStyle("-fx-background-color: #f8f9fa; -fx-border-color: #bdc3c7; -fx-border-radius: 4;");
+        setStyled(filePathField, "-fx-border-color: #bdc3c7; -fx-border-radius: 4;");
+        filePathField.getStyleClass().add("theme-fix-surface-alt");
         HBox.setHgrow(filePathField, Priority.ALWAYS);
 
         browseButton = new Button("📁 Browse...");
         browseButton.setOnAction(e -> selectAudioFiles()); // Multi-select
-        browseButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
+        browseButton.setStyle("-fx-font-weight: bold; -fx-background-radius: 4;");
+        browseButton.getStyleClass().add("action-btn-browse");
         browseButton.setPrefWidth(120);
 
         addFileButton = new Button("➕ Add to Queue");
         addFileButton.setOnAction(e -> addFilesToBatch()); // Multi-add
         addFileButton.setDisable(true);
-        addFileButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
+        setStyled(addFileButton, "-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
         addFileButton.setPrefWidth(140);
 
         // Add spacer to align with first row
@@ -681,10 +713,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         fileInfoRow.setAlignment(Pos.CENTER_LEFT);
 
         fileSizeLabel = new Label();
-        fileSizeLabel.setStyle("-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+        setStyled(fileSizeLabel, "-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
 
         fileDurationLabel = new Label();
-        fileDurationLabel.setStyle("-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+        setStyled(fileDurationLabel, "-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
 
         fileInfoRow.getChildren().addAll(fileSizeLabel, fileDurationLabel);
 
@@ -694,13 +726,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         clearQueueButton = new Button("🗑️ Clear Queue");
         clearQueueButton.setOnAction(e -> clearBatchFiles());
-        clearQueueButton.setStyle("-fx-background-color: #e67e22; -fx-text-fill: white; -fx-background-radius: 4;");
+        setStyled(clearQueueButton, "-fx-background-radius: 4;");
+        clearQueueButton.getStyleClass().add("action-btn-clear-queue-active");
         clearQueueButton.setPrefWidth(120);
 
         Button outputDirButton = new Button("📂 Output Directory...");
         outputDirButton.setOnAction(e -> selectOutputDirectory());
         outputDirButton.setTooltip(new Tooltip("Current: " + outputDirectory));
-        outputDirButton.setStyle("-fx-background-color: #9b59b6; -fx-text-fill: white; -fx-background-radius: 4;");
+        setStyled(outputDirButton, "-fx-background-radius: 4;");
+        outputDirButton.getStyleClass().add("action-btn-output-dir");
         outputDirButton.setPrefWidth(140);
 
         secondRow.getChildren().addAll(filePathField, clearQueueButton, outputDirButton);
@@ -839,13 +873,14 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         container.setPadding(new Insets(0, 0, 15, 0));
 
         Label titleLabel = new Label("🎵 Audio File Selection");
-        titleLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(titleLabel, "-fx-font-weight: bold; -fx-font-size: 14px;");   // color removed
+        titleLabel.getStyleClass().add("panel-heading");
 
         // Use the dedicated method instead of duplicating code
         VBox fileSelectionRow = createFileSelectionRow();
 
         fileSizeLabel = new Label();
-        fileSizeLabel.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
+        setStyled(fileSizeLabel, "-fx-text-fill: #666; -fx-font-size: 11px;");
 
 
         // Tools section with fixed height and scroll
@@ -867,14 +902,14 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         // Batch queue - using TableView instead of ListView
         VBox batchSection = new VBox(5);
         Label batchLabel = new Label("📋 Batch Queue:");
-        batchLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 12px;");
+        setStyled(batchLabel, "-fx-font-weight: bold; -fx-font-size: 12px;");
 
         TableView<BatchFileItem> fileTableView = createFileTableView();
         fileTableView.setItems(batchFiles);
         fileTableView.setPrefHeight(150);
 
         batchStatusLabel = new Label("📁 Queue: 0 files");
-        batchStatusLabel.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
+        setStyled(batchStatusLabel, "-fx-text-fill: #666; -fx-font-size: 11px;");
 
         batchSection.getChildren().addAll(batchLabel, fileTableView, batchStatusLabel);
 
@@ -899,14 +934,14 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         // Audio Splitter section
         VBox splitterSection = new VBox(5);
         Label splitterLabel = new Label("Audio Splitter");
-        splitterLabel.setStyle("-fx-font-weight: bold;");
+        setStyled(splitterLabel, "-fx-font-weight: bold;");
         Node splitterUI = audioSplitter.createUI();
         splitterSection.getChildren().addAll(splitterLabel, splitterUI);
 
         // File Combiner section  
         VBox combinerSection = new VBox(5);
         Label combinerLabel = new Label("File Combiner");
-        combinerLabel.setStyle("-fx-font-weight: bold;");
+        setStyled(combinerLabel, "-fx-font-weight: bold;");
         Node combinerUI = fileCombiner.createUI();
         combinerSection.getChildren().addAll(combinerLabel, combinerUI);
 
@@ -933,24 +968,26 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         filePathField = new TextField();
         filePathField.setPromptText("🎵 Select audio file...");
         filePathField.setEditable(false);
-        filePathField.setStyle("-fx-background-color: #f8f9fa; -fx-border-color: #bdc3c7; -fx-border-radius: 4;");
+        setStyled(filePathField, "-fx-border-color: #bdc3c7; -fx-border-radius: 4;");
+        filePathField.getStyleClass().add("theme-fix-surface-alt");
         HBox.setHgrow(filePathField, Priority.ALWAYS);
 
         browseButton = new Button("📁 Browse...");
         browseButton.setOnAction(e -> selectAudioFiles()); // Multi-select
-        browseButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
+        setStyled(browseButton, "-fx-font-weight: bold; -fx-background-radius: 4;");
+        browseButton.getStyleClass().add("action-btn-browse");
         browseButton.setPrefWidth(120);
 
         addFileButton = new Button("➕ Add to Queue");
         addFileButton.setOnAction(e -> addFilesToBatch()); // Multi-add
         addFileButton.setDisable(true); // Disabled on startup
-        addFileButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+        setStyled(addFileButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
         addFileButton.setPrefWidth(120);
 
         playButton = new Button("▶️ Play");
         playButton.setOnAction(e -> playSelectedFile());
         playButton.setDisable(true);
-        playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+        setStyled(playButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
         playButton.setPrefWidth(100);
 
         firstRow.getChildren().addAll(filePathField, browseButton, addFileButton, playButton);
@@ -962,13 +999,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         clearQueueButton = new Button("🗑️ Clear Queue");
         clearQueueButton.setOnAction(e -> clearBatchFiles());
         clearQueueButton.setDisable(true); // Disabled on startup - no files in queue
-        clearQueueButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+        setStyled(clearQueueButton, "-fx-background-radius: 4;");
+        clearQueueButton.getStyleClass().add("action-btn-clear-queue-disabled");
         clearQueueButton.setPrefWidth(120);
 
         Button outputDirButton = new Button("📂 Output Directory...");
         outputDirButton.setOnAction(e -> selectOutputDirectory());
         outputDirButton.setTooltip(new Tooltip("Current: " + outputDirectory));
-        outputDirButton.setStyle("-fx-background-color: #9b59b6; -fx-text-fill: white; -fx-background-radius: 4;");
+        setStyled(outputDirButton, "-fx-background-radius: 4;");
+        outputDirButton.getStyleClass().add("action-btn-output-dir");
         outputDirButton.setPrefWidth(140);
 
         // Add spacer to align with first row
@@ -1001,9 +1040,9 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         // Update button style based on state
         if (hasFiles) {
-            addFileButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
+            setStyled(addFileButton, "-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-background-radius: 4;");
         } else {
-            addFileButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+            setStyled(addFileButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
         }
     }
 
@@ -1088,7 +1127,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 filePathField.setText(selectedFile.getAbsolutePath());
                 updateFileInfoLabels(selectedFile);
                 playButton.setDisable(false);
-                playButton.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-background-radius: 4;");
+                setStyled(playButton, "-fx-background-color: #27ae60; -fx-text-fill: white; -fx-background-radius: 4;");
                 if (waveformView != null) waveformView.loadAndRender(selectedFile);
             } else {
                 filePathField.setText(selectedFiles.size() + " files selected");
@@ -1096,7 +1135,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 fileDurationLabel.setText("");
                 stopPlayback();
                 playButton.setDisable(true);
-                playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+                setStyled(playButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
                 if (waveformView != null) waveformView.clear();
             }
 
@@ -1111,7 +1150,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             updateAddToQueueButtonState(false);
             stopPlayback();
             playButton.setDisable(true);
-            playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+            setStyled(playButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
             if (waveformView != null) waveformView.clear();
         }
     }
@@ -1182,7 +1221,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         updateAddToQueueButtonState(false);
         stopPlayback();
         playButton.setDisable(true);
-        playButton.setStyle("-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
+        setStyled(playButton, "-fx-background-color: #bdc3c7; -fx-text-fill: #7f8c8d; -fx-background-radius: 4;");
     }
 
     private void updateFileInfoLabels(File file) {
@@ -1195,13 +1234,13 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 "❌ File size: %.2f MB (EXCEEDS %d MB limit)", 
                 sizeMB, AppConstants.MAX_FILE_SIZE_MB
             ));
-            fileSizeLabel.setStyle("-fx-text-fill: red; -fx-font-size: 11px;");
+            setStyled(fileSizeLabel, "-fx-text-fill: red; -fx-font-size: 11px;");
             addFileButton.setDisable(true);
             fileDurationLabel.setText(""); // Clear duration if file is too large
             log("⚠️ WARNING: File exceeds maximum size limit");
         } else {
             fileSizeLabel.setText(String.format("📏 File size: %.2f MB", sizeMB));
-            fileSizeLabel.setStyle("-fx-text-fill: green; -fx-font-size: 11px;");
+            setStyled(fileSizeLabel, "-fx-text-fill: green; -fx-font-size: 11px;");
             addFileButton.setDisable(false);
 
             // Calculate and display duration
@@ -1209,10 +1248,11 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             if (duration > 0) {
                 String durationText = formatDuration(duration);
                 fileDurationLabel.setText("⏱️ Duration: " + durationText);
-                fileDurationLabel.setStyle("-fx-text-fill: #3498db; -fx-font-size: 11px;");
+                setStyled(fileDurationLabel, "-fx-font-size: 11px;");
+                fileDurationLabel.getStyleClass().add("status-accent");
             } else {
                 fileDurationLabel.setText("⏱️ Duration: Unknown");
-                fileDurationLabel.setStyle("-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
+                setStyled(fileDurationLabel, "-fx-text-fill: #7f8c8d; -fx-font-size: 11px;");
             }
         }
     }
@@ -1450,17 +1490,17 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 // Style based on status
                 String status = item.getStatus();
                 if (ProcessingStatus.COMPLETED.name().equals(status)) {
-                    statusLabel.setStyle("-fx-text-fill: #4CAF50; -fx-font-weight: bold;");
-                    progressBar.setStyle("-fx-accent: #4CAF50;");
+                    setStyled(statusLabel, "-fx-text-fill: #4CAF50; -fx-font-weight: bold;");
+                    setStyled(progressBar, "-fx-accent: #4CAF50;");
                 } else if (ProcessingStatus.PROCESSING.name().equals(status)) {
-                    statusLabel.setStyle("-fx-text-fill: #2196F3; -fx-font-weight: bold;");
-                    progressBar.setStyle("-fx-accent: #2196F3;");
+                    setStyled(statusLabel, "-fx-text-fill: #2196F3; -fx-font-weight: bold;");
+                    setStyled(progressBar, "-fx-accent: #2196F3;");
                 } else if (ProcessingStatus.FAILED.name().equals(status)) {
-                    statusLabel.setStyle("-fx-text-fill: #F44336; -fx-font-weight: bold;");
-                    progressBar.setStyle("-fx-accent: #F44336;");
+                    setStyled(statusLabel, "-fx-text-fill: #F44336; -fx-font-weight: bold;");
+                    setStyled(progressBar, "-fx-accent: #F44336;");
                 } else {
-                    statusLabel.setStyle("-fx-text-fill: #666;");
-                    progressBar.setStyle("-fx-accent: #666;");
+                    setStyled(statusLabel, "-fx-text-fill: #666;");
+                    setStyled(progressBar, "-fx-accent: #666;");
                 }
 
                 setGraphic(content);
@@ -1546,10 +1586,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
             // Update colors based on status
             if (completed > 0) {
-                completedCountLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #2e7d32; -fx-font-size: 12px;");
+                setStyled(completedCountLabel, "-fx-font-weight: bold; -fx-text-fill: #2e7d32; -fx-font-size: 12px;");
             }
             if (failed > 0) {
-                failedCountLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #d32f2f; -fx-font-size: 12px;");
+                setStyled(failedCountLabel, "-fx-font-weight: bold; -fx-text-fill: #d32f2f; -fx-font-size: 12px;");
             }
 
             LOGGER.debug("Completed/Failed counts updated: {}/{}", completed, failed);
@@ -1733,13 +1773,13 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                    BatchFileItem item = getTableView().getItems().get(getIndex());
                    String status = item.getStatus();
                    if ("COMPLETED".equals(status)) {
-                       progressBar.setStyle("-fx-accent: #4CAF50;");
+                       setStyled(progressBar, "-fx-accent: #4CAF50;");
                    } else if ("PROCESSING".equals(status)) {
-                       progressBar.setStyle("-fx-accent: #2196F3;");
+                       setStyled(progressBar, "-fx-accent: #2196F3;");
                    } else if ("FAILED".equals(status)) {
-                       progressBar.setStyle("-fx-accent: #F44336;");
+                       setStyled(progressBar, "-fx-accent: #F44336;");
                    } else {
-                       progressBar.setStyle("-fx-accent: #666;");
+                       setStyled(progressBar, "-fx-accent: #666;");
                    }
 
                    setGraphic(container);

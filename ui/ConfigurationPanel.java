@@ -6,6 +6,7 @@ package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
+import audiomanager.ui.ThemeManager;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.util.PreferenceManager;
@@ -22,6 +23,12 @@ import org.slf4j.LoggerFactory;
  * Configuration panel for audio processing and transcription settings
  */
 public class ConfigurationPanel {
+
+    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
+    private static void setStyled(javafx.scene.Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
     private static final Logger LOGGER = LoggerFactory.getLogger(ConfigurationPanel.class);
     
     private final ScrollPane root;
@@ -43,6 +50,7 @@ public class ConfigurationPanel {
     private CheckBox keepProcessedCheckBox;
     private CheckBox enableTranscriptionCheckBox;
     private CheckBox autoRemoveCompletedCheckBox;
+    private CheckBox adaptiveScalingCheckBox;
     private CheckBox removeSilenceCheckBox;
     private CheckBox normalizeCheckBox;
     private Slider silenceThresholdSlider;
@@ -132,6 +140,7 @@ public class ConfigurationPanel {
             prefManager.putBoolean(PreferenceKeys.KEEP_PROCESSED, keepProcessedCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, enableTranscriptionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, autoRemoveCompletedCheckBox.isSelected());
+            prefManager.putBoolean("adaptive_scaling_enabled", adaptiveScalingCheckBox.isSelected());
             prefManager.putBoolean("remove_silence", removeSilenceCheckBox.isSelected());
             // FIX: same bug shape as noise reduction above, just across classes
             // instead of within one method: this used to write the raw
@@ -231,6 +240,8 @@ public class ConfigurationPanel {
         keepProcessedCheckBox = new CheckBox("Keep Processed Audio File");
         enableTranscriptionCheckBox = new CheckBox("Enable Transcription");
         autoRemoveCompletedCheckBox = new CheckBox("Auto-Remove Completed Files");
+        adaptiveScalingCheckBox = new CheckBox("Adaptive Concurrency Scaling");
+        adaptiveScalingCheckBox.setSelected(true);
         removeSilenceCheckBox = new CheckBox("Remove Silence from Audio");
         normalizeCheckBox = new CheckBox("Normalize Audio");
 
@@ -302,6 +313,10 @@ public class ConfigurationPanel {
         keepProcessedCheckBox.setTooltip(new Tooltip("Keep processed audio files"));
         enableTranscriptionCheckBox.setTooltip(new Tooltip("Enable audio-to-text transcription"));
         autoRemoveCompletedCheckBox.setTooltip(new Tooltip("Remove files from queue after completion"));
+        adaptiveScalingCheckBox.setTooltip(new Tooltip(
+                "Automatically reduce concurrency under high memory/CPU pressure (recommended). "
+                + "Turn off to run at a fixed concurrency level regardless of measured pressure — "
+                + "useful for baseline performance measurements."));
         removeSilenceCheckBox.setTooltip(new Tooltip("Detect and remove silent sections"));
         normalizeCheckBox.setTooltip(new Tooltip("Normalize to broadcast standard (-16 LUFS)"));
         silenceThresholdSlider.setTooltip(new Tooltip("Loudness threshold for silence detection (dB)"));
@@ -318,7 +333,7 @@ public class ConfigurationPanel {
         section.setPadding(new Insets(10));
         
         Label title = new Label("🎨 Interface");
-        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
 
         HBox fontBox = new HBox(10);
         fontBox.setAlignment(Pos.CENTER_LEFT);
@@ -446,7 +461,7 @@ public class ConfigurationPanel {
         section.setPadding(new Insets(10));
         
         Label title = new Label("⚙️ Batch Processing");
-        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
 
         HBox parallelBox = new HBox(10);
         parallelBox.setAlignment(Pos.CENTER_LEFT);
@@ -456,10 +471,10 @@ public class ConfigurationPanel {
 
         Label recommendLabel = new Label(String.format("(Recommended: %d)", 
             Math.max(1, Runtime.getRuntime().availableProcessors() / 2)));
-        recommendLabel.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
+        setStyled(recommendLabel, "-fx-text-fill: #666; -fx-font-size: 11px;");
 
         parallelBox.getChildren().addAll(parallelLabel, maxParallelSpinner, recommendLabel);
-        section.getChildren().addAll(title, parallelBox, autoRemoveCompletedCheckBox);
+        section.getChildren().addAll(title, parallelBox, autoRemoveCompletedCheckBox, adaptiveScalingCheckBox);
 
         return section;
     }
@@ -469,7 +484,7 @@ public class ConfigurationPanel {
         section.setPadding(new Insets(10));
         
         Label title = new Label("🎤 Transcription (Whisper)");
-        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
 
         GridPane grid = new GridPane();
         grid.setHgap(15);
@@ -545,7 +560,7 @@ public class ConfigurationPanel {
         section.setPadding(new Insets(10));
         
         Label title = new Label("🎧 Audio Processing (FFmpeg)");
-        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
 
         GridPane grid = new GridPane();
         grid.setHgap(15);
@@ -674,6 +689,7 @@ public class ConfigurationPanel {
         keepProcessedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.KEEP_PROCESSED, false));
         enableTranscriptionCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, true));
         autoRemoveCompletedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, false));
+        adaptiveScalingCheckBox.setSelected(prefManager.getBoolean("adaptive_scaling_enabled", true));
         removeSilenceCheckBox.setSelected(prefManager.getBoolean("remove_silence", false));
         normalizeCheckBox.setSelected(prefManager.isNormalizeAudioEnabled());
 
@@ -761,6 +777,10 @@ public class ConfigurationPanel {
 
     public boolean isAutoRemoveCompleted() {
         return autoRemoveCompletedCheckBox.isSelected();
+    }
+
+    public boolean isAdaptiveScalingEnabled() {
+        return adaptiveScalingCheckBox.isSelected();
     }
 
     public void setEnabled(boolean enabled) {

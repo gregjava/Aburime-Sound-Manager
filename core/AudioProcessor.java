@@ -475,13 +475,25 @@ public class AudioProcessor {
             if (!exited) {
                 process.destroyForcibly();
                 LOGGER.error("FFmpeg timeout. Output:\n{}", outputLog);
-                throw new java.util.concurrent.TimeoutException("FFmpeg process timed out");
+                // FIX: matches analyzeVolume()/amplifyAudio() — a timeout is
+                // still an FfmpegException (recoverable: skip this file,
+                // don't abort the whole batch), not a raw TimeoutException
+                // the caller has no FFmpeg-specific context to act on.
+                throw new FfmpegException(
+                        "FFmpeg process timed out after " + AppConstants.FFMPEG_TIMEOUT_HOURS + "h",
+                        "Processing this file is taking far longer than expected and was stopped. "
+                                + "The file may be unusually long, corrupt, or in a format that's slow to decode.",
+                        -1, tail(outputLog.toString()));
             }
 
             int exitCode = process.exitValue();
             if (exitCode != 0) {
                 LOGGER.error("FFmpeg failed (exit {}). Output:\n{}", exitCode, outputLog);
-                throw new IOException("FFmpeg exited with error code: " + exitCode);
+                throw new FfmpegException(
+                        "FFmpeg exited with error code: " + exitCode,
+                        "FFmpeg couldn't process this file (exit code " + exitCode + "). "
+                                + "It may be corrupt or in an unsupported format.",
+                        exitCode, tail(outputLog.toString()));
             }
 
             if (callback != null) callback.updateProgress(1.0);
