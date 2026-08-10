@@ -202,6 +202,20 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scene.getAccelerators().put(
                 javafx.scene.input.KeyCombination.keyCombination("Shortcut+R"),
                 this::handleProcessButtonClick);
+        // FIX (short-term improvement list): Open-file and Open-directory
+        // had no keyboard shortcut at all — "Browse..."/"Output
+        // Directory..." are toolbar buttons, not File-menu items, so there
+        // was nothing to attach a MenuItem accelerator to. Wired as
+        // scene-level accelerators instead, same mechanism as Shortcut+R
+        // above, calling into public wrapper methods on FileSelectionPanel
+        // so its private selection logic doesn't need to be exposed
+        // directly.
+        scene.getAccelerators().put(
+                javafx.scene.input.KeyCombination.keyCombination("Shortcut+O"),
+                fileSelectionPanel::triggerBrowse);
+        scene.getAccelerators().put(
+                javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+O"),
+                fileSelectionPanel::triggerOutputDirectoryChooser);
         stage.setScene(scene);
 
         // FIX: darkModeItem.setSelected(...) only set the *checkbox's*
@@ -679,6 +693,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     private TitledPane createTextFileCombinerPane() {
         TitledPane pane = new TitledPane();
         pane.setText("📄 Text File Combiner");
+        pane.getStyleClass().add("panel-heading-pane");
         pane.setCollapsible(true);
         pane.setExpanded(false);
 

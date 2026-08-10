@@ -185,6 +185,33 @@ public class PreferenceManager {
     public void setLastTextCombinerLocation(String path) {
         prefs.put(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, path);
     }
+
+    /**
+     * Get last Audio Splitter OUTPUT directory (distinct from the input-file
+     * location above). Falls back to the app's general output directory,
+     * then the user's home, so a first-time user still gets something
+     * sensible.
+     */
+    public String getLastAudioSplitterOutputLocation() {
+        return prefs.get("last_audio_splitter_output_location", getOutputDirectory());
+    }
+
+    public void setLastAudioSplitterOutputLocation(String path) {
+        prefs.put("last_audio_splitter_output_location", path);
+    }
+
+    /**
+     * Get last Text File Combiner OUTPUT location (the folder the save
+     * dialog opens into — the combined filename itself isn't remembered,
+     * only the directory).
+     */
+    public String getLastTextCombinerOutputLocation() {
+        return prefs.get("last_text_combiner_output_location", getOutputDirectory());
+    }
+
+    public void setLastTextCombinerOutputLocation(String path) {
+        prefs.put("last_text_combiner_output_location", path);
+    }
     // Audio Processing Settings
     public boolean isNoiseReductionEnabled() {
         return getBoolean(PreferenceKeys.NOISE_REDUCTION_ENABLED, false);

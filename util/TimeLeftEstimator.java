@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) AudioManager Project Contributors.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 package audiomanager.util;
 
 import org.slf4j.Logger;

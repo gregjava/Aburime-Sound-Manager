@@ -148,10 +148,16 @@ public class ParallelProcessingManager {
     // always lost, silently producing zero output files.
     private final TranscriptionOutputWriter outputWriter = new TranscriptionOutputWriter();
     private volatile boolean exportWordCopy = false;
+    private volatile boolean exportPdfCopy = false;
 
-    /** Whether saveOutputDirectly() should also write a Word-compatible .html copy alongside the normal output. */
+    /** Whether saveOutputDirectly() should also write a genuine Word-compatible .docx copy alongside the normal output. */
     public void setExportWordCopy(boolean exportWordCopy) {
         this.exportWordCopy = exportWordCopy;
+    }
+
+    /** Whether saveOutputDirectly() should also write a browser-printable-to-PDF .html copy alongside the normal output — see {@link TranscriptionOutputWriter#exportToPdf} for why this is HTML rather than a native PDF. */
+    public void setExportPdfCopy(boolean exportPdfCopy) {
+        this.exportPdfCopy = exportPdfCopy;
     }
 
     private volatile boolean initialized = false;
@@ -1330,6 +1336,32 @@ public class ParallelProcessingManager {
                     // A failed optional export must never fail the whole file — the
                     // primary .srt/.txt output above already succeeded.
                     LOGGER.warn("Failed to save Word-compatible copy for {}: {}", originalFile.getName(), e.getMessage());
+                }
+            }
+
+            if (exportPdfCopy) {
+                try {
+                    // Same optional/best-effort treatment as the Word copy above —
+                    // never allowed to fail the file's primary output.
+                    String outName = out.getName();
+                    int dot = outName.lastIndexOf('.');
+                    String baseName = dot > 0 ? outName.substring(0, dot) : outName;
+                    String pdfPath = Paths.get(config.getOutputDirectory(), baseName + ".pdf").toString();
+                    // exportToPDF writes an HTML file (see its own javadoc for why —
+                    // no PDF library is on the build's classpath), so the file that
+                    // actually lands on disk ends in .html even though pdfPath ends
+                    // in .pdf; check the file exportToPDF actually returns instead
+                    // of assuming the .pdf path itself.
+                    File pdfFile = outputWriter.exportToPDF(result, pdfPath);
+                    if (!pdfFile.exists() || pdfFile.length() == 0) {
+                        LOGGER.warn("PDF-compatible copy for {} reported success but is missing/empty: {}",
+                                originalFile.getName(), pdfFile);
+                    } else {
+                        LOGGER.info("Saved PDF-compatible (.html, printable to PDF) copy for {}: {}",
+                                originalFile.getName(), pdfFile);
+                    }
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to save PDF-compatible copy for {}: {}", originalFile.getName(), e.getMessage());
                 }
             }
         } catch (IOException e) {

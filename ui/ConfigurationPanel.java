@@ -47,6 +47,7 @@ public class ConfigurationPanel {
     private ComboBox<TranscriptionConfig.TimestampMode> timestampModeComboBox;
     private CheckBox confidenceCheckBox;
     private CheckBox exportWordCopyCheckBox;
+    private CheckBox exportPdfCopyCheckBox;
     private CheckBox keepProcessedCheckBox;
     private CheckBox enableTranscriptionCheckBox;
     private CheckBox autoRemoveCompletedCheckBox;
@@ -137,6 +138,7 @@ public class ConfigurationPanel {
             prefManager.setNoiseReductionEnabled(noiseReductionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.CONFIDENCE_ENABLED, confidenceCheckBox.isSelected());
             prefManager.putBoolean("export_word_copy", exportWordCopyCheckBox.isSelected());
+            prefManager.putBoolean("export_pdf_copy", exportPdfCopyCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.KEEP_PROCESSED, keepProcessedCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, enableTranscriptionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, autoRemoveCompletedCheckBox.isSelected());
@@ -237,6 +239,7 @@ public class ConfigurationPanel {
         noiseReductionCheckBox = new CheckBox("Enable Noise Reduction");
         confidenceCheckBox = new CheckBox("Include Confidence Scores");
         exportWordCopyCheckBox = new CheckBox("Also Save Word-Compatible (.docx) Copy");
+        exportPdfCopyCheckBox = new CheckBox("Also Save PDF-Compatible (.html) Copy");
         keepProcessedCheckBox = new CheckBox("Keep Processed Audio File");
         enableTranscriptionCheckBox = new CheckBox("Enable Transcription");
         autoRemoveCompletedCheckBox = new CheckBox("Auto-Remove Completed Files");
@@ -310,6 +313,7 @@ public class ConfigurationPanel {
             "fixed: Fixed duration segments"));
         confidenceCheckBox.setTooltip(new Tooltip("Add confidence metrics to transcription"));
         exportWordCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save a genuine .docx copy Word can open and edit directly"));
+        exportPdfCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save an .html copy formatted for printing to PDF from a browser or Word (no PDF library is bundled, so this isn't a native .pdf file)"));
         keepProcessedCheckBox.setTooltip(new Tooltip("Keep processed audio files"));
         enableTranscriptionCheckBox.setTooltip(new Tooltip("Enable audio-to-text transcription"));
         autoRemoveCompletedCheckBox.setTooltip(new Tooltip("Remove files from queue after completion"));
@@ -523,10 +527,13 @@ public class ConfigurationPanel {
         GridPane.setColumnSpan(exportWordCopyCheckBox, 4);
         grid.add(exportWordCopyCheckBox, 0, 4);
 
+        GridPane.setColumnSpan(exportPdfCopyCheckBox, 4);
+        grid.add(exportPdfCopyCheckBox, 0, 5);
+
         // Row 4: SRT settings
         Label srtLabel = new Label("SRT Settings:");
         srtLabel.setMinWidth(80);
-        grid.add(srtLabel, 0, 5);
+        grid.add(srtLabel, 0, 6);
         
         HBox srtBox = new HBox(10);
         srtBox.setAlignment(Pos.CENTER_LEFT);
@@ -535,12 +542,12 @@ public class ConfigurationPanel {
             new Label("Max chars:"), srtMaxCharsSpinner,
             new Label("Max lines:"), srtMaxLinesSpinner
         );
-        grid.add(srtBox, 1, 5, 3, 1);
+        grid.add(srtBox, 1, 6, 3, 1);
 
         // Row 5: Segment duration
         Label segmentLabel = new Label("Max Segment:");
         segmentLabel.setMinWidth(80);
-        grid.add(segmentLabel, 0, 6);
+        grid.add(segmentLabel, 0, 7);
         
         HBox segmentBox = new HBox(10);
         segmentBox.setAlignment(Pos.CENTER_LEFT);
@@ -549,7 +556,7 @@ public class ConfigurationPanel {
             maxSegmentDurationSpinner,
             new Label("seconds")
         );
-        grid.add(segmentBox, 1, 6, 3, 1);
+        grid.add(segmentBox, 1, 7, 3, 1);
 
         section.getChildren().addAll(title, grid);
         return section;
@@ -662,6 +669,18 @@ public class ConfigurationPanel {
         // Load font size
         fontSizeSlider.setValue(prefManager.getFontSize());
 
+        // FIX: the log-level ComboBox was saved to preferences on change
+        // (see the listener in buildXxxSection() below) but never read back
+        // here — so the saved choice was silently discarded on every
+        // restart, same bug shape as the noise-reduction key mismatch
+        // documented further down in this method. setValue() also fires
+        // the ComboBox's own valueProperty listener when the saved level
+        // differs from the default, which re-applies it via
+        // applyLogLevel() — so this both restores the UI state and
+        // actually re-arms the logging backend at startup, not just the
+        // ComboBox's visible selection.
+        logLevelComboBox.setValue(prefManager.getString("log_level", "INFO"));
+
         // Load transcription preferences
         modelComboBox.setValue(prefManager.getString(PreferenceKeys.MODEL, AppConstants.DEFAULT_MODEL));
         languageComboBox.setValue(prefManager.getString(PreferenceKeys.LANGUAGE, AppConstants.DEFAULT_LANGUAGE));
@@ -686,6 +705,7 @@ public class ConfigurationPanel {
         noiseReductionCheckBox.setSelected(prefManager.isNoiseReductionEnabled());
         confidenceCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.CONFIDENCE_ENABLED, false));
         exportWordCopyCheckBox.setSelected(prefManager.getBoolean("export_word_copy", false));
+        exportPdfCopyCheckBox.setSelected(prefManager.getBoolean("export_pdf_copy", false));
         keepProcessedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.KEEP_PROCESSED, false));
         enableTranscriptionCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, true));
         autoRemoveCompletedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, false));
@@ -775,6 +795,10 @@ public class ConfigurationPanel {
         return exportWordCopyCheckBox.isSelected();
     }
 
+    public boolean isExportPdfCopyEnabled() {
+        return exportPdfCopyCheckBox.isSelected();
+    }
+
     public boolean isAutoRemoveCompleted() {
         return autoRemoveCompletedCheckBox.isSelected();
     }
@@ -796,6 +820,7 @@ public class ConfigurationPanel {
         timestampModeComboBox.setDisable(!enabled);
         confidenceCheckBox.setDisable(!enabled);
         exportWordCopyCheckBox.setDisable(!enabled);
+        exportPdfCopyCheckBox.setDisable(!enabled);
         keepProcessedCheckBox.setDisable(!enabled);
         enableTranscriptionCheckBox.setDisable(!enabled);
         autoRemoveCompletedCheckBox.setDisable(!enabled);

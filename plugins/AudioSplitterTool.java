@@ -266,15 +266,24 @@ public class AudioSplitterTool {
     private void chooseOutputDirectory() {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle("Select Output Directory for Split Files");
-        
+
+        // Prefer whatever's already typed in the field (mid-session choice),
+        // then fall back to the last directory this dialog was actually
+        // used from, so re-opening the app doesn't reset it to nothing.
         File currentDir = new File(outputDirField.getText());
         if (currentDir.exists()) {
             chooser.setInitialDirectory(currentDir);
+        } else {
+            File lastUsed = new File(prefManager.getLastAudioSplitterOutputLocation());
+            if (lastUsed.exists()) {
+                chooser.setInitialDirectory(lastUsed);
+            }
         }
-        
+
         File dir = chooser.showDialog(null);
         if (dir != null) {
             outputDirField.setText(dir.getAbsolutePath());
+            prefManager.setLastAudioSplitterOutputLocation(dir.getAbsolutePath());
         }
     }
     

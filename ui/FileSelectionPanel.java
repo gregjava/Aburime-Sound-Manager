@@ -935,6 +935,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         VBox splitterSection = new VBox(5);
         Label splitterLabel = new Label("Audio Splitter");
         setStyled(splitterLabel, "-fx-font-weight: bold;");
+        splitterLabel.getStyleClass().add("panel-heading");
         Node splitterUI = audioSplitter.createUI();
         splitterSection.getChildren().addAll(splitterLabel, splitterUI);
 
@@ -942,6 +943,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         VBox combinerSection = new VBox(5);
         Label combinerLabel = new Label("File Combiner");
         setStyled(combinerLabel, "-fx-font-weight: bold;");
+        combinerLabel.getStyleClass().add("panel-heading");
         Node combinerUI = fileCombiner.createUI();
         combinerSection.getChildren().addAll(combinerLabel, combinerUI);
 
@@ -1091,6 +1093,20 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         if (playButton != null) {
             playButton.setText("▶️ Play");
         }
+    }
+
+    /**
+     * Public entry points for keyboard shortcuts (Ctrl+O / Ctrl+Shift+O in
+     * MainWindow) to trigger the same actions as the Browse... and Output
+     * Directory... buttons, without exposing the private selection methods
+     * or button fields themselves.
+     */
+    public void triggerBrowse() {
+        selectAudioFiles();
+    }
+
+    public void triggerOutputDirectoryChooser() {
+        selectOutputDirectory();
     }
 
     /**

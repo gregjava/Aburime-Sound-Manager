@@ -285,7 +285,24 @@ public class FileCombinerTool {
         FileChooser fileChooser = new FileChooser();
         fileChooser.setTitle("Choose Output File Location");
         fileChooser.setInitialFileName("combined_output.txt");
-        
+
+        // Same pattern as AudioSplitterTool: prefer the current field value
+        // if it points somewhere real, otherwise fall back to the last
+        // directory this dialog actually saved to, so it doesn't reset to
+        // the OS default every time the app restarts.
+        String currentPath = outputPathField.getText();
+        File initialDir = (currentPath != null && !currentPath.isEmpty())
+                ? new File(currentPath).getParentFile()
+                : null;
+        if (initialDir != null && initialDir.exists()) {
+            fileChooser.setInitialDirectory(initialDir);
+        } else {
+            File lastUsed = new File(prefManager.getLastTextCombinerOutputLocation());
+            if (lastUsed.exists()) {
+                fileChooser.setInitialDirectory(lastUsed);
+            }
+        }
+
         fileChooser.getExtensionFilters().addAll(
             new FileChooser.ExtensionFilter("Text Files", "*.txt"),
             new FileChooser.ExtensionFilter("All Files", "*.*")
@@ -294,6 +311,9 @@ public class FileCombinerTool {
         File file = fileChooser.showSaveDialog(null);
         if (file != null) {
             outputPathField.setText(file.getAbsolutePath());
+            if (file.getParentFile() != null) {
+                prefManager.setLastTextCombinerOutputLocation(file.getParentFile().getAbsolutePath());
+            }
         }
     }
     

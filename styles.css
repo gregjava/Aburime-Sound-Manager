@@ -292,46 +292,17 @@
     -fx-background-radius: 8;
 }
 
-.theme-fix-surface {
-    -fx-background-color: white;
-}
-
-.theme-fix-surface-alt {
-    -fx-background-color: #f8f9fa;
-}
-
-.panel-heading {
-    -fx-text-fill: #2c3e50;
-}
-
-.panel-heading-pane > .title {
-    -fx-text-fill: #2c3e50;
-}
-
-.status-negative {
-    -fx-text-fill: #d32f2f;
-}
-
-.status-accent {
-    -fx-text-fill: #1565c0;
-}
-
-.status-success {
-    -fx-text-fill: #4CAF50;
-}
-
-.tool-subheading {
-    -fx-text-fill: #34495e;
-}
-
-.tool-muted-text {
-    -fx-text-fill: #7f8c8d;
-}
-
-.tool-preview-surface {
-    -fx-background-color: #f8f9fa;
-}
-
+.theme-fix-surface { -fx-background-color: white; }
+.theme-fix-surface-alt { -fx-background-color: #f8f9fa; }
+.panel-heading { -fx-text-fill: #2c3e50; }
+.panel-heading-pane .title { -fx-text-fill: #2c3e50; }
+.panel-heading-pane .title .text { -fx-fill: #2c3e50; }
+.status-negative { -fx-text-fill: #d32f2f; }
+.status-accent { -fx-text-fill: #1565c0; }
+.status-success { -fx-text-fill: #4CAF50; }
+.tool-subheading { -fx-text-fill: #34495e; }
+.tool-muted-text { -fx-text-fill: #7f8c8d; }
+.tool-preview-surface { -fx-background-color: #f8f9fa; }
 .tool-button-blue    { -fx-background-color: #3498db; }
 .tool-button-purple  { -fx-background-color: #9b59b6; }
 .tool-button-red     { -fx-background-color: #e74c3c; }
@@ -359,6 +330,19 @@
     -fx-padding: 6 14;
 }
 .action-btn-clear-queue-disabled {
+    -fx-background-color: #bdc3c7;
+    -fx-text-fill: #7f8c8d;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-add-to-queue-active {
+    -fx-background-color: #27ae60;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+.action-btn-add-to-queue-disabled {
     -fx-background-color: #bdc3c7;
     -fx-text-fill: #7f8c8d;
     -fx-background-radius: 4;

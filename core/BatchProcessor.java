@@ -309,6 +309,10 @@ public class BatchProcessor implements SegmentProgressListener {
                 && preferenceManager.getBoolean("export_word_copy", false);
         parallelManager.setExportWordCopy(exportWordCopy);
 
+        boolean exportPdfCopy = preferenceManager != null
+                && preferenceManager.getBoolean("export_pdf_copy", false);
+        parallelManager.setExportPdfCopy(exportPdfCopy);
+
         // FIX (consolidation): this used to spin up its own executor and run
         // a fully separate sequential implementation (executeBatch() /
         // processItem()) — a second, independently-maintained copy of "walk
