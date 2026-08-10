@@ -1952,6 +1952,22 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         TranscriptionConfig transcriptionConfig = configurationPanel.getTranscriptionConfig();
         int maxParallel = configurationPanel.getMaxParallelFiles();
 
+        // FIX (critical wiring gap): the "Adaptive Concurrency Scaling"
+        // checkbox previously had no effect on an actual batch run — its
+        // value was saved to preferences but nothing ever propagated it to
+        // ParallelProcessingManager, whose fixed-ceiling logic was already
+        // implemented and just never invoked. Read directly from the live
+        // checkbox state (not from preferences, which may be stale if
+        // savePreferences() hasn't run since the last toggle) right before
+        // the batch actually starts, so unchecking this box in the UI is
+        // guaranteed to produce a genuine fixed-concurrency run — this is
+        // what makes a controlled baseline-vs-adaptive comparison possible.
+        batchProcessor.setAdaptiveScalingEnabled(configurationPanel.isAdaptiveScalingEnabled());
+        log(configurationPanel.isAdaptiveScalingEnabled()
+                ? "⚙️ Adaptive concurrency scaling: ENABLED"
+                : "⚙️ Adaptive concurrency scaling: DISABLED (fixed-concurrency baseline mode — held at Max Parallel Files = "
+                        + maxParallel + ")");
+
         // FIX (consolidation): was a branch here between
         // startStandardBatchProcessing() (maxParallel <= 1) and
         // startParallelBatchProcessing() (maxParallel > 1) — two separate

@@ -1250,10 +1250,12 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         return "import sys, json, os\n"
                 + "os.environ.setdefault('HF_HUB_OFFLINE', '1')\n"
                 + "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')\n"
+                + "import torch\n"
                 + "import whisperx\n"
                 + "audio_file = sys.argv[1]\n"
                 + "output_dir = sys.argv[sys.argv.index('--output-dir') + 1]\n"   // ← fixed: hyphen
-                + "model = whisperx.load_model('" + modelName + "', device='cpu', compute_type='int8')\n"
+                + "device = 'cuda' if torch.cuda.is_available() else 'cpu'\n"
+                + "model = whisperx.load_model('" + modelName + "', device=device, compute_type=('float16' if device == 'cuda' else 'int8'))\n"
                 + "audio = whisperx.load_audio(audio_file)\n"
                 + "result = model.transcribe(audio, batch_size=16)\n"
                 + "out = os.path.join(output_dir, 'result.json')\n"

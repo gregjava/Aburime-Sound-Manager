@@ -4,10 +4,15 @@
  */
 package audiomanager.core;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,6 +20,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Single source of truth for locating a faster-whisper model folder inside
@@ -43,24 +49,18 @@ import java.util.Optional;
  * findModelPath}, happened to null-guard it correctly — which is exactly the
  * kind of inconsistency you get from copy-pasted logic.)
  *
- * <h2>What this is not</h2>
- * This is still filesystem-pattern matching, not a query against
- * HuggingFace's own manifest/index — a genuinely robust fix would shell out
- * to {@code huggingface-cli scan-cache --format json} (or use the
- * `huggingface_hub` Python API, since this app already depends on Python for
- * WhisperX) and parse the real cache index instead of guessing folder name
- * patterns. That's flagged as a follow-up in the class-level TODO below
- * rather than done here, since it changes the runtime dependency surface
- * (requires huggingface_hub's CLI to be present and is a bigger behavioral
- * change) and deserves its own review rather than being bundled into a
- * refactor-and-bugfix pass.
- *
- * <h3>TODO (follow-up, not done here)</h3>
- * Replace {@link #candidateRoots()} pattern-matching with a call to
- * {@code huggingface-cli scan-cache --format json}, parsed the same way
+ * <h2>Manifest-based resolution (this class's main lookup path)</h2>
+ * {@link #resolve(String)} now queries HuggingFace's own cache index via
+ * {@code huggingface-cli scan-cache --format json} first — the real
+ * manifest, not a guess at folder-naming conventions — parsed the same way
  * {@code WhisperXTranscriptionService} already parses subprocess JSON
- * output, falling back to this pattern-matching implementation only if that
- * command is unavailable.
+ * output (see {@code isWhisperXInstalled} there for the established
+ * ProcessBuilder + redirected-stream + timeout pattern this follows).
+ * {@link #candidateRoots()}-based pattern-matching is kept as the fallback
+ * for when that command isn't on PATH (huggingface_hub not installed, or
+ * installed without the CLI extras) or its output can't be parsed — so a
+ * user without huggingface_hub's CLI still gets a working, if less
+ * authoritative, lookup rather than a hard failure.
  */
 public final class HuggingFaceCacheResolver {
 
@@ -103,13 +103,28 @@ public final class HuggingFaceCacheResolver {
         return "models--Systran--faster-whisper-" + modelName.toLowerCase().replace("-", "--");
     }
 
+    /** repo_id as huggingface-cli's scan-cache reports it for a faster-whisper model. */
+    private static String repoIdFor(String modelName) {
+        return "Systran/faster-whisper-" + modelName.toLowerCase();
+    }
+
     /**
      * Locate the cache folder for {@code modelName}, if it exists and
      * contains what looks like a real (non-partial) download.
      *
+     * <p>Tries the real HuggingFace cache manifest first ({@code
+     * huggingface-cli scan-cache}); falls back to filesystem pattern-
+     * matching only if that command isn't available, times out, or its
+     * output can't be parsed as expected — see {@link #resolveViaCli}.</p>
+     *
      * @return the resolved path, or empty if not found in any known root
      */
     public static Optional<Path> resolve(String modelName) {
+        Optional<Path> viaCli = resolveViaCli(modelName);
+        if (viaCli.isPresent()) {
+            return viaCli;
+        }
+
         String folderName = folderNameFor(modelName);
 
         for (Path root : candidateRoots()) {
@@ -129,6 +144,93 @@ public final class HuggingFaceCacheResolver {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Query the real HuggingFace cache manifest via {@code huggingface-cli
+     * scan-cache --format json} rather than guessing folder-naming
+     * conventions. Every failure mode here (CLI missing, non-zero exit,
+     * timeout, unparseable/unexpected JSON shape) is caught and logged at
+     * debug level, returning empty so {@link #resolve} falls back to
+     * pattern-matching — this must never throw out to a caller expecting a
+     * simple "found or not" answer.
+     *
+     * <p>Expected shape (huggingface_hub's documented scan-cache JSON
+     * output): a top-level object with a {@code "repos"} array; each repo
+     * has {@code "repo_id"} (e.g. {@code "Systran/faster-whisper-base"}),
+     * {@code "size_on_disk"} (bytes), and a {@code "revisions"} array whose
+     * entries have a {@code "snapshot_path"}.</p>
+     */
+    private static Optional<Path> resolveViaCli(String modelName) {
+        String targetRepoId = repoIdFor(modelName);
+        try {
+            Process process = new ProcessBuilder("huggingface-cli", "scan-cache", "--format", "json")
+                    .redirectErrorStream(false)
+                    .start();
+
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            boolean finished = process.waitFor(15, TimeUnit.SECONDS);
+            if (!finished) {
+                LOGGER.debug("huggingface-cli scan-cache timed out — falling back to pattern matching.");
+                process.destroyForcibly();
+                return Optional.empty();
+            }
+            if (process.exitValue() != 0) {
+                LOGGER.debug("huggingface-cli scan-cache exited {} — falling back to pattern matching.",
+                        process.exitValue());
+                return Optional.empty();
+            }
+            if (output.isBlank()) {
+                return Optional.empty();
+            }
+
+            JsonElement root = JsonParser.parseString(output);
+            if (!root.isJsonObject() || !root.getAsJsonObject().has("repos")) {
+                LOGGER.debug("huggingface-cli scan-cache output missing expected \"repos\" array — falling back.");
+                return Optional.empty();
+            }
+
+            JsonArray repos = root.getAsJsonObject().getAsJsonArray("repos");
+            for (JsonElement repoElement : repos) {
+                if (!repoElement.isJsonObject()) continue;
+                JsonObject repo = repoElement.getAsJsonObject();
+                if (!repo.has("repo_id")) continue;
+
+                String repoId = repo.get("repo_id").getAsString();
+                if (!targetRepoId.equalsIgnoreCase(repoId)) continue;
+
+                if (repo.has("revisions") && repo.getAsJsonArray("revisions").size() > 0) {
+                    JsonObject firstRevision = repo.getAsJsonArray("revisions").get(0).getAsJsonObject();
+                    if (firstRevision.has("snapshot_path")) {
+                        Path snapshotPath = Paths.get(firstRevision.get("snapshot_path").getAsString());
+                        if (Files.isDirectory(snapshotPath)) {
+                            LOGGER.debug("Resolved model '{}' via huggingface-cli manifest to {}",
+                                    modelName, snapshotPath);
+                            return Optional.of(snapshotPath);
+                        }
+                    }
+                }
+            }
+            // Repo simply isn't in the cache — a legitimate "not found",
+            // not a parse/tooling failure, so no fallback needed for this
+            // specific case; resolve() will still try pattern-matching
+            // harmlessly on top, which will also correctly find nothing.
+            return Optional.empty();
+        } catch (IOException e) {
+            LOGGER.debug("huggingface-cli not available ({}) — falling back to pattern matching.", e.getMessage());
+            return Optional.empty();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            // Covers JsonParseException and any JSON-shape surprises
+            // (missing keys, unexpected types) — a huggingface_hub version
+            // bump changing its JSON schema must degrade to the fallback,
+            // not crash model resolution app-wide.
+            LOGGER.debug("Unexpected huggingface-cli scan-cache output shape ({}) — falling back to pattern matching.",
+                    e.getMessage());
+            return Optional.empty();
+        }
     }
 
     /** Total on-disk size (bytes) of a resolved model folder, or 0 if not found. */

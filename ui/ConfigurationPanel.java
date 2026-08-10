@@ -52,6 +52,7 @@ public class ConfigurationPanel {
     private CheckBox enableTranscriptionCheckBox;
     private CheckBox autoRemoveCompletedCheckBox;
     private CheckBox adaptiveScalingCheckBox;
+    private CheckBox skipSegmentationCheckBox;
     private CheckBox removeSilenceCheckBox;
     private CheckBox normalizeCheckBox;
     private Slider silenceThresholdSlider;
@@ -143,6 +144,7 @@ public class ConfigurationPanel {
             prefManager.putBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, enableTranscriptionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, autoRemoveCompletedCheckBox.isSelected());
             prefManager.putBoolean("adaptive_scaling_enabled", adaptiveScalingCheckBox.isSelected());
+            prefManager.putBoolean("skip_segmentation_baseline_mode", skipSegmentationCheckBox.isSelected());
             prefManager.putBoolean("remove_silence", removeSilenceCheckBox.isSelected());
             // FIX: same bug shape as noise reduction above, just across classes
             // instead of within one method: this used to write the raw
@@ -245,6 +247,17 @@ public class ConfigurationPanel {
         autoRemoveCompletedCheckBox = new CheckBox("Auto-Remove Completed Files");
         adaptiveScalingCheckBox = new CheckBox("Adaptive Concurrency Scaling");
         adaptiveScalingCheckBox.setSelected(true);
+        // FIX: exposes TranscriptionConfig.skipSegmentation as a real UI
+        // control -- previously hardcoded to false in getTranscriptionConfig()
+        // below with no way to change it. WhisperXTranscriptionService.transcribe()
+        // already gates on exactly this flag to skip both segmentation and
+        // per-segment retry (see SegmentProcessor), so wiring it up here is
+        // the whole implementation -- no new bypass logic needed. Together
+        // with "Adaptive Concurrency Scaling" off and Max Parallel Files
+        // pinned to a fixed value, this is what turns a normal run into a
+        // genuine baseline run for a controlled comparison.
+        skipSegmentationCheckBox = new CheckBox("Baseline Mode (Skip Segmentation & Per-Segment Retry)");
+        skipSegmentationCheckBox.setSelected(false);
         removeSilenceCheckBox = new CheckBox("Remove Silence from Audio");
         normalizeCheckBox = new CheckBox("Normalize Audio");
 
@@ -321,6 +334,13 @@ public class ConfigurationPanel {
                 "Automatically reduce concurrency under high memory/CPU pressure (recommended). "
                 + "Turn off to run at a fixed concurrency level regardless of measured pressure — "
                 + "useful for baseline performance measurements."));
+        skipSegmentationCheckBox.setTooltip(new Tooltip(
+                "Off (recommended): long files are split into segments that are transcribed and "
+                + "retried independently, so one bad segment doesn't fail the whole file.\n"
+                + "On: transcribes each file as a single unbroken unit, matching plain CLI "
+                + "whisperx behavior — no segmentation, no per-segment retry, a file either "
+                + "fully succeeds or fully throws. Use this only to collect a genuine baseline "
+                + "run for comparison against the app's normal (fault-tolerant) behavior."));
         removeSilenceCheckBox.setTooltip(new Tooltip("Detect and remove silent sections"));
         normalizeCheckBox.setTooltip(new Tooltip("Normalize to broadcast standard (-16 LUFS)"));
         silenceThresholdSlider.setTooltip(new Tooltip("Loudness threshold for silence detection (dB)"));
@@ -478,7 +498,8 @@ public class ConfigurationPanel {
         setStyled(recommendLabel, "-fx-text-fill: #666; -fx-font-size: 11px;");
 
         parallelBox.getChildren().addAll(parallelLabel, maxParallelSpinner, recommendLabel);
-        section.getChildren().addAll(title, parallelBox, autoRemoveCompletedCheckBox, adaptiveScalingCheckBox);
+        section.getChildren().addAll(title, parallelBox, autoRemoveCompletedCheckBox,
+                adaptiveScalingCheckBox, skipSegmentationCheckBox);
 
         return section;
     }
@@ -710,6 +731,7 @@ public class ConfigurationPanel {
         enableTranscriptionCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.TRANSCRIPTION_ENABLED, true));
         autoRemoveCompletedCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.AUTO_REMOVE_COMPLETED, false));
         adaptiveScalingCheckBox.setSelected(prefManager.getBoolean("adaptive_scaling_enabled", true));
+        skipSegmentationCheckBox.setSelected(prefManager.getBoolean("skip_segmentation_baseline_mode", false));
         removeSilenceCheckBox.setSelected(prefManager.getBoolean("remove_silence", false));
         normalizeCheckBox.setSelected(prefManager.isNormalizeAudioEnabled());
 
@@ -775,7 +797,7 @@ public class ConfigurationPanel {
             .hfToken(null)
             .maxSegmentDuration(maxSegmentDurationSpinner.getValue().floatValue())
             .enabled(enableTranscriptionCheckBox.isSelected())
-            .skipSegmentation(false)
+            .skipSegmentation(skipSegmentationCheckBox.isSelected())
             .build();
     }
 
@@ -807,6 +829,10 @@ public class ConfigurationPanel {
         return adaptiveScalingCheckBox.isSelected();
     }
 
+    public boolean isSkipSegmentationEnabled() {
+        return skipSegmentationCheckBox.isSelected();
+    }
+
     public void setEnabled(boolean enabled) {
         // Set all components enabled/disabled state
         modelComboBox.setDisable(!enabled);
@@ -816,6 +842,8 @@ public class ConfigurationPanel {
         volumeSlider.setDisable(!enabled);
         fontSizeSlider.setDisable(!enabled);
         maxParallelSpinner.setDisable(!enabled);
+        adaptiveScalingCheckBox.setDisable(!enabled);
+        skipSegmentationCheckBox.setDisable(!enabled);
         noiseReductionCheckBox.setDisable(!enabled);
         timestampModeComboBox.setDisable(!enabled);
         confidenceCheckBox.setDisable(!enabled);

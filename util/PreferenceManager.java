@@ -212,6 +212,18 @@ public class PreferenceManager {
     public void setLastTextCombinerOutputLocation(String path) {
         prefs.put("last_text_combiner_output_location", path);
     }
+
+    /**
+     * Get last Sound Recorder Panel save location — same pattern as the
+     * AudioSplitter/TextCombiner output locations above.
+     */
+    public String getLastSoundRecorderLocation() {
+        return prefs.get("last_sound_recorder_location", getOutputDirectory());
+    }
+
+    public void setLastSoundRecorderLocation(String path) {
+        prefs.put("last_sound_recorder_location", path);
+    }
     // Audio Processing Settings
     public boolean isNoiseReductionEnabled() {
         return getBoolean(PreferenceKeys.NOISE_REDUCTION_ENABLED, false);

@@ -265,6 +265,38 @@ public class BatchProcessor implements SegmentProgressListener {
     public void setFileCompletedCallback(Consumer<BatchFileItem> callback) { this.fileCompletedCallback = callback; }
     public void setAutoRemoveCompleted(boolean autoRemoveCompleted)        { this.autoRemoveCompleted  = autoRemoveCompleted; }
 
+    /**
+     * FIX (critical wiring gap — this is what actually lets the "Adaptive
+     * Concurrency Scaling" checkbox in ConfigurationPanel do anything at
+     * all): previously nothing in the batch-start pipeline ever called
+     * {@code parallelManager.setAdaptiveScalingEnabled(...)}. The checkbox
+     * existed, persisted to preferences, and had a live getter — but the
+     * value was never read by anything, so toggling it had zero effect on
+     * actual concurrency behavior. ParallelProcessingManager's own
+     * fixed-ceiling logic (see {@code startResourceMonitor}'s
+     * {@code adaptiveScalingEnabled} early-exit branch) was already
+     * correct and had been since it was added for exactly this baseline-vs-
+     * adaptive comparison use case — it just had no caller.
+     *
+     * <p>Deliberately a live pass-through rather than reading from
+     * {@code PreferenceManager} the way {@code setExportWordCopy}/
+     * {@code setExportPdfCopy} do above: those two rely on
+     * {@code ConfigurationPanel.savePreferences()} having already run, which
+     * isn't guaranteed to have fired since the last checkbox toggle. For a
+     * setting whose entire purpose is producing a scientifically valid
+     * fixed-vs-adaptive comparison, "usually up to date" isn't good enough —
+     * this must reflect exactly what's checked in the UI at the moment
+     * Start is clicked. See {@code MainWindow}'s call site right before
+     * {@code processBatch(...)}.</p>
+     */
+    public void setAdaptiveScalingEnabled(boolean enabled) {
+        parallelManager.setAdaptiveScalingEnabled(enabled);
+    }
+
+    public boolean isAdaptiveScalingEnabled() {
+        return parallelManager.isAdaptiveScalingEnabled();
+    }
+
     /** Recent per-file stage-timing reports (see FileTimingReport), most-recent-first, for the UI's Performance Report view. */
     public java.util.List<FileTimingReport> getRecentTimingReports() {
         return parallelManager.getRecentTimingReports();
