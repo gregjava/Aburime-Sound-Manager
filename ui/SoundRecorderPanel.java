@@ -17,6 +17,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -109,6 +110,7 @@ public class SoundRecorderPanel {
     private ProgressBar levelMeter;
     private TextField outputPathField;
     private Button chooseLocationButton;
+    private Button refreshDevicesButton;
 
     private volatile TargetDataLine targetLine = null;
     private volatile boolean recording = false;
@@ -145,7 +147,7 @@ public class SoundRecorderPanel {
                 + "-fx-padding: 15; -fx-background-color: white;");
         section.getStyleClass().add("theme-fix-surface");
 
-        Label titleLabel = new Label("🎙️ Sound Recorder Panel");
+        Label titleLabel = new Label("🎙️ Sound Recorder");
         setStyled(titleLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
         titleLabel.getStyleClass().add("panel-heading");
 
@@ -155,8 +157,19 @@ public class SoundRecorderPanel {
         deviceLabel.setMinWidth(90);
         deviceComboBox = new ComboBox<>();
         deviceComboBox.setPrefWidth(320);
+
+        // FIX (optimization pass): a mic plugged in after the app was
+        // already open previously had no way to show up short of
+        // restarting the whole application -- populateDevices() only ever
+        // ran once, at panel construction. A one-click refresh is the
+        // standard fix every other recording app uses for this.
+        refreshDevicesButton = new Button("🔄");
+        refreshDevicesButton.setTooltip(new Tooltip("Rescan for input devices"));
+        refreshDevicesButton.setOnAction(e -> populateDevices());
+        setStyled(refreshDevicesButton, "-fx-background-radius: 4;");
+
         populateDevices();
-        deviceRow.getChildren().addAll(deviceLabel, deviceComboBox);
+        deviceRow.getChildren().addAll(deviceLabel, deviceComboBox, refreshDevicesButton);
 
         HBox controlsRow = new HBox(10);
         controlsRow.setAlignment(Pos.CENTER_LEFT);
@@ -210,8 +223,26 @@ public class SoundRecorderPanel {
 
     private void populateDevices() {
         deviceComboBox.getItems().clear();
+
+        // FIX (robustness pass): AudioSystem.getMixerInfo() itself — not
+        // just the per-mixer isLineSupported() check already guarded below
+        // — can throw on some sandboxed/headless JVMs or machines with a
+        // broken audio driver. This method runs during getRecorderSection(),
+        // which MainWindow calls while building the main scene — an
+        // uncaught exception here previously would have taken the *entire
+        // application window* down before it ever opened, for a failure
+        // that should only ever disable one optional panel. Degrades to an
+        // empty device list instead.
+        Mixer.Info[] mixerInfos;
+        try {
+            mixerInfos = AudioSystem.getMixerInfo();
+        } catch (Exception e) {
+            LOGGER.warn("Could not enumerate audio input devices: {}", e.getMessage());
+            mixerInfos = new Mixer.Info[0];
+        }
+
         DataLine.Info targetInfo = new DataLine.Info(TargetDataLine.class, RECORDING_FORMAT);
-        for (Mixer.Info info : AudioSystem.getMixerInfo()) {
+        for (Mixer.Info info : mixerInfos) {
             try {
                 Mixer mixer = AudioSystem.getMixer(info);
                 if (mixer.isLineSupported(targetInfo)) {
@@ -225,8 +256,27 @@ public class SoundRecorderPanel {
                 LOGGER.debug("Skipping unusable mixer '{}': {}", info.getName(), e.getMessage());
             }
         }
-        if (!deviceComboBox.getItems().isEmpty()) {
+
+        boolean hasDevices = !deviceComboBox.getItems().isEmpty();
+        if (hasDevices) {
             deviceComboBox.getSelectionModel().selectFirst();
+        }
+
+        // FIX (optimization pass): previously the Record button stayed
+        // enabled with no devices present, so clicking it just popped the
+        // same "No microphone input device available" alert every time —
+        // technically correct but needless friction versus disabling the
+        // button up front with an explanatory tooltip, which is what the
+        // rest of this app does elsewhere for not-currently-available
+        // actions (e.g. Stop/Play here are already built this way).
+        if (recordButton != null) {
+            recordButton.setDisable(!hasDevices || recording);
+            recordButton.setTooltip(hasDevices
+                    ? null
+                    : new Tooltip("No microphone detected — plug one in and click 🔄 to rescan"));
+        }
+        if (statusLabel != null && !hasDevices && !recording) {
+            statusLabel.setText("No microphone detected");
         }
     }
 
@@ -385,9 +435,10 @@ public class SoundRecorderPanel {
     }
 
     private void updateControlsForRecordingState(boolean active) {
-        recordButton.setDisable(active);
+        recordButton.setDisable(active || deviceComboBox.getItems().isEmpty());
         deviceComboBox.setDisable(active);
         chooseLocationButton.setDisable(active);
+        refreshDevicesButton.setDisable(active);
 
         stopButton.setDisable(!active);
         stopButton.getStyleClass().setAll(active ? "action-btn-cancel" : "action-btn-clear-queue-disabled");

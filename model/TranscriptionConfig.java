@@ -159,6 +159,33 @@ public final class TranscriptionConfig {
 
     public static Builder builder() { return new Builder(); }
 
+    /**
+     * Copy this config into a fresh {@link Builder}, so a caller can
+     * override one or two fields (e.g. forcing {@code skipSegmentation}
+     * for a baseline-mode experimental run) without hand-copying every
+     * field — which would silently drift out of sync the next time a
+     * field is added here.
+     */
+    public Builder toBuilder() {
+        return new Builder()
+                .model(model)
+                .language(language)
+                .timestampsEnabled(timestampsEnabled)
+                .confidenceEnabled(confidenceEnabled)
+                .outputFormat(outputFormat)
+                .volumeBoost(volumeBoost)
+                .silenceThreshold(silenceThreshold)
+                .silenceDuration(silenceDuration)
+                .noiseReduction(noiseReduction)
+                .srtMaxChars(srtMaxChars)
+                .srtMaxLines(srtMaxLines)
+                .diarizeEnabled(diarizeEnabled)
+                .hfToken(hfToken)
+                .maxSegmentDuration(maxSegmentDuration)
+                .skipSegmentation(skipSegmentation)
+                .enabled(enabled);
+    }
+
     // -------------------------------------------------------------------------
     //  Builder
     // -------------------------------------------------------------------------

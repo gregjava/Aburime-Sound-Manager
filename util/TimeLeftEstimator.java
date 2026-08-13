@@ -191,6 +191,42 @@ public class TimeLeftEstimator {
     }
     
     /**
+     * FIX (root cause of "Total Time Left much higher than File Time Left
+     * near the end of a batch"): {@link #completeFileProcessing} only ever
+     * removes from {@code activeFiles} — correct for its purpose (recording
+     * real learned timing data once a file has genuinely finished
+     * transcribing), but it silently no-ops (just a debug warning) for a
+     * file that was never promoted out of {@code currentBatchFiles} in the
+     * first place. That happens for any file whose failure occurs BEFORE
+     * {@code startFileProcessing()} is reached — e.g. during audio
+     * preprocessing/enhancement, a dependency/model resolution failure, or
+     * simply because transcription is disabled for this batch entirely
+     * (audio-only mode never calls startFileProcessing/completeFileProcessing
+     * at all, since those only exist inside
+     * WhisperXTranscriptionService.transcribe()). Such a file's queued
+     * record then sits in {@code currentBatchFiles} permanently — nothing
+     * else ever removes it — and gets counted as still-pending "other" work
+     * in every subsequent {@link #getBatchTimeEstimate()} call for the rest
+     * of the batch, inflating Total Time Left right up to (and especially
+     * visible at) the true last file, while File Time Left — which only
+     * looks at the single displayed file — stays accurate throughout.
+     *
+     * <p>Call this unconditionally, for every file, in the per-file
+     * pipeline's own {@code finally} block (i.e. regardless of which stage
+     * the file reached or whether it succeeded) — see
+     * {@code ParallelProcessingManager}'s per-file processing method. Purely
+     * a tracking safety net: unlike {@link #completeFileProcessing}, this
+     * does NOT update learned timing statistics or completedFiles counts —
+     * calling it after a real {@link #completeFileProcessing} already ran
+     * for the same file is a safe, cheap no-op (both collections simply
+     * won't contain the file anymore).</p>
+     */
+    public void ensureFileTrackingCleared(String fileName) {
+        currentBatchFiles.removeIf(rec -> rec.getFileName().equals(fileName));
+        activeFiles.remove(fileName);
+    }
+
+    /**
      * Complete processing for a specific file and update historical data.
      */
     public void completeFileProcessing(String fileName) {

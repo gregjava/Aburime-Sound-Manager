@@ -550,8 +550,49 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         // completeFileProcessing() calls. Net effect: nothing was ever
         // learned from segmented (i.e. "large" model) files at all. Only do
         // file-level tracking here when this is NOT a per-segment sub-call.
-        boolean isSegmentSubCall = config.isSkipSegmentation();
-        String fileName = new File(audioFilePath).getName();
+        //
+        // FIX (regression from exposing skipSegmentation as the top-level
+        // "Baseline Mode" UI checkbox): config.isSkipSegmentation() alone is
+        // no longer a reliable signal for "this is an internal per-segment
+        // sub-call" — a user running a whole batch in Baseline Mode also
+        // produces skipSegmentation=true on every genuine top-level file,
+        // which would have made isSegmentSubCall wrongly true for all of
+        // them, silently disabling startFileProcessing/completeFileProcessing
+        // (and therefore all time-tracking/learning) for every file in
+        // Baseline Mode. Segment sub-calls are distinguishable from genuine
+        // top-level files by a second, independent signal that only
+        // SegmentProcessor ever produces: the audio path sits somewhere
+        // under a "segment_work_*" temp directory it creates itself — a
+        // real user file, Baseline Mode or not, is never located there.
+        //
+        // FIX (this check was still broken after the fix above — this is
+        // the actual root cause of "time estimation is now very messed
+        // up"): the original version here checked only the file's
+        // IMMEDIATE parent directory. But SegmentProcessor.splitAudio()
+        // writes segment files to <segment_work_xxx>/segments/segment_NNN.wav
+        // — a "segments" subdirectory *inside* the segment_work_ dir, not
+        // segment_work_ itself. So the immediate parent's name is always
+        // literally "segments", never "segment_work_*", and the old check
+        // — parentDir.getName().startsWith("segment_work_") — could never
+        // match ANY real segment sub-call. isSegmentSubCall was therefore
+        // silently false for every segment, all the time, which is worse
+        // than what this whole check was added to fix in the first place:
+        // every segment of every large/segmented file got treated as its
+        // own independent top-level file — registered under its own
+        // "segment_003.wav"-style name, polluting TimeLeftEstimator's
+        // learned historical data with bogus per-segment entries, and
+        // completeFileProcessing() firing once per SEGMENT instead of once
+        // per file wiped out the real file's own tracking state out from
+        // under SegmentProcessor's own recordSegmentCompletion() calls for
+        // every subsequent segment. Fixed by walking up the full ancestor
+        // chain instead of checking only the immediate parent — matches
+        // regardless of how many intermediate subdirectories
+        // SegmentProcessor happens to use, today or after any future
+        // internal restructuring of its own temp-layout.
+        File audioFileHandle = new File(audioFilePath);
+        boolean isSegmentSubCall = config.isSkipSegmentation()
+                && isInsideSegmentWorkDir(audioFileHandle.getParentFile());
+        String fileName = audioFileHandle.getName();
 
         if (timeEstimator != null && !isSegmentSubCall) {
             double fileSizeMB = new File(audioFilePath).length() / (1024.0 * 1024.0);
@@ -939,6 +980,22 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     // -------------------------------------------------------------------------
     //  Remaining helpers (unchanged from original except where noted)
     // -------------------------------------------------------------------------
+
+    /**
+     * Walks up from {@code dir} through every ancestor looking for one
+     * whose name starts with {@code "segment_work_"} — the temp-directory
+     * prefix {@code SegmentProcessor.createWorkDir()} uses. Returns false
+     * for {@code null} (e.g. a relative path with no parent) rather than
+     * throwing — an audio path with no resolvable parent directory is
+     * definitely not a segment sub-call.
+     */
+    private boolean isInsideSegmentWorkDir(File dir) {
+        while (dir != null) {
+            if (dir.getName().startsWith("segment_work_")) return true;
+            dir = dir.getParentFile();
+        }
+        return false;
+    }
 
     private boolean checkGPUAvailability() {
         try {

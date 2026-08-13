@@ -1686,8 +1686,8 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
        // File name column
        TableColumn<BatchFileItem, String> nameColumn = new TableColumn<>("File Name");
-       nameColumn.setCellValueFactory(cellData -> 
-           new SimpleStringProperty(cellData.getValue().getFile().getName()));
+       nameColumn.setCellValueFactory(cellData ->
+           cellData.getValue().displayNameProperty());
        nameColumn.setPrefWidth(250);
        nameColumn.setCellFactory(col -> new TableCell<BatchFileItem, String>() {
            @Override
@@ -1695,10 +1695,29 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                super.updateItem(item, empty);
                if (empty || item == null) {
                    setText(null);
+                   setTooltip(null);
                } else {
+                   BatchFileItem rowItem = getTableRow() != null ? getTableRow().getItem() : null;
                    setText(item);
-                   // Add tooltip for long filenames
-                   setTooltip(new Tooltip(item));
+                   // FIX (batch editing — rename/metadata): tooltip now shows
+                   // the real underlying file name whenever a custom label
+                   // is set, and any notes, so hovering never leaves the
+                   // user guessing which real file a renamed row actually
+                   // is — a rename is display-only (see BatchFileItem), so
+                   // this traceability matters.
+                   if (rowItem != null && (rowItem.hasCustomDisplayName() || rowItem.hasNotes())) {
+                       StringBuilder tip = new StringBuilder();
+                       if (rowItem.hasCustomDisplayName()) {
+                           tip.append("File: ").append(rowItem.getFileName());
+                       }
+                       if (rowItem.hasNotes()) {
+                           if (tip.length() > 0) tip.append("\n");
+                           tip.append("Notes: ").append(rowItem.getNotes());
+                       }
+                       setTooltip(new Tooltip(tip.toString()));
+                   } else {
+                       setTooltip(new Tooltip(item));
+                   }
                }
            }
        });
@@ -1842,6 +1861,17 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
        lowPriorityItem.setOnAction(e -> setSelectedPriority(tableView, BatchFileItem.Priority.LOW));
        priorityMenu.getItems().addAll(highPriorityItem, normalPriorityItem, lowPriorityItem);
 
+       // FIX (batch editing — rename/metadata, previously the one item on
+       // the standing backlog with no UI/model support at all). Both are
+       // single-item operations (renaming/annotating several files at once
+       // to the SAME value is rarely what's wanted) so, unlike the
+       // priority/move actions above, these act on the single selected row.
+       MenuItem renameItem = new MenuItem("✏️ Rename...");
+       renameItem.setOnAction(e -> renameSelectedInTableView(tableView));
+
+       MenuItem editNotesItem = new MenuItem("📝 Edit Notes...");
+       editNotesItem.setOnAction(e -> editNotesForSelectedInTableView(tableView));
+
        contextMenu.getItems().addAll(
            removeSelectedItem,
            removeAllItem,
@@ -1851,10 +1881,81 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
            new SeparatorMenuItem(),
            priorityMenu,
            new SeparatorMenuItem(),
+           renameItem,
+           editNotesItem,
+           new SeparatorMenuItem(),
            selectAllItem
        );
 
        tableView.setContextMenu(contextMenu);
+   }
+
+   /**
+    * Rename (display-name override only — see BatchFileItem's javadoc)
+    * the single selected row. No-ops with a status-bar-style log line,
+    * not a dialog interruption, if zero or more than one row is selected
+    * — renaming a batch of files to the same label isn't a coherent
+    * action, and silently renaming only the first selected row would be
+    * more surprising than just asking the user to select exactly one.
+    */
+   private void renameSelectedInTableView(TableView<BatchFileItem> tableView) {
+       List<BatchFileItem> selected = tableView.getSelectionModel().getSelectedItems();
+       if (selected.size() != 1) {
+           log("✏️ Select exactly one file to rename.");
+           return;
+       }
+       BatchFileItem item = selected.get(0);
+
+       TextInputDialog dialog = new TextInputDialog(item.getDisplayName());
+       dialog.setTitle("Rename File");
+       dialog.setHeaderText("Display name for \"" + item.getFileName() + "\"");
+       dialog.setContentText("This only changes how the file is labeled in this app — "
+               + "the file on disk and its output are unaffected:");
+       ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+       dialog.showAndWait().ifPresent(newName -> {
+           String oldName = item.getDisplayName();
+           String trimmed = newName.trim();
+           if (trimmed.equals(oldName)) return; // no actual change — don't clutter undo history
+
+           item.setDisplayName(trimmed);
+           pushCommand(new QueueCommand() {
+               @Override public void undo() { item.setDisplayName(oldName); }
+               @Override public void redo() { item.setDisplayName(trimmed); }
+               @Override public String description() { return "rename \"" + item.getFileName() + "\""; }
+           });
+           log("✏️ Renamed \"" + item.getFileName() + "\" to \"" + item.getDisplayName() + "\"");
+       });
+   }
+
+   /** Edit the free-text notes field for the single selected row. Same single-selection rationale as {@link #renameSelectedInTableView}. */
+   private void editNotesForSelectedInTableView(TableView<BatchFileItem> tableView) {
+       List<BatchFileItem> selected = tableView.getSelectionModel().getSelectedItems();
+       if (selected.size() != 1) {
+           log("📝 Select exactly one file to edit notes.");
+           return;
+       }
+       BatchFileItem item = selected.get(0);
+
+       TextInputDialog dialog = new TextInputDialog(item.getNotes());
+       dialog.setTitle("Edit Notes");
+       dialog.setHeaderText("Notes for \"" + item.getDisplayName() + "\"");
+       dialog.setContentText("Visible only in this app (row tooltip) — not written into the transcription output:");
+       ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+       dialog.showAndWait().ifPresent(newNotes -> {
+           String oldNotes = item.getNotes();
+           String trimmed = newNotes.trim();
+           if (trimmed.equals(oldNotes)) return;
+
+           item.setNotes(trimmed);
+           pushCommand(new QueueCommand() {
+               @Override public void undo() { item.setNotes(oldNotes); }
+               @Override public void redo() { item.setNotes(trimmed); }
+               @Override public String description() { return "edit notes for \"" + item.getFileName() + "\""; }
+           });
+           log("📝 Updated notes for \"" + item.getDisplayName() + "\"");
+       });
    }
 
    /**

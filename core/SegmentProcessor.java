@@ -216,49 +216,68 @@ public class SegmentProcessor {
 
         // Step 4 — transcribe each segment
         List<TranscriptionResult> segmentResults = new ArrayList<>();
-        for (int i = 0; i < totalSegments; i++) {
-            if (Thread.currentThread().isInterrupted()) {
-                Thread.currentThread().interrupt();
-                throw new InterruptedException("Segment processing interrupted at segment " + i);
-            }
-
-            Path segment = segmentFiles.get(i);
-
-            if (completedSegments.contains(i)) {
-                LOGGER.info("Segment {} already done — loading cached result.", i);
-                segmentResults.add(loadSegmentResult(i));
-                if (progressCallback != null) {
-                    progressCallback.updateProgress((double)(i + 1) / totalSegments);
+        try {
+            for (int i = 0; i < totalSegments; i++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedException("Segment processing interrupted at segment " + i);
                 }
-                continue;
-            }
 
-            LOGGER.info("Transcribing segment {}/{}", i + 1, totalSegments);
-            final int idx = i;
-            AudioProcessor.ProgressCallback segmentProgress = p -> {
-                if (progressCallback != null) {
-                    double overall = (double) idx / totalSegments + (p / totalSegments);
-                    progressCallback.updateProgress(overall);
+                Path segment = segmentFiles.get(i);
+
+                if (completedSegments.contains(i)) {
+                    LOGGER.info("Segment {} already done — loading cached result.", i);
+                    segmentResults.add(loadSegmentResult(i));
+                    if (progressCallback != null) {
+                        progressCallback.updateProgress((double)(i + 1) / totalSegments);
+                    }
+                    continue;
                 }
-            };
 
-            long segStart = System.currentTimeMillis();
-            TranscriptionResult result = transcribeSegmentWithRetry(
-                    segment, i, totalSegments, segmentConfig, segmentProgress, segmentDuration);
-            long segDurationMs = System.currentTimeMillis() - segStart;
-            accumulateSegmentTiming();
+                LOGGER.info("Transcribing segment {}/{}", i + 1, totalSegments);
+                final int idx = i;
+                AudioProcessor.ProgressCallback segmentProgress = p -> {
+                    if (progressCallback != null) {
+                        double overall = (double) idx / totalSegments + (p / totalSegments);
+                        progressCallback.updateProgress(overall);
+                    }
+                };
 
-            if (timeEstimator != null) timeEstimator.recordSegmentCompletion(fileName, segDurationMs);
+                long segStart = System.currentTimeMillis();
+                TranscriptionResult result = transcribeSegmentWithRetry(
+                        segment, i, totalSegments, segmentConfig, segmentProgress, segmentDuration);
+                long segDurationMs = System.currentTimeMillis() - segStart;
+                accumulateSegmentTiming();
 
-            segmentResults.add(result);
+                if (timeEstimator != null) timeEstimator.recordSegmentCompletion(fileName, segDurationMs);
 
-            if (segmentListener != null) segmentListener.onSegmentCompleted(i, totalSegments);
+                segmentResults.add(result);
 
-            saveSegmentResult(i, result);
-            markSegmentCompleted(progressFile, i);
+                if (segmentListener != null) segmentListener.onSegmentCompleted(i, totalSegments);
+
+                saveSegmentResult(i, result);
+                markSegmentCompleted(progressFile, i);
+            }
+        } finally {
+            // FIX (Total Time Left inaccuracy for the batch's last file):
+            // previously this call sat *after* the loop on the success path
+            // only. If transcribeSegmentWithRetry() exhausted its retries
+            // and threw on any segment, this file's TimeLeftEstimator
+            // activeFiles entry was never removed — a permanently leaked
+            // "ghost" entry. TimeLeftEstimator.getBatchTimeEstimate() only
+            // excludes an active file from othersTimeLeft when it's the
+            // exact same object reference as the currently-displayed file;
+            // a leaked entry for an already-failed file is neither
+            // displayed nor ever cleaned up, so it silently kept
+            // contributing its last-known (frozen) remaining-time estimate
+            // to "Total Time Left" for the rest of the batch — including
+            // once only one real file was left processing, which is
+            // exactly the "Total much higher than File, for the last file"
+            // symptom this closes. Matches the try/catch pattern
+            // WhisperXTranscriptionService.transcribe() already uses for
+            // its own (non-segmented) completeFileProcessing() call.
+            if (timeEstimator != null) timeEstimator.completeFileProcessing(fileName);
         }
-
-        if (timeEstimator != null) timeEstimator.completeFileProcessing(fileName);
 
         // Step 5 — merge
         TranscriptionResult merged = mergeResults(segmentResults);

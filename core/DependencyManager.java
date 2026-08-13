@@ -363,6 +363,20 @@ public class DependencyManager {
      */
     public String getFFmpegPath() {
         if (ffmpegPath == null) {
+            // FIX: Studio.java now resolves bundled ffmpeg via its own
+            // scheme (launcher-set app.dir/ffmpeg.path system properties),
+            // which supersedes this class's own bundled-runtime lookup
+            // below when a real Studio instance is running. The old
+            // resolveExecutable() logic is kept as-is and still runs
+            // whenever Studio isn't available — dev/IDE runs that never
+            // call Application.launch(), and unit tests — so this is
+            // purely additive, never a behavior change for those cases.
+            audiomanager.Studio studio = audiomanager.Studio.getInstance();
+            if (studio != null && studio.isFFmpegAvailable()) {
+                ffmpegPath = studio.getFfmpegPath();
+                LOGGER.info("Using Studio-resolved bundled ffmpeg: {}", ffmpegPath);
+                return ffmpegPath;
+            }
             ffmpegPath = resolveExecutable("ffmpeg");
         }
         return ffmpegPath;

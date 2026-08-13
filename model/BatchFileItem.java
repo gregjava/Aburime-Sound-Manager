@@ -43,10 +43,30 @@ public class BatchFileItem {
     private volatile double totalAudioDurationSeconds = 0.0;
     private volatile Priority priority = Priority.NORMAL;
 
+    // FIX (batch editing — rename/metadata): deliberately a DISPLAY-name
+    // override, not a filesystem rename. Renaming the actual File on disk
+    // mid-batch (or even pre-batch) is a genuinely destructive operation
+    // with real failure modes of its own (a file mid-copy/mid-read
+    // elsewhere, a name collision, permissions) for comparatively little
+    // benefit — everything downstream (output writers, FFmpeg/WhisperX
+    // invocations) keeps using getFile()/getFileName() completely
+    // unmodified, so this cannot affect processing correctness. What it
+    // changes is purely how the file is labeled in this app's own UI/logs
+    // — useful for telling apart several similarly-auto-named recordings,
+    // annotating a client name, etc. Defaults to the real file name so
+    // every existing call site that expects getDisplayName() to always
+    // return something sensible keeps working with zero changes.
+    private final SimpleStringProperty displayName;
+
+    /** Free-text per-file note (client name, batch context, anything the user wants to remember about this specific file). Empty string, never null, by default. */
+    private final SimpleStringProperty notes;
+
     public BatchFileItem(File file) {
         this.file = file;
         this.status = new SimpleStringProperty(ProcessingStatus.PENDING.name());
         this.progress = new SimpleDoubleProperty(0.0);
+        this.displayName = new SimpleStringProperty(file.getName());
+        this.notes = new SimpleStringProperty("");
     }
 
     public File getFile() { return file; }
@@ -76,6 +96,20 @@ public class BatchFileItem {
 
     public Priority getPriority() { return priority; }
     public void setPriority(Priority priority) { this.priority = priority != null ? priority : Priority.NORMAL; }
+
+    public String getDisplayName() { return displayName.get(); }
+    /** Blank/null resets to the real file name rather than storing an empty label. */
+    public void setDisplayName(String name) {
+        displayName.set((name == null || name.isBlank()) ? file.getName() : name);
+    }
+    public SimpleStringProperty displayNameProperty() { return displayName; }
+    /** True if the user has set a custom label distinct from the real file name. */
+    public boolean hasCustomDisplayName() { return !displayName.get().equals(file.getName()); }
+
+    public String getNotes() { return notes.get(); }
+    public void setNotes(String notes) { this.notes.set(notes == null ? "" : notes); }
+    public SimpleStringProperty notesProperty() { return notes; }
+    public boolean hasNotes() { return !notes.get().isBlank(); }
 
     @Override
     public String toString() {

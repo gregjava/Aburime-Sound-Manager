@@ -297,6 +297,20 @@ public class BatchProcessor implements SegmentProgressListener {
         return parallelManager.isAdaptiveScalingEnabled();
     }
 
+    /**
+     * Live pass-through for the "Also Save Word-Compatible Copy" checkbox --
+     * see the comment in {@link #processBatch} above for why this replaced
+     * a PreferenceManager read that could be stale.
+     */
+    public void setExportWordCopy(boolean enabled) {
+        parallelManager.setExportWordCopy(enabled);
+    }
+
+    /** Live pass-through for the "Also Save PDF-Compatible Copy" checkbox -- see {@link #setExportWordCopy}. */
+    public void setExportPdfCopy(boolean enabled) {
+        parallelManager.setExportPdfCopy(enabled);
+    }
+
     /** Recent per-file stage-timing reports (see FileTimingReport), most-recent-first, for the UI's Performance Report view. */
     public java.util.List<FileTimingReport> getRecentTimingReports() {
         return parallelManager.getRecentTimingReports();
@@ -337,13 +351,24 @@ public class BatchProcessor implements SegmentProgressListener {
         LOGGER.info("Starting batch: {} files, max parallel: {}", totalFilesInBatch, maxParallel);
         log("🚀 Starting batch: " + totalFilesInBatch + " files");
 
-        boolean exportWordCopy = preferenceManager != null
-                && preferenceManager.getBoolean("export_word_copy", false);
-        parallelManager.setExportWordCopy(exportWordCopy);
-
-        boolean exportPdfCopy = preferenceManager != null
-                && preferenceManager.getBoolean("export_pdf_copy", false);
-        parallelManager.setExportPdfCopy(exportPdfCopy);
+        // FIX (same staleness class as the adaptive-scaling wiring bug):
+        // this used to read "export_word_copy"/"export_pdf_copy" from
+        // PreferenceManager here, which is only ever refreshed by
+        // ConfigurationPanel.savePreferences() -- and that runs on a handful
+        // of specific setting-change listeners and on app close, not right
+        // before a batch starts. Toggling either export checkbox and
+        // immediately clicking Start could silently use the *previous*
+        // session's value instead of what's actually checked. setExportWordCopy/
+        // PdfCopy(boolean) below are now the only way parallelManager's export
+        // flags get set -- MainWindow passes the live checkbox state in
+        // right before processBatch(), same pattern as setAdaptiveScalingEnabled.
+        // These two lines are intentionally left as a safety-net default
+        // (both false) for the rare case processBatch() is invoked without
+        // that call site (e.g. a future caller that forgets it) -- silently
+        // *not* exporting extra copies is the safe failure mode, not
+        // silently exporting them.
+        parallelManager.setExportWordCopy(false);
+        parallelManager.setExportPdfCopy(false);
 
         // FIX (consolidation): this used to spin up its own executor and run
         // a fully separate sequential implementation (executeBatch() /

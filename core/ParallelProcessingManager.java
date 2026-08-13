@@ -819,6 +819,7 @@ public class ParallelProcessingManager {
                 // Python-side breakdown is present (older/custom user scripts
                 // without the instrumentation still get the Java-side stages).
                 FileTimingReport timingReport = new FileTimingReport(file.getName());
+                timingReport.setProcessingMode(currentModeLabel(transcriptionConfig));
                 timingReport.setStage("queue_wait", queueWaitMs);
                 Long modelAcqMs = modelAcquisitionMsByItem.remove(item);
                 if (modelAcqMs != null) timingReport.setStage("model_acquisition", modelAcqMs);
@@ -872,6 +873,23 @@ public class ParallelProcessingManager {
                 item.setStatus("FAILED");
                 item.setErrorMessage(e.getMessage());
                 LOGGER.error("Pipeline failed for {}: {}", file.getName(), e.getMessage());
+
+                // Architectural spec, failure semantics: record exception
+                // type+message in the SAME structured report successes use
+                // (not just item.getErrorMessage(), which never reached the
+                // Performance Report/log at all) — this is what makes "what
+                // specifically failed" concrete evidence rather than just a
+                // fail count. Deliberately minimal: only touches fields
+                // guaranteed assigned at any point a throw could reach this
+                // catch, not the try block's later per-stage locals.
+                FileTimingReport failureReport = new FileTimingReport(file.getName());
+                failureReport.setProcessingMode(currentModeLabel(transcriptionConfig));
+                failureReport.setFailure(e);
+                failureReport.setBatchStartEpochMs(batchStartEpochMs);
+                failureReport.setStageEpoch("failed_at", System.currentTimeMillis());
+                recordTimingReport(failureReport);
+                if (logger != null) logger.accept(formatTimingReportBlock(failureReport));
+
                 lastPythonStageTimingsByItem.remove(item);
                 modelAcquisitionMsByItem.remove(item);
                 modelAcquiredEpochByItem.remove(item);
@@ -887,15 +905,50 @@ public class ParallelProcessingManager {
                 // preprocessed temp WAV on disk indefinitely.
                 cleanupTempFile(preprocessed);
                 activeFileCount.decrementAndGet();
+
+                // FIX: guaranteed TimeLeftEstimator cleanup, regardless of
+                // which stage this file reached or failed at — see
+                // TimeLeftEstimator.ensureFileTrackingCleared()'s own
+                // javadoc for the full story. Previously the ONLY cleanup
+                // was WhisperXTranscriptionService.transcribe()'s internal
+                // try/catch, which never ran at all for a file that failed
+                // during preprocessFile() above (before transcription even
+                // started) or for a batch with transcription disabled —
+                // leaving a permanent phantom "still queued" entry that
+                // inflated Total Time Left for the rest of the batch.
+                if (timeEstimator != null) {
+                    timeEstimator.ensureFileTrackingCleared(file.getName());
+                }
             }
         }, pipelineExecutor);
+    }
+
+    /**
+     * Derive a human-readable mode label from the two independent flags
+     * that now govern this ("Adaptive Concurrency Scaling" and "Baseline
+     * Mode" checkboxes in ConfigurationPanel) rather than a single stored
+     * mode string — since ConfigurationPanel deliberately allows "both
+     * off" as a valid third state (fixed concurrency, normal
+     * segmentation/retry), not just the two checked-one-or-the-other
+     * cases the checkboxes' mutual-exclusivity listener enforces.
+     */
+    private String currentModeLabel(TranscriptionConfig config) {
+        boolean baseline = config != null && config.isSkipSegmentation();
+        if (baseline) return "BASELINE";
+        return adaptiveScalingEnabled ? "ADAPTIVE" : "FIXED_CONCURRENCY";
     }
 
     /** The exact per-file report format requested for the log/Terminal (doc-review item). */
     private static String formatTimingReportBlock(FileTimingReport r) {
         StringBuilder sb = new StringBuilder();
         sb.append("==================================================\n");
-        sb.append("Processing: ").append(r.getFileName()).append("\n\n");
+        sb.append("Processing: ").append(r.getFileName()).append("\n");
+        sb.append("Mode: ").append(r.getProcessingMode()).append("\n");
+        if (r.isFailed()) {
+            sb.append("FAILED: ").append(r.getFailureExceptionType())
+                    .append(" — ").append(r.getFailureExceptionMessage()).append("\n");
+        }
+        sb.append("\n");
         sb.append(padLine("Waiting in queue", r.getStageMillis("queue_wait")));
         sb.append(padLine("Model acquisition", r.getStageMillis("model_acquisition")));
         sb.append(padLine("Audio/preprocessing", r.getStageMillis("preprocessing")));
@@ -1582,172 +1635,6 @@ public class ParallelProcessingManager {
     //  Inner types
     // -------------------------------------------------------------------------
 
-    /**
-     * A per-model pool of {@link WhisperXTranscriptionService} instances,
-     * sized dynamically based on live CPU/heap pressure (see
-     * {@link #startResourceMonitor}) rather than a fixed decision made once
-     * at batch start.
-     *
-     * <p>FIX: this replaces a design that created exactly one instance per
-     * model and gated it with a {@link Semaphore} that — due to a bug in
-     * that instance count — also always held exactly one permit, meaning
-     * transcription concurrency for the same model was hard-capped at 1
-     * regardless of {@code maxParallelFiles}, CPU, or memory, from the very
-     * first version of this class.</p>
-     *
-     * <p>Uses a blocking queue as the pool: {@link #borrow} blocks until an
-     * instance is free, guaranteeing each instance is only ever used by one
-     * thread at a time — unlike a semaphore-plus-round-robin scheme, which
-     * can't guarantee that without separately tracking per-instance busy
-     * state. Shrinking the pool ({@link #adjustTarget} with a lower value)
-     * never destroys or interrupts an in-flight instance: it just stops
-     * that instance being returned to the queue once released, letting it
-     * be garbage collected, so a long-running transcription already using
-     * it is never disturbed.</p>
-     */
-    /**
-     * A per-model pool of {@link WhisperXTranscriptionService} instances,
-     * with concurrency throttled dynamically based on live CPU/heap
-     * pressure (see {@link #startResourceMonitor}) rather than a fixed
-     * decision made once at batch start.
-     *
-     * <p>FIX (regression): the first version of this pool eagerly created
-     * every instance up front and discarded/recreated instances whenever
-     * the live resource monitor shrank its target below the current live
-     * count. That combination turned a 45-90 minute job into a ~360 minute
-     * one: {@code WhisperXTranscriptionService}'s constructor makes a real
-     * subprocess call to verify the WhisperX installation (many seconds
-     * each), and the monitor's "CPU > 90% -> shrink" rule fires constantly
-     * during transcription, because CPU-bound transcription work is
-     * <em>supposed</em> to peg the CPU — that's normal, expected load, not
-     * contention to back off from. Every time the pool then needed an
-     * instance again with none recycled, it paid that expensive
-     * construction cost again, potentially several times over the course
-     * of one segmented file.</p>
-     *
-     * <p>Concurrency throttling is now fully decoupled from instance
-     * lifecycle. Instances are created lazily — only the first time actual
-     * concurrent demand needs one — and once created are <b>never</b>
-     * discarded; they're recycled for the lifetime of this pool. The
-     * resource monitor only resizes a separate {@link ResizableSemaphore}
-     * gating how many borrows are allowed at once, which costs nothing to
-     * adjust, however often or aggressively, since it never touches an
-     * actual instance.</p>
-     *
-     * <p>Package-private (not {@code private}) so unit tests in
-     * {@code audiomanager.core} can exercise lazy growth, borrow/release, and
-     * concurrency-gate resizing directly — this concurrency logic previously
-     * had no test coverage because there was no way to reach it except by
-     * running a full batch through {@link ParallelProcessingManager}.</p>
-     *
-     * <p>FIX: instance creation used to be hard-wired to
-     * {@code new WhisperXTranscriptionService(dependencyManagerFactory.get(), timeEstimator)}
-     * inline, which meant testing this class's lazy-growth and
-     * concurrency-gate logic in isolation was impossible without also
-     * triggering real GPU/Python/FFmpeg probing on every borrowed instance.
-     * The constructor now takes a plain
-     * {@code Supplier<WhisperXTranscriptionService>}, so production code
-     * passes the real constructor call and tests can pass a cheap fake.</p>
-     */
-    static final class ModelInstancePool {
-        private final String model;
-        private final java.util.function.Supplier<WhisperXTranscriptionService> instanceFactory;
-        private final Logger logger;
-        private final LinkedBlockingQueue<WhisperXTranscriptionService> available = new LinkedBlockingQueue<>();
-        private final AtomicInteger liveCount = new AtomicInteger(0);
-        private final int maxSize;
-        private final ResizableSemaphore concurrencyGate;
-
-        ModelInstancePool(String model, int maxConcurrent,
-                          java.util.function.Supplier<WhisperXTranscriptionService> instanceFactory,
-                          Logger logger) {
-            this.model = model;
-            this.instanceFactory = instanceFactory;
-            this.logger = logger;
-            this.maxSize = Math.max(1, maxConcurrent);
-            this.concurrencyGate = new ResizableSemaphore(this.maxSize);
-            // FIX: no eager instance creation here anymore — see class doc.
-        }
-
-        private synchronized void createAndAdd() {
-            try {
-                WhisperXTranscriptionService instance = instanceFactory.get();
-                available.offer(instance);
-                liveCount.incrementAndGet();
-            } catch (Exception e) {
-                logger.warn("Failed to create model instance for {}: {}", model, e.getMessage());
-            }
-        }
-
-        /** Borrows an exclusively-owned instance, blocking if the concurrency gate is full. */
-        WhisperXTranscriptionService borrow() throws InterruptedException {
-            concurrencyGate.acquire();
-            WhisperXTranscriptionService instance = available.poll();
-            if (instance != null) return instance;
-            // FIX: grows lazily, purely driven by actual demand, up to
-            // maxSize — not eagerly at pool construction. A single
-            // sequential file only ever needs one instance and will only
-            // ever construct one, regardless of what maxSize is.
-            if (liveCount.get() < maxSize) {
-                createAndAdd();
-                instance = available.poll();
-                if (instance != null) return instance;
-            }
-            return available.take();
-        }
-
-        /** Returns an instance after use. Always recycled — never discarded. */
-        void release(WhisperXTranscriptionService instance) {
-            available.offer(instance);
-            concurrencyGate.release();
-        }
-
-        /** Live-adjusts allowed concurrency between 1 and this pool's capacity. Free to call as often as needed — never touches an instance. */
-        void adjustTarget(int newTarget) {
-            concurrencyGate.setPermits(Math.max(1, Math.min(maxSize, newTarget)));
-        }
-
-        int size() { return liveCount.get(); }
-
-        /** Current live-adjusted concurrency ceiling (see {@link #adjustTarget}) — for observability/logging only. */
-        int targetConcurrency() { return concurrencyGate.getTargetPermits(); }
-    }
-
-    /**
-     * A {@link Semaphore} whose permit count can be adjusted up or down at
-     * runtime without disturbing anything currently holding a permit —
-     * shrinking just means future {@link #acquire()} calls wait a little
-     * longer, exactly the behaviour needed for throttling
-     * {@link ModelInstancePool} without ever touching object lifecycle.
-     *
-     * <p>Package-private for direct unit testing (see
-     * {@code ResizableSemaphoreTest}).</p>
-     */
-    static final class ResizableSemaphore extends Semaphore {
-        private final AtomicInteger currentPermits;
-
-        ResizableSemaphore(int initial) {
-            super(initial, true);
-            this.currentPermits = new AtomicInteger(initial);
-        }
-
-        synchronized void setPermits(int target) {
-            int diff = target - currentPermits.get();
-            if (diff > 0) {
-                release(diff);
-                currentPermits.addAndGet(diff);
-            } else if (diff < 0) {
-                reducePermits(-diff);
-                currentPermits.addAndGet(diff);
-            }
-        }
-
-        /** The configured target permit count (distinct from {@link #availablePermits()}, which drops while permits are held). */
-        int getTargetPermits() {
-            return currentPermits.get();
-        }
-    }
-
     private static class FileGroup {
         final String type;
         final long sizeMB;
@@ -1791,36 +1678,5 @@ public class ParallelProcessingManager {
             t.setDaemon(true);
             return t;
         }
-    }
-
-    public static class FileResult {
-        public final File    file;
-        public final boolean success;
-        public final String  message;
-
-        public FileResult(File file, boolean success, String message) {
-            this.file = file; this.success = success; this.message = message;
-        }
-    }
-
-    public static class ParallelBatchResult {
-        private final int  total, completed, failed;
-        private final long durationMillis;
-        private final boolean cancelled;
-        private final Set<String> successfulFiles = new HashSet<>();
-
-        public ParallelBatchResult(int total, int completed, int failed,
-                                   long durationMillis, boolean cancelled) {
-            this.total = total; this.completed = completed; this.failed = failed;
-            this.durationMillis = durationMillis; this.cancelled = cancelled;
-        }
-
-        public int  getTotal()        { return total; }
-        public int  getCompleted()    { return completed; }
-        public int  getFailed()       { return failed; }
-        public long getDurationMillis(){ return durationMillis; }
-        public boolean wasCancelled() { return cancelled; }
-        public void addSuccessfulFile(String name) { successfulFiles.add(name); }
-        public Set<String> getSuccessfulFiles() { return Collections.unmodifiableSet(successfulFiles); }
     }
 }

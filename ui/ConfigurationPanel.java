@@ -258,6 +258,43 @@ public class ConfigurationPanel {
         // genuine baseline run for a controlled comparison.
         skipSegmentationCheckBox = new CheckBox("Baseline Mode (Skip Segmentation & Per-Segment Retry)");
         skipSegmentationCheckBox.setSelected(false);
+
+        // FIX: "Adaptive Concurrency Scaling" and "Baseline Mode" are used
+        // alternatively — one represents the app's normal, recommended
+        // fault-tolerant/adaptive behavior, the other represents a
+        // deliberately stripped-down CLI-parity mode for controlled
+        // baseline comparisons (see the Architectural Changes spec).
+        // Having both checked at once produced a run that was neither a
+        // clean baseline nor genuinely adaptive, which would silently
+        // invalidate exactly the kind of comparison this mode exists for.
+        // Checking either one now unchecks the other; this is deliberately
+        // NOT a hard radio-button pair (unchecking one does not force the
+        // other on) — "both off" is still a valid, distinct third state
+        // (fixed concurrency, but with normal segmentation/retry).
+        adaptiveScalingCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
+            if (isSelected) skipSegmentationCheckBox.setSelected(false);
+        });
+        skipSegmentationCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
+            if (isSelected) adaptiveScalingCheckBox.setSelected(false);
+        });
+
+        // FIX: persist immediately on toggle rather than only at the
+        // handful of savePreferences() call sites elsewhere in this panel.
+        // For most settings, "saved next time something else triggers a
+        // save, or on app close" is fine — but this pair exists specifically
+        // so a chosen mode survives without the user having to come back
+        // and re-set it, and an unexpected close (crash, force-quit
+        // mid-experiment) shouldn't silently revert a deliberately-chosen
+        // baseline configuration back to the adaptive default.
+        adaptiveScalingCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
+            prefManager.putBoolean("adaptive_scaling_enabled", isSelected);
+            prefManager.flush();
+        });
+        skipSegmentationCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
+            prefManager.putBoolean("skip_segmentation_baseline_mode", isSelected);
+            prefManager.flush();
+        });
+
         removeSilenceCheckBox = new CheckBox("Remove Silence from Audio");
         normalizeCheckBox = new CheckBox("Normalize Audio");
 

@@ -82,6 +82,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     // Tools
     private final AudioSplitterTool audioSplitter;
     private final FileCombinerTool fileCombiner;
+    private final SoundRecorderPanel soundRecorderPanel;
     
     // State
     private final ObservableList<BatchFileItem> batchFiles;
@@ -159,6 +160,14 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         this.fileCombiner = new FileCombinerTool(prefManager);
         this.fileCombiner.setLogger(this::log);
+
+        // FIX: SoundRecorderPanel existed as a complete, working class but
+        // was never constructed or added to the scene graph anywhere in
+        // MainWindow -- so it silently never appeared in the running app.
+        // Per its own class javadoc it's deliberately a peer section to
+        // Audio File Selection, not a Tools-accordion entry like the two
+        // tools above, so it's wired differently below (see createScene()).
+        this.soundRecorderPanel = new SoundRecorderPanel(batchFiles, prefManager, this::log);
 
         LOGGER.info("Application components initialized");
     }
@@ -396,6 +405,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         VBox mainContent = new VBox(0);
         mainContent.getChildren().addAll(
             createStyledFileSelectionSection(),
+            soundRecorderPanel.getRecorderSection(),
             toolsSection,
             createStyledBatchQueueSection(),
             createStyledControlSection(),
@@ -1438,6 +1448,12 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         if (restApiServer != null && restApiServer.isRunning()) {
             restApiServer.stop();
         }
+        if (soundRecorderPanel != null) {
+            // Releases the OS microphone line and disposes any open
+            // playback -- an open TargetDataLine left dangling on app exit
+            // can keep the audio input device locked on some platforms.
+            soundRecorderPanel.shutdown();
+        }
 
         try {
             savePreferences();
@@ -1968,6 +1984,15 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 : "⚙️ Adaptive concurrency scaling: DISABLED (fixed-concurrency baseline mode — held at Max Parallel Files = "
                         + maxParallel + ")");
 
+        // FIX: same staleness bug as adaptive scaling above, found on a
+        // follow-up audit -- these two checkboxes were also only ever read
+        // from PreferenceManager inside processBatch(), which only reflects
+        // whatever ConfigurationPanel.savePreferences() last wrote, not
+        // necessarily this session's current checkbox state. Read live,
+        // right here, same as adaptive scaling.
+        batchProcessor.setExportWordCopy(configurationPanel.isExportWordCopyEnabled());
+        batchProcessor.setExportPdfCopy(configurationPanel.isExportPdfCopyEnabled());
+
         // FIX (consolidation): was a branch here between
         // startStandardBatchProcessing() (maxParallel <= 1) and
         // startParallelBatchProcessing() (maxParallel > 1) — two separate
@@ -2011,6 +2036,15 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 );
             }
         });
+
+        // NOTE: adaptive-scaling/export-flag live wiring lives earlier in
+        // this method, right before this same batchProcessor's config was
+        // assembled (see setAdaptiveScalingEnabled/setExportWordCopy/
+        // setExportPdfCopy above) — a second, redundant copy of these same
+        // three calls previously ended up duplicated here too (harmless,
+        // since they're idempotent setters re-applying the same live
+        // values, but confusing to read as if two different fixes were
+        // needed). Removed rather than left in "just in case."
 
         batchProcessor.processBatch(batchFiles, processingConfig, transcriptionConfig, maxParallel)
             .thenAccept(result -> {

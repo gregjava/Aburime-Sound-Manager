@@ -86,6 +86,39 @@ public class FileTimingReport {
     public double getPythonPeakMemoryMb() { return pythonPeakMemoryMb; }
     public double getPythonAvgCpuPercent() { return pythonAvgCpuPercent; }
 
+    // Architectural spec: logging must self-identify the processing mode
+    // (Adaptive / Baseline-Conservative / Baseline-Naive) while staying
+    // structurally identical otherwise — same batch-summary format, same
+    // wall-clock fields, same peak RAM/CPU capture — so the existing
+    // adaptive-mode analysis script keeps working unmodified on baseline
+    // logs too, with the mode as just one more column rather than a
+    // reason to build a second parsing pipeline.
+    private String processingMode = "ADAPTIVE";
+
+    public void setProcessingMode(String mode) { this.processingMode = mode; }
+    public String getProcessingMode() { return processingMode; }
+
+    // Architectural spec, failure semantics: under baseline mode a whole
+    // file either succeeds or throws — no partial credit, no retry. What
+    // specifically failed (exception type + message) is the evidence that
+    // makes a fault-tolerance comparison concrete rather than just "fewer
+    // files completed", so it's captured here rather than only as a
+    // pass/fail count — and this is populated in both modes, not only
+    // baseline, since the same evidence is just as useful when adaptive
+    // mode's retry logic ultimately still fails a file.
+    private String failureExceptionType = null;
+    private String failureExceptionMessage = null;
+
+    public void setFailure(Throwable t) {
+        if (t == null) return;
+        this.failureExceptionType = t.getClass().getName();
+        this.failureExceptionMessage = t.getMessage();
+    }
+
+    public String getFailureExceptionType() { return failureExceptionType; }
+    public String getFailureExceptionMessage() { return failureExceptionMessage; }
+    public boolean isFailed() { return failureExceptionType != null; }
+
     public FileTimingReport(String fileName) {
         this.fileName = fileName;
     }
