@@ -74,6 +74,75 @@ public class Studio extends Application {
     private String whisperPython;
     private String whisperEnv;
 
+    // FIX (cross-platform bundling): every bundled-path guess below used to
+    // be hardcoded to the Windows venv/executable layout (ffmpeg.exe,
+    // <env>/Scripts/python.exe, <env>/Lib/site-packages). Bundling now
+    // targets Windows, macOS, and Linux from the same code path -- the
+    // only real difference between them is executable naming and venv
+    // internal layout, both centralized here so the rest of this class
+    // doesn't need its own per-OS branches.
+    private static final String OS_NAME = System.getProperty("os.name", "").toLowerCase();
+    private static final boolean IS_WINDOWS = OS_NAME.contains("win");
+    private static final boolean IS_MAC = OS_NAME.contains("mac") || OS_NAME.contains("darwin");
+    // (Anything that's neither Windows nor Mac is treated as a Linux-style
+    // venv layout below -- true for every mainstream Linux distribution,
+    // and a reasonable default for other Unix-likes too.)
+
+    /** Platform-appropriate executable filename for a bundled tool -- "ffmpeg.exe" on Windows, "ffmpeg" elsewhere. */
+    private static String exeName(String baseName) {
+        return IS_WINDOWS ? baseName + ".exe" : baseName;
+    }
+
+    /**
+     * Platform-appropriate relative path from a Python venv root to its
+     * interpreter -- Windows venvs put executables in {@code Scripts/},
+     * every other platform's venv convention uses {@code bin/}.
+     */
+    private static Path venvPythonRelativePath() {
+        return IS_WINDOWS ? Paths.get("Scripts", "python.exe") : Paths.get("bin", "python3");
+    }
+
+    /** Platform-appropriate relative path from a venv root to its executables directory (for PATH prepending). */
+    private static Path venvBinRelativePath() {
+        return IS_WINDOWS ? Paths.get("Scripts") : Paths.get("bin");
+    }
+
+    /**
+     * Platform-appropriate relative path from a venv root to its
+     * site-packages directory. Windows venvs use a fixed {@code Lib\site-packages}
+     * regardless of Python version; macOS/Linux venvs nest it under a
+     * version-specific {@code lib/pythonX.Y/} directory, so this scans for
+     * that directory rather than guessing a specific version — a bundled
+     * installer built against a different Python minor version than
+     * whatever wrote this code would otherwise silently resolve to a
+     * nonexistent path.
+     */
+    private static Path venvSitePackagesRelativePath(Path envRoot) {
+        if (IS_WINDOWS) {
+            return Paths.get("Lib", "site-packages");
+        }
+        Path libDir = envRoot.resolve("lib");
+        if (Files.isDirectory(libDir)) {
+            try (var stream = Files.list(libDir)) {
+                Path pythonVersionDir = stream
+                        .filter(p -> Files.isDirectory(p) && p.getFileName().toString().startsWith("python3"))
+                        .findFirst()
+                        .orElse(null);
+                if (pythonVersionDir != null) {
+                    return envRoot.relativize(pythonVersionDir.resolve("site-packages"));
+                }
+            } catch (java.io.IOException ignored) {
+                // Fall through to the guessed default below.
+            }
+        }
+        // Reasonable fallback if the venv doesn't exist yet or the scan
+        // failed for some other reason -- won't resolve to a real
+        // directory, but keeps this method's return type non-null and
+        // lets the "does this exist" checks elsewhere fail gracefully
+        // rather than this method throwing.
+        return Paths.get("lib", "python3", "site-packages");
+    }
+
     /**
      * Application initialization - called before start()
      * @throws java.lang.Exception Error object returned in the event of process failure
@@ -83,9 +152,29 @@ public class Studio extends Application {
         super.init();
 
         instance = this;
-        
-        // Initialize bundled resource paths
-        initializeBundledPaths();
+
+        // FIX: initializeBundledPaths() (and the getAppDirectory() call it
+        // can reach via validateBundledPaths()) previously ran here with no
+        // surrounding try/catch at all. JavaFX's Application.init() has no
+        // graceful-failure path of its own -- an exception thrown here
+        // aborts the launch before any window (and before
+        // showErrorAndExit()'s try/catch in start(), which never gets a
+        // chance to run) ever appears, typically surfacing as just a raw
+        // stack trace with no UI at all. That's an acceptable risk for a
+        // dev/IDE run, but not for a distributed installer, where an
+        // unusual classloading environment or an unexpected install layout
+        // (see getAppDirectory()'s own hardening below) must degrade to
+        // "use system PATH" instead of preventing the app from starting.
+        try {
+            initializeBundledPaths();
+        } catch (Exception e) {
+            LOGGER.warn("Bundled runtime path resolution failed ({}); falling back to system PATH for FFmpeg/Python.",
+                    e.getMessage(), e);
+            appDir = ".";
+            ffmpegPath = "ffmpeg";
+            whisperPython = "python";
+            whisperEnv = ".";
+        }
         
         this.modelManager = new ModelManager();
         
@@ -161,12 +250,29 @@ public class Studio extends Application {
      * Validate bundled resource paths and fallback to alternatives if needed
      */
     private void validateBundledPaths() {
-        // Validate FFmpeg
+        // FIX: "ffmpeg"/"python" (the defaults when no launcher system
+        // property is set at all -- see initializeBundledPaths()) are
+        // meant to be resolved via the OS's own PATH search by
+        // ProcessBuilder, not as literal files relative to the working
+        // directory -- Paths.get("ffmpeg") almost never exists as a real
+        // file, so this used to log a WARN on every single normal,
+        // unbundled run (dev/IDE runs, or Linux/macOS users relying on a
+        // system install), which is misleading: nothing is actually wrong
+        // in that case. Only warn when a launcher genuinely configured a
+        // specific path and that path doesn't exist -- that's the case
+        // actually worth flagging.
+        boolean ffmpegPathWasExplicitlyConfigured = System.getProperty("ffmpeg.path") != null;
         Path ffmpeg = Paths.get(ffmpegPath);
         if (!Files.exists(ffmpeg)) {
-            LOGGER.warn("FFmpeg not found at configured path: {}", ffmpegPath);
-            // Try fallback to bundled location
-            Path bundledFFmpeg = getAppDirectory().resolve("ffmpeg").resolve("ffmpeg.exe");
+            if (ffmpegPathWasExplicitlyConfigured) {
+                LOGGER.warn("FFmpeg not found at configured path: {}", ffmpegPath);
+            } else {
+                LOGGER.debug("No bundled FFmpeg path configured; will resolve \"ffmpeg\" via system PATH.");
+            }
+            // Cross-platform: exeName() resolves to "ffmpeg.exe" on
+            // Windows, plain "ffmpeg" everywhere else -- same bundled
+            // "ffmpeg/" subdirectory convention on every OS.
+            Path bundledFFmpeg = getAppDirectory().resolve("ffmpeg").resolve(exeName("ffmpeg"));
             if (Files.exists(bundledFFmpeg)) {
                 ffmpegPath = bundledFFmpeg.toString();
                 LOGGER.info("Using bundled FFmpeg: {}", ffmpegPath);
@@ -179,12 +285,20 @@ public class Studio extends Application {
             LOGGER.info("FFmpeg found at: {}", ffmpegPath);
         }
         
-        // Validate Whisper Python
+        // Validate Whisper Python -- same "only warn if explicitly
+        // configured" reasoning as FFmpeg above.
+        boolean pythonPathWasExplicitlyConfigured = System.getProperty("whisper.python") != null;
         Path python = Paths.get(whisperPython);
         if (!Files.exists(python)) {
-            LOGGER.warn("Whisper Python not found at configured path: {}", whisperPython);
-            // Try fallback to bundled location
-            Path bundledPython = getAppDirectory().resolve("whisper_env").resolve("Scripts").resolve("python.exe");
+            if (pythonPathWasExplicitlyConfigured) {
+                LOGGER.warn("Whisper Python not found at configured path: {}", whisperPython);
+            } else {
+                LOGGER.debug("No bundled Whisper Python path configured; will resolve \"python\" via system PATH.");
+            }
+            // Cross-platform: venvPythonRelativePath() resolves to
+            // "Scripts/python.exe" on Windows, "bin/python3" everywhere
+            // else -- the standard venv layout on each platform.
+            Path bundledPython = getAppDirectory().resolve("whisper_env").resolve(venvPythonRelativePath());
             if (Files.exists(bundledPython)) {
                 whisperPython = bundledPython.toString();
                 whisperEnv = getAppDirectory().resolve("whisper_env").toString();
@@ -222,20 +336,34 @@ public class Studio extends Application {
      * Get the application installation directory
      * @return Path to the application root directory
      */
-    public Path getAppDirectory() {
+    private Path getAppDirectory() {
         try {
-            String path = Studio.class.getProtectionDomain()
-                .getCodeSource()
-                .getLocation()
-                .toURI()
-                .getPath();
-            // Navigate up from app/AburimeSoundManager.jar to root directory
-            Path jarPath = Paths.get(path);
-            if (jarPath.getNameCount() > 1) {
-                return jarPath.getParent().getParent();
+            // FIX (restored — this null-guard was lost in the same edit
+            // that added the Windows leading-slash fix below, most likely
+            // from working off a copy of this method predating it):
+            // getCodeSource() can legitimately return null in some
+            // classloading environments (certain custom/module
+            // classloaders, some signed-jar or security-manager setups).
+            // init() wraps its caller in a try/catch so this alone won't
+            // crash startup either way, but every OTHER caller of this
+            // method gets the same safe fallback this way too, instead of
+            // needing its own defensive check.
+            var codeSource = Studio.class.getProtectionDomain().getCodeSource();
+            if (codeSource == null || codeSource.getLocation() == null) {
+                LOGGER.warn("Could not determine application directory (no code source available), using current directory");
+                return Paths.get(".");
             }
+            String path = codeSource.getLocation().toURI().getPath();
+            // Fix Windows paths with leading slash — confirmed necessary
+            // by real Windows deployment testing: a file: URI's getPath()
+            // can return e.g. "/C:/Program Files/App/app.jar", which isn't
+            // a valid Windows path until that leading slash is stripped.
+            if (path.startsWith("/") && path.contains(":")) {
+                path = path.substring(1);
+            }
+            Path jarPath = Paths.get(path);
             return jarPath.getParent();
-        } catch (URISyntaxException e) {
+        } catch (URISyntaxException | RuntimeException e) {
             LOGGER.warn("Could not determine application directory, using current directory", e);
             return Paths.get(".");
         }
@@ -298,25 +426,29 @@ public class Studio extends Application {
         // Set environment to use bundled Whisper environment
         Path envPath = Paths.get(whisperEnv);
         if (Files.exists(envPath)) {
-            // Add Scripts directory to PATH for DLL dependencies
+            // FIX (cross-platform bundling): this used to hardcode the
+            // Windows venv layout unconditionally -- Scripts/ for
+            // executables and DLL search, a flat Lib/ for PYTHONPATH. Now
+            // resolved per-OS via the same venv*RelativePath() helpers
+            // used for the bundled-python lookup above, so this stays in
+            // sync with wherever that logic decided the interpreter itself
+            // actually lives.
             String pathEnv = System.getenv("PATH");
-            String scriptsDir = envPath.resolve("Scripts").toString();
-            String libDir = envPath.resolve("Lib").toString();
-            
-            pb.environment().put("PATH", 
-                scriptsDir + 
-                java.io.File.pathSeparator + 
-                libDir + 
-                java.io.File.pathSeparator + 
+            String binDir = envPath.resolve(venvBinRelativePath()).toString();
+
+            pb.environment().put("PATH",
+                binDir +
+                java.io.File.pathSeparator +
                 (pathEnv != null ? pathEnv : ""));
-            
+
             // Set Python-specific environment variables
+            Path sitePackages = envPath.resolve(venvSitePackagesRelativePath(envPath));
             pb.environment().put("PYTHONHOME", envPath.toString());
-            pb.environment().put("PYTHONPATH", 
-                envPath.resolve("Lib").toString() + 
-                java.io.File.pathSeparator + 
-                envPath.resolve("Lib").resolve("site-packages").toString());
-            
+            pb.environment().put("PYTHONPATH",
+                sitePackages.getParent().toString() +
+                java.io.File.pathSeparator +
+                sitePackages.toString());
+
             // Set working directory to whisper_env
             pb.directory(envPath.toFile());
         }

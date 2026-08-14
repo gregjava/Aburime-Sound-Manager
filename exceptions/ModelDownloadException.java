@@ -2,7 +2,7 @@
  * Copyright (c) AudioManager Project Contributors.
  * SPDX-License-Identifier: Apache-2.0
  */
-package audiomanager.core;
+package audiomanager.exceptions;
 
 /**
  * Custom exception for model download failures with helpful messages

@@ -24,10 +24,8 @@ import javafx.stage.FileChooser;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Consumer;
@@ -101,34 +99,24 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     private Label fileDurationLabel;
     private static final Logger LOGGER = LoggerFactory.getLogger(FileSelectionPanel.class);
 
-    // FIX (UI improvement — undo/redo): a small command-history stack for
-    // queue mutations (add, remove, move-to-top/bottom). Scoped
-    // deliberately to queue management, not to transcription itself —
-    // there's no meaningful "undo" for a file that's already been
-    // transcribed. Each command captures exactly what it needs to reverse
-    // itself; both stacks are cleared on a fresh command push after an
-    // undo (standard redo-invalidation behaviour).
-    private interface QueueCommand {
-        void undo();
-        void redo();
-        String description();
-    }
-    private final Deque<QueueCommand> undoStack = new ArrayDeque<>();
-    private final Deque<QueueCommand> redoStack = new ArrayDeque<>();
-    private static final int MAX_UNDO_HISTORY = 50;
+    // FIX (MVC breakup, Phase 3 — first extraction): the command-history
+    // stack mechanics for undo/redo moved to QueueCommandHistory, a small,
+    // independently-testable class with no JavaFX/UI dependency of its
+    // own. FileSelectionPanel keeps only what's genuinely panel-specific —
+    // the log line and queue-totals refresh that should follow a
+    // successful undo/redo — as a thin wrapper. QueueCommand itself also
+    // moved to its own top-level file (same package, so every existing
+    // "new QueueCommand() { ... }" call site below needs no changes).
+    private final QueueCommandHistory commandHistory = new QueueCommandHistory();
 
     private void pushCommand(QueueCommand command) {
-        undoStack.push(command);
-        while (undoStack.size() > MAX_UNDO_HISTORY) undoStack.removeLast();
-        redoStack.clear();
+        commandHistory.push(command);
     }
 
     /** @return true if a queue change was undone. */
     public boolean undo() {
-        if (undoStack.isEmpty()) return false;
-        QueueCommand command = undoStack.pop();
-        command.undo();
-        redoStack.push(command);
+        QueueCommand command = commandHistory.undo();
+        if (command == null) return false;
         log("↩️ Undo: " + command.description());
         updateBatchQueueTotals();
         return true;
@@ -136,17 +124,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
     /** @return true if a previously-undone queue change was reapplied. */
     public boolean redo() {
-        if (redoStack.isEmpty()) return false;
-        QueueCommand command = redoStack.pop();
-        command.redo();
-        undoStack.push(command);
+        QueueCommand command = commandHistory.redo();
+        if (command == null) return false;
         log("↪️ Redo: " + command.description());
         updateBatchQueueTotals();
         return true;
     }
 
-    public boolean canUndo() { return !undoStack.isEmpty(); }
-    public boolean canRedo() { return !redoStack.isEmpty(); }
+    public boolean canUndo() { return commandHistory.canUndo(); }
+    public boolean canRedo() { return commandHistory.canRedo(); }
     
     // Queue status labels that remain constant during processing
     private Label queueTotalLabel;

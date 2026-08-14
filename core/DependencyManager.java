@@ -403,25 +403,40 @@ public class DependencyManager {
      *         if nothing was found on disk (letting PATH resolution try last)
      */
     private String resolveExecutable(String baseName) {
+        // FIX (cross-platform bundling): this used to gate the ENTIRE
+        // bundled/fixed lookup behind IS_WINDOWS -- on macOS/Linux it went
+        // straight to bare PATH resolution (step 3) with no attempt at a
+        // bundled runtime at all, even though the runtime/ffmpeg
+        // subdirectory convention itself has nothing Windows-specific
+        // about it. Only the executable's own filename differs by OS
+        // (no ".exe" on macOS/Linux), so that's now the only OS branch.
+        String exeFileName = IS_WINDOWS ? baseName + ".exe" : baseName;
+
+        // 1. Bundled runtime, relative to the running application -- now
+        // checked on every OS.
+        File bundled = new File(getApplicationDirectory(), BUNDLED_RUNTIME_SUBDIR + File.separator + exeFileName);
+        if (bundled.isFile()) {
+            LOGGER.info("Using bundled {} at: {}", baseName, bundled.getAbsolutePath());
+            return bundled.getAbsolutePath();
+        }
+
+        // 2. Fixed, well-known install location -- deliberately still
+        // Windows-only. FIXED_INSTALL_DIR is one specific hardcoded path
+        // (C:\AI\ffmpeg\bin); there's no equivalent single well-known
+        // location to safely guess at on macOS (Homebrew alone differs
+        // between /opt/homebrew/bin on Apple Silicon and /usr/local/bin on
+        // Intel) or across Linux distributions/package managers. Step 3
+        // (PATH) already covers a real system install correctly on those
+        // platforms without needing a guessed fixed path here.
         if (IS_WINDOWS) {
-            String exeFileName = baseName + ".exe";
-
-            // 1. Bundled runtime, relative to the running application.
-            File bundled = new File(getApplicationDirectory(), BUNDLED_RUNTIME_SUBDIR + File.separator + exeFileName);
-            if (bundled.isFile()) {
-                LOGGER.info("Using bundled {} at: {}", baseName, bundled.getAbsolutePath());
-                return bundled.getAbsolutePath();
-            }
-
-            // 2. Fixed, well-known install location.
             File fixed = new File(FIXED_INSTALL_DIR, exeFileName);
             if (fixed.isFile()) {
                 LOGGER.info("Using {} from fixed install location: {}", baseName, fixed.getAbsolutePath());
                 return fixed.getAbsolutePath();
             }
-
-            LOGGER.debug("Neither bundled nor fixed-location {} found; falling back to PATH.", exeFileName);
         }
+
+        LOGGER.debug("Neither bundled nor fixed-location {} found; falling back to PATH.", exeFileName);
 
         // 3. Last resort: rely on the system PATH.
         return baseName;

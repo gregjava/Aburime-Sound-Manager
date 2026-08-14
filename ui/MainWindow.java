@@ -255,6 +255,8 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             );
         }
 
+        showPrivacyDisclosureIfNeeded();
+
         stage.show();
 
         CompletableFuture.runAsync(this::checkDependencies);
@@ -1307,8 +1309,87 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
      * volume-analysis and amplification error handlers with no exit-code
      * hint or stderr detail at all — just {@code getUserMessage()}.
      */
+    /**
+     * Shown once, on first launch only (gated on a persisted preference),
+     * before the main window appears. Deliberately factual rather than
+     * generic boilerplate — every claim below is traceable to a specific
+     * code path in this app, not a template disclosure copied from
+     * somewhere else:
+     *
+     * <ul>
+     *   <li>Audio processing (ffmpeg) and transcription (WhisperX) run
+     *       entirely locally — via the bundled runtime when packaged, or
+     *       whatever's on the system PATH otherwise. Nothing about the
+     *       audio file itself is ever sent anywhere for these two steps.</li>
+     *   <li>Speaker diarization is opt-in (requires the user to supply
+     *       their own HuggingFace token in Preferences) and sends audio
+     *       segments to HuggingFace's pyannote models when enabled.</li>
+     *   <li>Translation is opt-in and self-directed — nothing is sent
+     *       anywhere unless the user configures a LibreTranslate-compatible
+     *       endpoint themselves; the app has no built-in translation
+     *       provider of its own.</li>
+     *   <li>The REST API (also opt-in, off by default) binds to localhost
+     *       only — see {@code RestApiServer}'s own scope comment.</li>
+     * </ul>
+     */
+    private void showPrivacyDisclosureIfNeeded() {
+        if (prefManager.getBoolean("privacy_disclosure_acknowledged", false)) {
+            return;
+        }
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Before You Start");
+        alert.setHeaderText("What This App Sends Over the Network");
+        alert.getButtonTypes().setAll(new ButtonType("I Understand", ButtonBar.ButtonData.OK_DONE));
+
+        TextArea body = new TextArea(
+                "Audio processing and transcription run entirely on this computer. "
+                        + "Your audio files and their transcripts are never sent anywhere for these steps.\n\n"
+                        + "Two optional features do send data externally, only if you turn them on:\n\n"
+                        + "• Speaker diarization — if you add your own HuggingFace token in "
+                        + "Preferences, audio segments are sent to HuggingFace's pyannote models "
+                        + "to identify who's speaking. Off by default.\n\n"
+                        + "• Translation — nothing is sent anywhere unless you configure a "
+                        + "translation server endpoint yourself in Preferences. This app has no "
+                        + "built-in translation provider — you choose where transcribed text goes, "
+                        + "if anywhere.\n\n"
+                        + "The REST API, if you start it from the Tools menu, only listens on "
+                        + "localhost — it's for local automation, not a network service.");
+        body.setEditable(false);
+        body.setWrapText(true);
+        body.setPrefSize(520, 260);
+
+        alert.getDialogPane().setContent(body);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
+
+        prefManager.putBoolean("privacy_disclosure_acknowledged", true);
+        prefManager.flush();
+    }
+
+    /**
+     * Build and show an error alert that recognizes the AudioManager typed
+     * exception hierarchy (see {@code AudioManagerException}'s own javadoc —
+     * this method is the thing that hierarchy was built for, but until now
+     * only two call sites (volume analysis, amplification) actually used
+     * it, and only for {@link FfmpegException} specifically). Every other
+     * catch site in this class still fell through to a bare {@code
+     * cause.getMessage()}, silently discarding {@code getUserMessage()}/
+     * {@code isRecoverable()} for every other typed exception even where
+     * the calling code already had one to catch.
+     *
+     * <p>{@link FfmpegException} gets its own branch first for the extra
+     * exit-code hint and expandable stderr detail; every other {@code
+     * AudioManagerException} subtype (ModelNotFoundException,
+     * DependencyException, TranscriptionException, OutputIntegrityException)
+     * shares one branch via the common base's {@code getUserMessage()}/
+     * {@code isRecoverable()}; {@link ModelDownloadException} sits outside
+     * that hierarchy (extends {@code Exception} directly) so gets its own
+     * branch via {@code getUserFriendlyMessage()}; anything else falls back
+     * to the original generic message.</p>
+     */
     private void showFfmpegAwareErrorAlert(String title, String header, Throwable ex) {
-        Throwable cause = ex.getCause();
+        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
         Alert alert = new Alert(Alert.AlertType.ERROR);
         alert.setTitle(title);
         alert.setHeaderText(header);
@@ -1328,8 +1409,17 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 VBox expandableContent = new VBox(5, detailsLabel, detailsArea);
                 alert.getDialogPane().setExpandableContent(expandableContent);
             }
+        } else if (cause instanceof audiomanager.exceptions.AudioManagerException ame) {
+            String message = ame.getUserMessage();
+            if (!ame.isRecoverable()) {
+                message += "\n\nThis batch/file cannot be retried automatically — please check the "
+                        + "issue above before trying again.";
+            }
+            alert.setContentText(message);
+        } else if (cause instanceof audiomanager.exceptions.ModelDownloadException mde) {
+            alert.setContentText(mde.getUserFriendlyMessage());
         } else {
-            alert.setContentText(cause != null ? cause.getMessage() : ex.getMessage());
+            alert.setContentText(cause.getMessage() != null ? cause.getMessage() : ex.getMessage());
         }
 
         

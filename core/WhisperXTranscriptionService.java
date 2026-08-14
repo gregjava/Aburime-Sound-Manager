@@ -4,6 +4,7 @@
  */
 package audiomanager.core;
 
+import audiomanager.exceptions.ModelDownloadException;
 import audiomanager.model.*;
 import audiomanager.util.TimeLeftEstimator;
 import audiomanager.util.ProcessRunner;
@@ -297,6 +298,33 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
         /*
          * ------------------------------------------------------------------
+         * 1.5. Bundled distribution (Studio.getInstance()) — the app's own
+         *      packaged Python/WhisperX venv, resolved once at startup by
+         *      Studio.validateBundledPaths(). Takes priority over the old
+         *      PATH-search/guessed-default-venv steps below, since a
+         *      genuine bundled distribution is more authoritative than
+         *      guessing — but an explicit WHISPERX_PYTHON override above
+         *      still wins over even this, since that's the whole point of
+         *      an explicit override. Null-safe: Studio.getInstance() is
+         *      always null in unit tests (which never call
+         *      Application.launch()) and before init() runs, so this step
+         *      harmlessly falls through to the pre-bundling behavior below
+         *      whenever there's no real bundled distribution to use.
+         * ------------------------------------------------------------------
+         */
+        audiomanager.Studio studio = audiomanager.Studio.getInstance();
+        if (studio != null && studio.isWhisperAvailable()) {
+            String bundledPython = studio.getWhisperPythonPath();
+            if (isWhisperXInstalled(bundledPython)) {
+                LOGGER.info("Using bundled WhisperX Python: {}", bundledPython);
+                return bundledPython;
+            }
+            LOGGER.warn("Studio reports a bundled Python at {} but WhisperX is not installed there — "
+                    + "falling back to PATH search.", bundledPython);
+        }
+
+        /*
+         * ------------------------------------------------------------------
          * 2. Locate whisperx executable
          * ------------------------------------------------------------------
          */
@@ -565,30 +593,32 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         // under a "segment_work_*" temp directory it creates itself — a
         // real user file, Baseline Mode or not, is never located there.
         //
-        // FIX (this check was still broken after the fix above — this is
-        // the actual root cause of "time estimation is now very messed
-        // up"): the original version here checked only the file's
-        // IMMEDIATE parent directory. But SegmentProcessor.splitAudio()
-        // writes segment files to <segment_work_xxx>/segments/segment_NNN.wav
-        // — a "segments" subdirectory *inside* the segment_work_ dir, not
-        // segment_work_ itself. So the immediate parent's name is always
-        // literally "segments", never "segment_work_*", and the old check
-        // — parentDir.getName().startsWith("segment_work_") — could never
-        // match ANY real segment sub-call. isSegmentSubCall was therefore
-        // silently false for every segment, all the time, which is worse
-        // than what this whole check was added to fix in the first place:
-        // every segment of every large/segmented file got treated as its
-        // own independent top-level file — registered under its own
-        // "segment_003.wav"-style name, polluting TimeLeftEstimator's
-        // learned historical data with bogus per-segment entries, and
-        // completeFileProcessing() firing once per SEGMENT instead of once
-        // per file wiped out the real file's own tracking state out from
-        // under SegmentProcessor's own recordSegmentCompletion() calls for
-        // every subsequent segment. Fixed by walking up the full ancestor
-        // chain instead of checking only the immediate parent — matches
-        // regardless of how many intermediate subdirectories
-        // SegmentProcessor happens to use, today or after any future
-        // internal restructuring of its own temp-layout.
+        // FIX (REAPPLIED for the THIRD time — this fix keeps getting lost
+        // whenever new work is merged on top of a local copy of this file
+        // that predates it. If this happens again, the fastest way to stop
+        // it recurring is to grep this file for "isInsideSegmentWorkDir"
+        // before merging any new changes into it, and re-add this block if
+        // it's missing, rather than re-deriving it from scratch each time):
+        // SegmentProcessor.splitAudio() writes segment files to
+        // <segment_work_xxx>/segments/segment_NNN.wav — a "segments"
+        // subdirectory *inside* the segment_work_ dir, not segment_work_
+        // itself. Checking only the immediate parent can therefore never
+        // match a single real segment sub-call, since the immediate
+        // parent's name is always literally "segments". With
+        // isSegmentSubCall wrongly false for every real segment, every
+        // segment of every segmented (e.g. "large" model) file gets
+        // treated as its own independent top-level file:
+        // startFileProcessing()/completeFileProcessing() fire once per
+        // SEGMENT instead of once per file, each keyed to a throwaway name
+        // like "segment_003.wav" — which repeatedly destroys and re-creates
+        // TimeLeftEstimator's tracking state out from under
+        // SegmentProcessor's own outer startSegmentedFileProcessing()
+        // session for that file, mid-batch, on every single segment
+        // boundary. That's what produces File Time Left reading 0ms
+        // throughout and Total Time Left compounding worse than adaptive
+        // mode. Fixed by walking the full ancestor chain instead of
+        // checking only the immediate parent — see isInsideSegmentWorkDir()
+        // below.
         File audioFileHandle = new File(audioFilePath);
         boolean isSegmentSubCall = config.isSkipSegmentation()
                 && isInsideSegmentWorkDir(audioFileHandle.getParentFile());
@@ -890,6 +920,39 @@ public class WhisperXTranscriptionService implements TranscriptionService {
      */
     private Map<String, String> buildWhisperXEnv(TranscriptionConfig config) {
         Map<String, String> env = new HashMap<>();
+
+        // FIX: a bundled/portable Python venv (Studio's resolved
+        // whisper_env, once the app is packaged for distribution) needs
+        // PYTHONHOME/PYTHONPATH pointed at itself and its Scripts/Lib dirs
+        // on PATH to find its own site-packages and DLL dependencies —
+        // without this, resolvePythonExecutable() could correctly resolve
+        // the bundled python.exe path yet the actual transcription
+        // process still fails to import whisperx, because nothing told it
+        // where its own environment lives. Mirrors exactly what
+        // Studio.createWhisperProcess() already computes (that method
+        // itself isn't in this call path — the real invocation goes
+        // through ProcessRunner.runCommand() below with this env map, not
+        // through a ProcessBuilder Studio hands back) — kept in sync
+        // manually since the two return different shapes (a ProcessBuilder
+        // vs. this env overlay). Null-safe: harmlessly skipped when
+        // there's no live Studio instance (unit tests, or before init()
+        // has run) or no bundled env was actually found.
+        audiomanager.Studio studio = audiomanager.Studio.getInstance();
+        if (studio != null && studio.getWhisperEnvPath() != null) {
+            java.nio.file.Path envPath = java.nio.file.Paths.get(studio.getWhisperEnvPath());
+            if (java.nio.file.Files.exists(envPath)) {
+                String scriptsDir = envPath.resolve("Scripts").toString();
+                String libDir = envPath.resolve("Lib").toString();
+                String existingPath = System.getenv("PATH");
+                env.put("PATH", scriptsDir + java.io.File.pathSeparator
+                        + libDir + java.io.File.pathSeparator
+                        + (existingPath != null ? existingPath : ""));
+                env.put("PYTHONHOME", envPath.toString());
+                env.put("PYTHONPATH", envPath.resolve("Lib").toString()
+                        + java.io.File.pathSeparator
+                        + envPath.resolve("Lib").resolve("site-packages").toString());
+            }
+        }
 
         // Inject HF token for diarisation (never hard-coded; resolved at construction time)
         if (hfToken != null && !hfToken.isBlank() && config.isDiarizeEnabled()) {
