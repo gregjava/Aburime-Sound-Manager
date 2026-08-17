@@ -10,7 +10,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
@@ -501,4 +503,61 @@ public class DependencyManager {
                                name, available, message);
         }
     }
+    
+    /**
+    * Check if the alignment model is available and report its status.
+    * 
+    * <p>FIX: the 360MB alignment model isn't covered by the Studio bundling.
+    * This provides a clear status check that can be surfaced in the UI
+    * (e.g., during first-run onboarding).</p>
+    */
+   public DependencyStatus checkAlignmentModel() {
+       Path modelPath = Paths.get(System.getProperty("user.home"), 
+           ".cache", "torch", "hub", "checkpoints", "wav2vec2_fairseq_base_ls960_asr_ls960.pth");
+
+       try {
+           if (Files.exists(modelPath)) {
+               long size = Files.size(modelPath);
+               if (size > 300_000_000) { // 300 MB minimum
+                   return new DependencyStatus(
+                       "Alignment Model",
+                       true,
+                       "Alignment model found (" + formatBytes(size) + ")",
+                       null
+                   );
+               } else {
+                   return new DependencyStatus(
+                       "Alignment Model",
+                       false,
+                       "Alignment model is incomplete (" + formatBytes(size) + " expected >300MB)",
+                       "The alignment model appears to be truncated. Delete the file and let the app re-download it."
+                   );
+               }
+           } else {
+               return new DependencyStatus(
+                   "Alignment Model",
+                   false,
+                   "Alignment model not found (required for precise timestamps)",
+                   "The alignment model (~360MB) will be downloaded on first use when alignment is enabled.\n" +
+                   "Or download manually from:\n" +
+                   "https://download.pytorch.org/torchaudio/models/wav2vec2_fairseq_base_ls960_asr_ls960.pth\n" +
+                   "Save to: " + modelPath
+               );
+           }
+       } catch (IOException e) {
+           return new DependencyStatus(
+               "Alignment Model",
+               false,
+               "Could not check alignment model: " + e.getMessage(),
+               "Check file permissions at: " + modelPath
+           );
+       }
+   }
+
+   private String formatBytes(long bytes) {
+       if (bytes < 1024) return bytes + " B";
+       int exp = (int) (Math.log(bytes) / Math.log(1024));
+       String pre = "KMGTPE".charAt(exp - 1) + "B";
+       return String.format("%.1f %s", bytes / Math.pow(1024, exp), pre);
+   }
 }

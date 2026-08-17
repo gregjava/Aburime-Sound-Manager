@@ -1,0 +1,60 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'   # switch to 'gradle' if this project uses Gradle instead
+
+      # NOTE: adjust the build command below to match this project's real
+      # build tool once one is confirmed (pom.xml/build.gradle weren't
+      # among the files available when this workflow was written) — this
+      # assumes Maven with the standard src/main/java + src/test/java
+      # layout the test suite already follows.
+      - name: Build
+        run: mvn -B compile
+
+      - name: Run unit + integration test suite
+        run: mvn -B test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: '**/target/surefire-reports/*.xml'
+          retention-days: 14
+
+  # Fails the check if ANY of the three OS legs above failed — makes the
+  # overall workflow status a single, unambiguous required check for
+  # branch-protection rules, rather than needing all three legs listed
+  # individually.
+  all-green:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check matrix result
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "One or more OS legs failed."
+            exit 1
+          fi

@@ -921,36 +921,32 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     private Map<String, String> buildWhisperXEnv(TranscriptionConfig config) {
         Map<String, String> env = new HashMap<>();
 
-        // FIX: a bundled/portable Python venv (Studio's resolved
-        // whisper_env, once the app is packaged for distribution) needs
-        // PYTHONHOME/PYTHONPATH pointed at itself and its Scripts/Lib dirs
-        // on PATH to find its own site-packages and DLL dependencies —
-        // without this, resolvePythonExecutable() could correctly resolve
-        // the bundled python.exe path yet the actual transcription
-        // process still fails to import whisperx, because nothing told it
-        // where its own environment lives. Mirrors exactly what
-        // Studio.createWhisperProcess() already computes (that method
-        // itself isn't in this call path — the real invocation goes
-        // through ProcessRunner.runCommand() below with this env map, not
-        // through a ProcessBuilder Studio hands back) — kept in sync
-        // manually since the two return different shapes (a ProcessBuilder
-        // vs. this env overlay). Null-safe: harmlessly skipped when
-        // there's no live Studio instance (unit tests, or before init()
-        // has run) or no bundled env was actually found.
+        // FIX (regression found via a real production crash log —
+        // "Fatal Python error: init_fs_encoding ... ModuleNotFoundError:
+        // No module named 'encodings'"): this used to also set PYTHONHOME
+        // to the venv root and PYTHONPATH to the venv's Lib/site-packages.
+        // That's wrong for a normal venv-created environment (as opposed
+        // to a fully embedded/portable Python distribution, which is what
+        // this was originally modeled on). A venv's own Lib/ folder only
+        // contains site-packages — the actual standard library
+        // (encodings, os, etc.) lives in the BASE Python installation the
+        // venv was created from, and the venv's own python.exe already
+        // knows how to find it automatically via its pyvenv.cfg file,
+        // with zero environment variables needed. Explicitly setting
+        // PYTHONHOME to the venv root overrides that resolution and
+        // points Python at a standard library that isn't there — exactly
+        // reproducing the crash above. The fix is to set nothing beyond
+        // PATH (harmless, and can help Windows locate the venv's own
+        // Scripts/DLLs) and let the venv interpreter bootstrap itself
+        // exactly as it would from a normal command-line invocation.
         audiomanager.Studio studio = audiomanager.Studio.getInstance();
         if (studio != null && studio.getWhisperEnvPath() != null) {
             java.nio.file.Path envPath = java.nio.file.Paths.get(studio.getWhisperEnvPath());
             if (java.nio.file.Files.exists(envPath)) {
                 String scriptsDir = envPath.resolve("Scripts").toString();
-                String libDir = envPath.resolve("Lib").toString();
                 String existingPath = System.getenv("PATH");
                 env.put("PATH", scriptsDir + java.io.File.pathSeparator
-                        + libDir + java.io.File.pathSeparator
                         + (existingPath != null ? existingPath : ""));
-                env.put("PYTHONHOME", envPath.toString());
-                env.put("PYTHONPATH", envPath.resolve("Lib").toString()
-                        + java.io.File.pathSeparator
-                        + envPath.resolve("Lib").resolve("site-packages").toString());
             }
         }
 

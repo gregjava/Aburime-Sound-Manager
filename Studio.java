@@ -173,7 +173,7 @@ public class Studio extends Application {
             appDir = ".";
             ffmpegPath = "ffmpeg";
             whisperPython = "python";
-            whisperEnv = ".";
+            whisperEnv = null;
         }
         
         this.modelManager = new ModelManager();
@@ -308,27 +308,50 @@ public class Studio extends Application {
                 // Try system Python as last resort
                 whisperPython = "python";
                 LOGGER.info("Using system Python: {}", whisperPython);
+                // FIX (root cause of the "Fatal Python error: init_fs_encoding
+                // ... ModuleNotFoundError: No module named 'encodings'"
+                // crash): whisperEnv was never reset here, so it stayed at
+                // its "." default (see initializeBundledPaths()) -- and "."
+                // (the current working directory) always exists, so every
+                // later Files.exists(Paths.get(whisperEnv)) check in this
+                // class trivially passed as if a real bundled venv had been
+                // found. createWhisperProcess() then forced the WhisperX
+                // subprocess's working directory to "." (this app's own
+                // project folder) and prepended a bogus "./Scripts" (or
+                // "./bin") to PATH -- exactly consistent with the crash
+                // log's sys.path dump, which showed this app's own project
+                // directory mixed in among the real Python installation's
+                // paths. null is the genuine "no bundled environment"
+                // sentinel now -- see createWhisperProcess()'s updated
+                // guard below.
+                whisperEnv = null;
             }
         } else {
             LOGGER.info("Whisper Python found at: {}", whisperPython);
         }
         
-        // Validate Whisper environment directory
-        Path envDir = Paths.get(whisperEnv);
-        if (!Files.exists(envDir)) {
-            LOGGER.warn("Whisper environment not found at: {}", whisperEnv);
-            // Try to infer from python path
-            Path pythonPath = Paths.get(whisperPython);
-            if (pythonPath.getNameCount() > 3) {
-                // Assuming python.exe is in Scripts directory
-                Path inferredEnv = pythonPath.getParent().getParent();
-                if (Files.exists(inferredEnv)) {
-                    whisperEnv = inferredEnv.toString();
-                    LOGGER.info("Inferred Whisper environment: {}", whisperEnv);
+        // Validate Whisper environment directory -- skipped entirely when
+        // whisperEnv is already null (the definitive "not bundled, using
+        // system Python" signal set above); nothing to validate or infer
+        // for an environment that was never claimed to exist in the first
+        // place.
+        if (whisperEnv != null) {
+            Path envDir = Paths.get(whisperEnv);
+            if (!Files.exists(envDir)) {
+                LOGGER.warn("Whisper environment not found at: {}", whisperEnv);
+                // Try to infer from python path
+                Path pythonPath = Paths.get(whisperPython);
+                if (pythonPath.getNameCount() > 3) {
+                    // Assuming python.exe is in Scripts directory
+                    Path inferredEnv = pythonPath.getParent().getParent();
+                    if (Files.exists(inferredEnv)) {
+                        whisperEnv = inferredEnv.toString();
+                        LOGGER.info("Inferred Whisper environment: {}", whisperEnv);
+                    }
                 }
+            } else {
+                LOGGER.info("Whisper environment found at: {}", whisperEnv);
             }
-        } else {
-            LOGGER.info("Whisper environment found at: {}", whisperEnv);
         }
     }
     
@@ -386,11 +409,13 @@ public class Studio extends Application {
     }
     
     /**
-     * Get the Whisper environment directory
-     * @return Path to Whisper environment
+     * Get the Whisper environment directory.
+     * @return Path to the bundled Whisper environment, or {@code null} if
+     *         no bundled environment was found (system Python is being
+     *         used instead — see {@link #getWhisperPythonPath()}).
      */
     public Path getWhisperEnv() {
-        return Paths.get(whisperEnv);
+        return whisperEnv != null ? Paths.get(whisperEnv) : null;
     }
     
     /**
@@ -423,34 +448,56 @@ public class Studio extends Application {
         
         ProcessBuilder pb = new ProcessBuilder(command);
         
-        // Set environment to use bundled Whisper environment
-        Path envPath = Paths.get(whisperEnv);
-        if (Files.exists(envPath)) {
-            // FIX (cross-platform bundling): this used to hardcode the
-            // Windows venv layout unconditionally -- Scripts/ for
-            // executables and DLL search, a flat Lib/ for PYTHONPATH. Now
-            // resolved per-OS via the same venv*RelativePath() helpers
-            // used for the bundled-python lookup above, so this stays in
-            // sync with wherever that logic decided the interpreter itself
-            // actually lives.
-            String pathEnv = System.getenv("PATH");
-            String binDir = envPath.resolve(venvBinRelativePath()).toString();
+        // Set environment to use bundled Whisper environment -- FIX (this
+        // is the actual root cause of the "Fatal Python error:
+        // init_fs_encoding ... No module named 'encodings'" crash):
+        // whisperEnv used to always be a non-null String (defaulting to
+        // "."), so Paths.get(whisperEnv) + Files.exists(...) below always
+        // found *something* -- "." (the current working directory) always
+        // exists -- even when no bundled environment had actually been
+        // found. That silently forced this subprocess's working directory
+        // to this app's own project folder and prepended a nonexistent
+        // "./Scripts" (or "./bin") to PATH on every single non-bundled run,
+        // for no reason. whisperEnv is now null exactly when no real
+        // bundled environment exists (see validateBundledPaths()), so this
+        // block now only runs for a genuinely resolved bundled venv.
+        if (whisperEnv != null) {
+            Path envPath = Paths.get(whisperEnv);
+            if (Files.exists(envPath)) {
+                // FIX (cross-platform bundling): this used to hardcode the
+                // Windows venv layout unconditionally -- Scripts/ for
+                // executables and DLL search, a flat Lib/ for PYTHONPATH. Now
+                // resolved per-OS via the same venv*RelativePath() helpers
+                // used for the bundled-python lookup above, so this stays in
+                // sync with wherever that logic decided the interpreter itself
+                // actually lives.
+                String pathEnv = System.getenv("PATH");
+                String binDir = envPath.resolve(venvBinRelativePath()).toString();
 
-            pb.environment().put("PATH",
-                binDir +
-                java.io.File.pathSeparator +
-                (pathEnv != null ? pathEnv : ""));
+                pb.environment().put("PATH",
+                    binDir +
+                    java.io.File.pathSeparator +
+                    (pathEnv != null ? pathEnv : ""));
 
-            // Set Python-specific environment variables
-            Path sitePackages = envPath.resolve(venvSitePackagesRelativePath(envPath));
-            pb.environment().put("PYTHONHOME", envPath.toString());
-            pb.environment().put("PYTHONPATH",
-                sitePackages.getParent().toString() +
-                java.io.File.pathSeparator +
-                sitePackages.toString());
+                // FIX (real production crash: "Fatal Python error:
+                // init_fs_encoding ... ModuleNotFoundError: No module named
+                // 'encodings'"): this used to also set PYTHONHOME to envPath
+                // and PYTHONPATH to the venv's site-packages. That's wrong
+                // for a normal venv-created environment -- a venv's own Lib/
+                // only holds site-packages; the actual standard library lives
+                // in the BASE Python install the venv was created from, and
+                // the venv's own interpreter already resolves that
+                // automatically via its pyvenv.cfg file with zero environment
+                // variables needed. Explicitly setting PYTHONHOME to the venv
+                // root overrides that resolution and points Python at a
+                // standard library that isn't there -- this is exactly what
+                // produced the crash above. Setting nothing beyond PATH lets
+                // the venv interpreter bootstrap itself exactly as it would
+                // from a normal command-line invocation.
 
-            // Set working directory to whisper_env
-            pb.directory(envPath.toFile());
+                // Set working directory to whisper_env
+                pb.directory(envPath.toFile());
+            }
         }
         
         return pb;

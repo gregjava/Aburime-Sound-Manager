@@ -406,8 +406,8 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         VBox mainContent = new VBox(0);
         mainContent.getChildren().addAll(
-            createStyledFileSelectionSection(),
             soundRecorderPanel.getRecorderSection(),
+            createStyledFileSelectionSection(),
             toolsSection,
             createStyledBatchQueueSection(),
             createStyledControlSection(),
@@ -1332,19 +1332,38 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
      *       only — see {@code RestApiServer}'s own scope comment.</li>
      * </ul>
      */
+    /**
+     * Bump this whenever the disclosure text materially changes (a new
+     * network-relevant behavior added or an existing one's description
+     * changes) — ties the acknowledgment to content actually seen, so an
+     * old dismissal doesn't silently suppress a materially different new
+     * version forever. Was 1 (implicit) when this only covered outbound
+     * sending; bumped to 2 to add the alignment-model download note.
+     */
+    private static final int PRIVACY_DISCLOSURE_VERSION = 2;
+
     private void showPrivacyDisclosureIfNeeded() {
-        if (prefManager.getBoolean("privacy_disclosure_acknowledged", false)) {
+        if (prefManager.getInt("privacy_disclosure_acknowledged_version", 0) >= PRIVACY_DISCLOSURE_VERSION) {
             return;
         }
 
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle("Before You Start");
-        alert.setHeaderText("What This App Sends Over the Network");
+        alert.setHeaderText("What This App Does Over the Network");
         alert.getButtonTypes().setAll(new ButtonType("I Understand", ButtonBar.ButtonData.OK_DONE));
 
         TextArea body = new TextArea(
                 "Audio processing and transcription run entirely on this computer. "
                         + "Your audio files and their transcripts are never sent anywhere for these steps.\n\n"
+                        + "One thing to expect: the first time you transcribe audio in a given "
+                        + "language, WhisperX automatically downloads a one-time alignment model "
+                        + "for that language (roughly 300–400MB) to enable word-level timestamps. "
+                        + "This happens once per language, not per file — after that first download, "
+                        + "transcribing more audio in the same language uses what's already cached "
+                        + "and needs no further download. There's currently no progress indicator for "
+                        + "this specific download, so a first run in a new language may pause longer "
+                        + "than usual before transcription visibly starts — that's this download "
+                        + "happening in the background, not the app hanging.\n\n"
                         + "Two optional features do send data externally, only if you turn them on:\n\n"
                         + "• Speaker diarization — if you add your own HuggingFace token in "
                         + "Preferences, audio segments are sent to HuggingFace's pyannote models "
@@ -1357,13 +1376,13 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                         + "localhost — it's for local automation, not a network service.");
         body.setEditable(false);
         body.setWrapText(true);
-        body.setPrefSize(520, 260);
+        body.setPrefSize(520, 340);
 
         alert.getDialogPane().setContent(body);
         ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         alert.showAndWait();
 
-        prefManager.putBoolean("privacy_disclosure_acknowledged", true);
+        prefManager.putInt("privacy_disclosure_acknowledged_version", PRIVACY_DISCLOSURE_VERSION);
         prefManager.flush();
     }
 
