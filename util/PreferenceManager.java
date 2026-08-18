@@ -23,6 +23,7 @@ import java.util.prefs.Preferences;
 public class PreferenceManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(PreferenceManager.class);
     private final Preferences prefs;
+    
     // Add these constants
     private static final String AUTO_VOLUME_OPTIMIZATION_KEY = "autoVolumeOptimization";
     private static final String TARGET_VOLUME_DB_KEY = "targetVolumeDb";
@@ -93,7 +94,71 @@ public class PreferenceManager {
         prefs.putLong(key, value);
     }
 
+    // =============================================
+    // EULA Methods (NEW)
+    // =============================================
+    
+    /**
+     * Gets the version of the EULA that the user has accepted.
+     * Returns 0 if the EULA has never been accepted.
+     */
+    public int getEulaAcceptedVersion() {
+        return getInt(PreferenceKeys.EULA_ACCEPTED_VERSION, 0);
+    }
+
+    /**
+     * Sets the version of the EULA that the user has accepted.
+     * @param version The version number to mark as accepted
+     */
+    public void setEulaAcceptedVersion(int version) {
+        putInt(PreferenceKeys.EULA_ACCEPTED_VERSION, version);
+    }
+
+    // =============================================
+    // ID3 Tagging Methods (NEW)
+    // =============================================
+    
+    /**
+     * Checks if ID3 tagging is enabled.
+     * @return true if ID3 tagging is enabled, false otherwise
+     */
+    public boolean isID3TaggingEnabled() {
+        return getBoolean(PreferenceKeys.ID3_TAGGING_ENABLED, false);
+    }
+
+    /**
+     * Enables or disables ID3 tagging.
+     * @param enabled true to enable, false to disable
+     */
+    public void setID3TaggingEnabled(boolean enabled) {
+        putBoolean(PreferenceKeys.ID3_TAGGING_ENABLED, enabled);
+    }
+
+    // =============================================
+    // Code Signing Methods (NEW)
+    // =============================================
+    
+    /**
+     * Checks if the current application instance is code-signed.
+     * This is a verification flag that can be set after successful signature verification.
+     * @return true if the application is verified as code-signed
+     */
+    public boolean isCodeSigned() {
+        return getBoolean(PreferenceKeys.CODE_SIGNED, false);
+    }
+
+    /**
+     * Sets the code signing verification status.
+     * @param signed true if the application is verified as code-signed
+     */
+    public void setCodeSigned(boolean signed) {
+        putBoolean(PreferenceKeys.CODE_SIGNED, signed);
+    }
+
+    // =============================================
     // Convenience methods for common preferences
+    // =============================================
+
     public String getOutputDirectory() {
         return getString(PreferenceKeys.OUTPUT_DIR, System.getProperty("user.home"));
     }
@@ -179,6 +244,7 @@ public class PreferenceManager {
     public String getLastTextCombinerLocation() {
         return prefs.get(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, System.getProperty("user.home"));
     }
+    
     /**
      * Set last text combiner location
      */
@@ -224,6 +290,7 @@ public class PreferenceManager {
     public void setLastSoundRecorderLocation(String path) {
         prefs.put("last_sound_recorder_location", path);
     }
+    
     // Audio Processing Settings
     public boolean isNoiseReductionEnabled() {
         return getBoolean(PreferenceKeys.NOISE_REDUCTION_ENABLED, false);
@@ -307,6 +374,7 @@ public class PreferenceManager {
     public void setTheme(String theme) {
         putString(PreferenceKeys.THEME, theme);
     }
+    
     /**
      * Clear session-specific data (batch queue, etc.)
      */
@@ -361,12 +429,14 @@ public class PreferenceManager {
             LOGGER.error("Failed to save preferences", e);
         }
     }
+    
     /**
      * Remove a preference key
      */
     public void remove(String key) {
         prefs.remove(key);
     }
+    
     /**
      * Window state holder
      */

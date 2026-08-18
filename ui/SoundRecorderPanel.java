@@ -4,6 +4,7 @@
  */
 package audiomanager.ui;
 
+import audiomanager.core.ErrorReporter;
 import audiomanager.util.PreferenceManager;
 import audiomanager.model.BatchFileItem;
 
@@ -124,7 +125,7 @@ public class SoundRecorderPanel {
 
     public SoundRecorderPanel(ObservableList<BatchFileItem> batchFiles,
                                PreferenceManager prefManager,
-                               Consumer<String> logger) {
+                               Consumer<String> logger, ErrorReporter errorReporter) {
         this.batchFiles = batchFiles;
         this.prefManager = prefManager;
         this.logger = logger;

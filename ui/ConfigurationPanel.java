@@ -6,11 +6,9 @@ package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
-import audiomanager.ui.ThemeManager;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.util.PreferenceManager;
-import java.util.function.Consumer;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -19,18 +17,16 @@ import javafx.scene.layout.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.function.Consumer;
+import javafx.scene.Node;
+
 /**
  * Configuration panel for audio processing and transcription settings
  */
 public class ConfigurationPanel {
 
-    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
-    private static void setStyled(javafx.scene.Node node, String style) {
-        node.setStyle(style);
-        ThemeManager.stripForCurrentTheme(node);
-    }
     private static final Logger LOGGER = LoggerFactory.getLogger(ConfigurationPanel.class);
-    
+
     private final ScrollPane root;
     private final PreferenceManager prefManager;
 
@@ -66,6 +62,9 @@ public class ConfigurationPanel {
     private Spinner<Double> maxSegmentDurationSpinner;
     private ComboBox<String> logLevelComboBox;
 
+    // ========== ID3 Tagging Checkbox ==========
+    private CheckBox id3TaggingCheckBox;
+
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
         
@@ -73,7 +72,7 @@ public class ConfigurationPanel {
         initializeComponents();
         setupListeners();
         
-        this.root = createRootPane(); // Now components are initialized
+        this.root = createRootPane();
         loadPreferences();
     }
     
@@ -126,16 +125,6 @@ public class ConfigurationPanel {
             prefManager.putDouble(PreferenceKeys.VOLUME_BOOST, volumeSlider.getValue());
             
             // Save CheckBoxes
-            // FIX: previously wrote directly to PreferenceKeys.NOISE_REDUCTION_ENABLED
-            // while loadPreferences() (below) read back PreferenceKeys.NOISE_REDUCTION —
-            // a different key — so the checkbox silently reset to its default every
-            // restart. Routing through PreferenceManager's own
-            // setNoiseReductionEnabled() (which already existed, already used the
-            // correct _ENABLED key, and was already called correctly elsewhere —
-            // e.g. MainWindow.debugPreferences()'s isNoiseReductionEnabled() call —
-            // but was never actually written to by this class) makes this the
-            // single source of truth instead of two independently-written paths
-            // that could drift apart, which is exactly what happened.
             prefManager.setNoiseReductionEnabled(noiseReductionCheckBox.isSelected());
             prefManager.putBoolean(PreferenceKeys.CONFIDENCE_ENABLED, confidenceCheckBox.isSelected());
             prefManager.putBoolean("export_word_copy", exportWordCopyCheckBox.isSelected());
@@ -146,18 +135,11 @@ public class ConfigurationPanel {
             prefManager.putBoolean("adaptive_scaling_enabled", adaptiveScalingCheckBox.isSelected());
             prefManager.putBoolean("skip_segmentation_baseline_mode", skipSegmentationCheckBox.isSelected());
             prefManager.putBoolean("remove_silence", removeSilenceCheckBox.isSelected());
-            // FIX: same bug shape as noise reduction above, just across classes
-            // instead of within one method: this used to write the raw
-            // "normalize_audio" key directly, while PreferenceManager's own
-            // setNormalizeAudioEnabled()/isNormalizeAudioEnabled() read/write a
-            // different key, "normalize_audio_enabled" — the two never agreed.
-            // isNormalizeAudioEnabled() is currently only called by
-            // MainWindow.debugPreferences(), so the live impact today was limited
-            // to that log line always showing "false" regardless of the real
-            // setting — but it's the identical landmine that caused the
-            // noise-reduction bug, just not yet triggered by a second caller.
-            // Routing through the convenience method here closes it off the same way.
             prefManager.setNormalizeAudioEnabled(normalizeCheckBox.isSelected());
+            
+            // ========== ID3 Tagging Save ==========
+            // Using PreferenceManager convenience method
+            prefManager.setID3TaggingEnabled(id3TaggingCheckBox.isSelected());
             
             // Save Silence Detection
             prefManager.putDouble("silence_threshold", silenceThresholdSlider.getValue());
@@ -247,30 +229,28 @@ public class ConfigurationPanel {
         autoRemoveCompletedCheckBox = new CheckBox("Auto-Remove Completed Files");
         adaptiveScalingCheckBox = new CheckBox("Adaptive Concurrency Scaling");
         adaptiveScalingCheckBox.setSelected(true);
-        // FIX: exposes TranscriptionConfig.skipSegmentation as a real UI
-        // control -- previously hardcoded to false in getTranscriptionConfig()
-        // below with no way to change it. WhisperXTranscriptionService.transcribe()
-        // already gates on exactly this flag to skip both segmentation and
-        // per-segment retry (see SegmentProcessor), so wiring it up here is
-        // the whole implementation -- no new bypass logic needed. Together
-        // with "Adaptive Concurrency Scaling" off and Max Parallel Files
-        // pinned to a fixed value, this is what turns a normal run into a
-        // genuine baseline run for a controlled comparison.
         skipSegmentationCheckBox = new CheckBox("Baseline Mode (Skip Segmentation & Per-Segment Retry)");
         skipSegmentationCheckBox.setSelected(false);
+
+        // ========== ID3 Tagging Checkbox ==========
+        id3TaggingCheckBox = new CheckBox("Generate ID3 Tags (sidecar .meta file)");
+        id3TaggingCheckBox.setTooltip(new Tooltip("Create a .meta file with title, artist, and other metadata"));
+        
+        // Load initial state using PreferenceManager convenience method
+        id3TaggingCheckBox.setSelected(prefManager.isID3TaggingEnabled());
+        
+        // ========== ID3 Tagging Listener ==========
+        // Using PreferenceManager convenience method for save
+        id3TaggingCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            prefManager.setID3TaggingEnabled(newVal);
+            prefManager.flush();
+        });
 
         // FIX: "Adaptive Concurrency Scaling" and "Baseline Mode" are used
         // alternatively — one represents the app's normal, recommended
         // fault-tolerant/adaptive behavior, the other represents a
         // deliberately stripped-down CLI-parity mode for controlled
-        // baseline comparisons (see the Architectural Changes spec).
-        // Having both checked at once produced a run that was neither a
-        // clean baseline nor genuinely adaptive, which would silently
-        // invalidate exactly the kind of comparison this mode exists for.
-        // Checking either one now unchecks the other; this is deliberately
-        // NOT a hard radio-button pair (unchecking one does not force the
-        // other on) — "both off" is still a valid, distinct third state
-        // (fixed concurrency, but with normal segmentation/retry).
+        // baseline comparisons.
         adaptiveScalingCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
             if (isSelected) skipSegmentationCheckBox.setSelected(false);
         });
@@ -278,14 +258,7 @@ public class ConfigurationPanel {
             if (isSelected) adaptiveScalingCheckBox.setSelected(false);
         });
 
-        // FIX: persist immediately on toggle rather than only at the
-        // handful of savePreferences() call sites elsewhere in this panel.
-        // For most settings, "saved next time something else triggers a
-        // save, or on app close" is fine — but this pair exists specifically
-        // so a chosen mode survives without the user having to come back
-        // and re-set it, and an unexpected close (crash, force-quit
-        // mid-experiment) shouldn't silently revert a deliberately-chosen
-        // baseline configuration back to the adaptive default.
+        // Persist adaptive scaling and baseline mode immediately
         adaptiveScalingCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
             prefManager.putBoolean("adaptive_scaling_enabled", isSelected);
             prefManager.flush();
@@ -368,16 +341,16 @@ public class ConfigurationPanel {
         enableTranscriptionCheckBox.setTooltip(new Tooltip("Enable audio-to-text transcription"));
         autoRemoveCompletedCheckBox.setTooltip(new Tooltip("Remove files from queue after completion"));
         adaptiveScalingCheckBox.setTooltip(new Tooltip(
-                "Automatically reduce concurrency under high memory/CPU pressure (recommended). "
-                + "Turn off to run at a fixed concurrency level regardless of measured pressure — "
-                + "useful for baseline performance measurements."));
+                "Automatically reduce concurrency under high memory/CPU pressure (recommended). " +
+                "Turn off to run at a fixed concurrency level regardless of measured pressure — " +
+                "useful for baseline performance measurements."));
         skipSegmentationCheckBox.setTooltip(new Tooltip(
-                "Off (recommended): long files are split into segments that are transcribed and "
-                + "retried independently, so one bad segment doesn't fail the whole file.\n"
-                + "On: transcribes each file as a single unbroken unit, matching plain CLI "
-                + "whisperx behavior — no segmentation, no per-segment retry, a file either "
-                + "fully succeeds or fully throws. Use this only to collect a genuine baseline "
-                + "run for comparison against the app's normal (fault-tolerant) behavior."));
+                "Off (recommended): long files are split into segments that are transcribed and " +
+                "retried independently, so one bad segment doesn't fail the whole file.\n" +
+                "On: transcribes each file as a single unbroken unit, matching plain CLI " +
+                "whisperx behavior — no segmentation, no per-segment retry, a file either " +
+                "fully succeeds or fully throws. Use this only to collect a genuine baseline " +
+                "run for comparison against the app's normal (fault-tolerant) behavior."));
         removeSilenceCheckBox.setTooltip(new Tooltip("Detect and remove silent sections"));
         normalizeCheckBox.setTooltip(new Tooltip("Normalize to broadcast standard (-16 LUFS)"));
         silenceThresholdSlider.setTooltip(new Tooltip("Loudness threshold for silence detection (dB)"));
@@ -387,6 +360,9 @@ public class ConfigurationPanel {
         srtMaxLinesSpinner.setTooltip(new Tooltip("Maximum lines per subtitle (1-10)"));
         maxSegmentDurationSpinner.setTooltip(new Tooltip("Maximum segment duration in seconds (5-60)"));
         logLevelComboBox.setTooltip(new Tooltip("Application log verbosity (affects the log file, not the on-screen Terminal)"));
+        
+        // ========== ID3 Tagging Tooltip ==========
+        id3TaggingCheckBox.setTooltip(new Tooltip("Create a sidecar .meta file with title, artist, and other metadata for each processed audio file"));
     }
 
     public VBox createUISection() {
@@ -427,22 +403,11 @@ public class ConfigurationPanel {
         return section;
     }
 
-    /**
-     * Apply a log level, without taking a hard compile-time dependency on
-     * any specific SLF4J backend.
-     *
-     * <p>FIX: the previous version imported {@code ch.qos.logback.classic.*}
-     * directly. That only compiles/works if Logback is actually the SLF4J
-     * backend on the classpath — for any other backend (e.g.
-     * {@code slf4j-simple}, {@code log4j-slf4j-impl}), the referenced
-     * classes don't exist at all, which is a classpath/build problem, not
-     * something a try/catch around already-loaded classes can paper over.
-     * This now reaches for Logback only via reflection (so the class is
-     * merely looked up, not linked, if it's absent) and falls back to
-     * {@code java.util.logging}'s root logger otherwise — which is always
-     * present on any JVM and is respected by SLF4J's jul-to-slf4j bridge,
-     * if one is installed, without requiring any specific backend.</p>
-     */
+    // ========== ID3 Tagging Getter ==========
+    public boolean isID3TaggingEnabled() {
+        return prefManager.isID3TaggingEnabled();
+    }
+
     private void applyLogLevel(String levelName) {
         if (tryApplyLogLevelViaLogback(levelName)) {
             return;
@@ -450,13 +415,6 @@ public class ConfigurationPanel {
         applyLogLevelViaJUL(levelName);
     }
 
-    /**
-     * Attempt to set the level via Logback's classes, purely through
-     * reflection so this class doesn't fail to compile/load when Logback
-     * isn't present.
-     *
-     * @return true if Logback was found and the level was applied through it
-     */
     private boolean tryApplyLogLevelViaLogback(String levelName) {
         try {
             Class<?> logbackLoggerClass = Class.forName("ch.qos.logback.classic.Logger");
@@ -464,9 +422,6 @@ public class ConfigurationPanel {
 
             Object rootLogger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
             if (!logbackLoggerClass.isInstance(rootLogger)) {
-                // SLF4J is bound to some other backend — Logback classes may
-                // happen to be on the classpath (e.g. a transitive dep) even
-                // though they're not the active binding.
                 return false;
             }
 
@@ -475,7 +430,6 @@ public class ConfigurationPanel {
             LOGGER.info("Log level changed to {} (via Logback)", levelName);
             return true;
         } catch (ClassNotFoundException e) {
-            // Logback isn't on the classpath at all — expected on other backends.
             return false;
         } catch (Exception | LinkageError e) {
             LOGGER.warn("Could not apply log level '{}' via Logback: {}", levelName, e.getMessage());
@@ -483,13 +437,6 @@ public class ConfigurationPanel {
         }
     }
 
-    /**
-     * Fallback that always works: sets the level on {@code java.util.logging}'s
-     * root logger. Respected automatically if a jul-to-slf4j (or similar)
-     * bridge is installed; otherwise it's a harmless no-op for whatever the
-     * actual SLF4J backend is, so the UI control never throws or silently
-     * does nothing without at least trying something.
-     */
     private void applyLogLevelViaJUL(String levelName) {
         try {
             java.util.logging.Level level = switch (levelName) {
@@ -671,10 +618,14 @@ public class ConfigurationPanel {
         GridPane.setColumnSpan(keepProcessedCheckBox, 4);
         grid.add(keepProcessedCheckBox, 0, 5);
 
-        // Row 6: Silence Threshold
+        // ========== Row 6: ID3 Tagging Checkbox ==========
+        GridPane.setColumnSpan(id3TaggingCheckBox, 4);
+        grid.add(id3TaggingCheckBox, 0, 6);
+
+        // Row 7: Silence Threshold
         Label silenceThreshLabel = new Label("Silence Threshold:");
         silenceThreshLabel.setMinWidth(120);
-        grid.add(silenceThreshLabel, 0, 6);
+        grid.add(silenceThreshLabel, 0, 7);
 
         Label threshValueLabel = new Label(String.format("%.1f dB", silenceThresholdSlider.getValue()));
         threshValueLabel.setMinWidth(50);
@@ -684,12 +635,12 @@ public class ConfigurationPanel {
 
         HBox threshBox = new HBox(10, silenceThresholdSlider, threshValueLabel);
         threshBox.setAlignment(Pos.CENTER_LEFT);
-        grid.add(threshBox, 1, 6, 3, 1);
+        grid.add(threshBox, 1, 7, 3, 1);
 
-        // Row 7: Silence Duration
+        // Row 8: Silence Duration
         Label silenceDurLabel = new Label("Min Silence Duration:");
         silenceDurLabel.setMinWidth(120);
-        grid.add(silenceDurLabel, 0, 7);
+        grid.add(silenceDurLabel, 0, 8);
 
         Label durValueLabel = new Label(String.format("%.1f sec", silenceDurationSlider.getValue()));
         durValueLabel.setMinWidth(50);
@@ -699,8 +650,9 @@ public class ConfigurationPanel {
 
         HBox durBox = new HBox(10, silenceDurationSlider, durValueLabel);
         durBox.setAlignment(Pos.CENTER_LEFT);
-        grid.add(durBox, 1, 7, 3, 1);
-        // In ConfigurationPanel.java, add to audio section:
+        grid.add(durBox, 1, 8, 3, 1);
+
+        // Row 9-10: Auto Volume Optimization
         CheckBox autoVolumeCheckBox = new CheckBox("Auto Volume Optimization");
         autoVolumeCheckBox.setTooltip(new Tooltip("Automatically analyze and optimize audio volume for best transcription accuracy"));
         autoVolumeCheckBox.setSelected(prefManager.isAutoVolumeOptimizationEnabled());
@@ -708,10 +660,6 @@ public class ConfigurationPanel {
             prefManager.setAutoVolumeOptimizationEnabled(newVal);
         });
 
-        // Add to audio section layout
-        // section.getChildren().add(autoVolumeCheckBox);
-        Label autoVolLabel = new Label("Auto Volume On/Off:");
-        grid.add(autoVolLabel, 1, 8, 3, 1);
         grid.add(autoVolumeCheckBox, 1, 9, 3, 1);
 
         section.getChildren().addAll(title, grid);
@@ -727,16 +675,7 @@ public class ConfigurationPanel {
         // Load font size
         fontSizeSlider.setValue(prefManager.getFontSize());
 
-        // FIX: the log-level ComboBox was saved to preferences on change
-        // (see the listener in buildXxxSection() below) but never read back
-        // here — so the saved choice was silently discarded on every
-        // restart, same bug shape as the noise-reduction key mismatch
-        // documented further down in this method. setValue() also fires
-        // the ComboBox's own valueProperty listener when the saved level
-        // differs from the default, which re-applies it via
-        // applyLogLevel() — so this both restores the UI state and
-        // actually re-arms the logging backend at startup, not just the
-        // ComboBox's visible selection.
+        // Load log level
         logLevelComboBox.setValue(prefManager.getString("log_level", "INFO"));
 
         // Load transcription preferences
@@ -753,13 +692,6 @@ public class ConfigurationPanel {
         volumeSlider.setValue(prefManager.getDouble(PreferenceKeys.VOLUME_BOOST, AppConstants.DEFAULT_VOLUME));
 
         // Load checkbox states
-        // FIX: this used to read PreferenceKeys.NOISE_REDUCTION while
-        // savePreferences() (below) writes PreferenceKeys.NOISE_REDUCTION_ENABLED —
-        // two different keys, so the checkbox silently reset to its default
-        // (false) on every restart regardless of what the user last chose.
-        // Confirmed by diffing this method against savePreferences() in this
-        // same class; NOISE_REDUCTION_ENABLED is the key actually written, so
-        // that's the one that must be read back here.
         noiseReductionCheckBox.setSelected(prefManager.isNoiseReductionEnabled());
         confidenceCheckBox.setSelected(prefManager.getBoolean(PreferenceKeys.CONFIDENCE_ENABLED, false));
         exportWordCopyCheckBox.setSelected(prefManager.getBoolean("export_word_copy", false));
@@ -771,6 +703,10 @@ public class ConfigurationPanel {
         skipSegmentationCheckBox.setSelected(prefManager.getBoolean("skip_segmentation_baseline_mode", false));
         removeSilenceCheckBox.setSelected(prefManager.getBoolean("remove_silence", false));
         normalizeCheckBox.setSelected(prefManager.isNormalizeAudioEnabled());
+
+        // ========== Load ID3 Tagging preference ==========
+        // Using PreferenceManager convenience method
+        id3TaggingCheckBox.setSelected(prefManager.isID3TaggingEnabled());
 
         // Load silence detection
         silenceThresholdSlider.setValue(prefManager.getDouble("silence_threshold", AppConstants.SILENCE_THRESHOLD));
@@ -815,7 +751,6 @@ public class ConfigurationPanel {
     }
 
     public TranscriptionConfig getTranscriptionConfig() {
-        // Determine if timestamps are enabled based on the selected mode
         boolean timestampsEnabled = !timestampModeComboBox.getValue().equals(TranscriptionConfig.TimestampMode.NONE);
         
         return TranscriptionConfig.builder()
@@ -895,6 +830,9 @@ public class ConfigurationPanel {
         srtMaxCharsSpinner.setDisable(!enabled);
         srtMaxLinesSpinner.setDisable(!enabled);
         maxSegmentDurationSpinner.setDisable(!enabled);
+        
+        // ========== ID3 Tagging checkbox disable ==========
+        id3TaggingCheckBox.setDisable(!enabled);
 
         // Silence controls only enabled when remove silence is checked and panel is enabled
         boolean silenceEnabled = enabled && removeSilenceCheckBox.isSelected();
@@ -902,7 +840,53 @@ public class ConfigurationPanel {
         silenceDurationSlider.setDisable(!silenceEnabled);
     }
 
+    /**
+     * Creates a checkbox for enabling/disabling error reporting.
+     */
+    public CheckBox createErrorReportingCheckBox() {
+        CheckBox cb = new CheckBox("Send anonymous error reports");
+        cb.setTooltip(new Tooltip("Help improve the app by sending anonymous error reports"));
+        cb.setSelected(prefManager.getBoolean("error.reporting.enabled", false));
+        cb.setOnAction(e -> {
+            boolean enabled = cb.isSelected();
+            prefManager.putBoolean("error.reporting.enabled", enabled);
+            prefManager.flush();
+
+            audiomanager.Studio studio = audiomanager.Studio.getInstance();
+            if (studio != null && studio.getErrorReporter() != null) {
+                studio.getErrorReporter().setEnabled(enabled);
+            }
+            LOGGER.info("Error reporting {}", enabled ? "enabled" : "disabled");
+        });
+        return cb;
+    }
+
+    /**
+     * Creates a checkbox for enabling/disabling automatic update checks.
+     */
+    public CheckBox createAutoUpdateCheckBox() {
+        CheckBox cb = new CheckBox("Check for updates automatically");
+        cb.setTooltip(new Tooltip("Automatically check for new versions on startup"));
+        cb.setSelected(prefManager.getBoolean("auto.update.enabled", true));
+        cb.setOnAction(e -> {
+            boolean enabled = cb.isSelected();
+            prefManager.putBoolean("auto.update.enabled", enabled);
+            prefManager.flush();
+            LOGGER.info("Auto-update {}", enabled ? "enabled" : "disabled");
+        });
+        return cb;
+    }
+
     public void refreshAllComponents() {
         loadPreferences();
+    }
+
+    // =============================
+    // Styling Helper
+    // =============================
+
+    private void setStyled(Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
     }
 }

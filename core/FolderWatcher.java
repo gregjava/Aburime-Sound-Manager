@@ -57,7 +57,7 @@ public class FolderWatcher implements Runnable {
      * @throws IOException if the path doesn't exist or the watch service
      *                      can't be created/registered
      */
-    public FolderWatcher(String path, Consumer<File> fileHandler) throws IOException {
+    public FolderWatcher(String path, Consumer<File> fileHandler, ErrorReporter errorReporter) throws IOException {
         this.watchPath = Paths.get(path);
         if (!java.nio.file.Files.isDirectory(this.watchPath)) {
             throw new IOException("Not a directory: " + path);

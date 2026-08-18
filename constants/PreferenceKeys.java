@@ -68,4 +68,33 @@ public final class PreferenceKeys {
     // UI Settings
     public static final String THEME = "theme";
 
+    // =============================================
+    // EULA Settings (NEW)
+    // =============================================
+    
+    /**
+     * The version of the EULA that the user has accepted.
+     * 0 means not accepted, 1+ means accepted at that version.
+     */
+    public static final String EULA_ACCEPTED_VERSION = "eula.accepted_version";
+
+    // =============================================
+    // ID3 Tagging Settings (NEW)
+    // =============================================
+    
+    /**
+     * Whether ID3 tagging is enabled.
+     * When enabled, sidecar .meta files are created with metadata.
+     */
+    public static final String ID3_TAGGING_ENABLED = "id3_tagging_enabled";
+
+    // =============================================
+    // Code Signing Settings (NEW)
+    // =============================================
+    
+    /**
+     * Whether the current application instance has been verified as code-signed.
+     * This is set after successful signature verification.
+     */
+    public static final String CODE_SIGNED = "code.signed";
 }

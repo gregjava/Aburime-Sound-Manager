@@ -9,6 +9,7 @@ import audiomanager.model.BatchFileItem;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.model.TranscriptionResult;
+import audiomanager.ui.ConfigurationPanel;
 import audiomanager.util.TimeLeftEstimator;
 import audiomanager.util.ProcessRunner;
 import org.slf4j.Logger;
@@ -149,6 +150,10 @@ public class ParallelProcessingManager {
     private final TranscriptionOutputWriter outputWriter = new TranscriptionOutputWriter();
     private volatile boolean exportWordCopy = false;
     private volatile boolean exportPdfCopy = false;
+    private ErrorReporter errorReporter;
+
+    // ========== NEW: ConfigurationPanel for ID3 Tagging ==========
+    private ConfigurationPanel configurationPanel;
 
     /** Whether saveOutputDirectly() should also write a genuine Word-compatible .docx copy alongside the normal output. */
     public void setExportWordCopy(boolean exportWordCopy) {
@@ -158,6 +163,16 @@ public class ParallelProcessingManager {
     /** Whether saveOutputDirectly() should also write a browser-printable-to-PDF .html copy alongside the normal output — see {@link TranscriptionOutputWriter#exportToPdf} for why this is HTML rather than a native PDF. */
     public void setExportPdfCopy(boolean exportPdfCopy) {
         this.exportPdfCopy = exportPdfCopy;
+    }
+
+    // ========== NEW: ConfigurationPanel Setter ==========
+    /**
+     * Sets the ConfigurationPanel reference so ID3 tagging status can be checked.
+     * 
+     * @param configPanel the ConfigurationPanel instance from MainWindow
+     */
+    public void setConfigurationPanel(ConfigurationPanel configPanel) {
+        this.configurationPanel = configPanel;
     }
 
     private volatile boolean initialized = false;
@@ -330,7 +345,7 @@ public class ParallelProcessingManager {
     private void initializeModelInstances(String model, int modelThreads) {
         String normalized = normalizeModelName(model);
         modelPools.put(normalized, new ModelInstancePool(normalized, modelThreads,
-                () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator), LOGGER));
+                () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator, errorReporter), LOGGER));
         LOGGER.info("Model instance pool initialised for '{}': {} instance(s) (capacity {}).",
                 normalized, modelPools.get(normalized).size(), modelThreads);
     }
@@ -797,6 +812,24 @@ public class ParallelProcessingManager {
                 long transcribeWallMs = System.currentTimeMillis() - transcribeWallStart;
                 setItemProgress(item, 0.95);
 
+                // ========== ID3 TAGGING ==========
+                // Write ID3 tags if enabled in configuration
+                if (configurationPanel != null && configurationPanel.isID3TaggingEnabled()) {
+                    try {
+                        ID3TagWriter.writeTagsFromTranscription(file, result);
+                        if (logger != null) {
+                            logger.accept("🏷️ ID3 tags written for: " + file.getName());
+                        }
+                        LOGGER.info("ID3 tags written for: {}", file.getName());
+                    } catch (IOException e) {
+                        LOGGER.warn("Failed to write ID3 tags for {}: {}", file.getName(), e.getMessage());
+                        if (errorReporter != null && errorReporter.isEnabled()) {
+                            errorReporter.reportError(e, "ID3 tagging failed for: " + file.getName());
+                        }
+                    }
+                }
+                // ========== END ID3 TAGGING ==========
+
                 long saveStart = System.currentTimeMillis();
                 saveOutputDirectly(file, result, transcriptionConfig, processingConfig);
                 long saveMs = System.currentTimeMillis() - saveStart;
@@ -1175,7 +1208,7 @@ public class ParallelProcessingManager {
         // growing the pool lazily up to its live-adjustable target size.
         ModelInstancePool pool = modelPools.computeIfAbsent(model,
                 m -> new ModelInstancePool(m, 1,
-                        () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator), LOGGER));
+                        () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator, errorReporter), LOGGER));
         WhisperXTranscriptionService instance = null;
         try {
             // FIX (doc-review — "Model acquisition" timing / "are files
@@ -1294,7 +1327,7 @@ public class ParallelProcessingManager {
         String model = normalizeModelName(config.getModel());
         ModelInstancePool pool = modelPools.computeIfAbsent(model,
                 m -> new ModelInstancePool(m, 1,
-                        () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator), LOGGER));
+                        () -> new WhisperXTranscriptionService(new DependencyManager(), timeEstimator, errorReporter), LOGGER));
         WhisperXTranscriptionService instance = null;
         try {
             long acquireStart = System.currentTimeMillis();
@@ -1307,7 +1340,8 @@ public class ParallelProcessingManager {
             SegmentProcessor segmentProcessor = new SegmentProcessor(
                     instance, new DependencyManager(), timeEstimator,
                     (segmentIndex, totalSegments) -> LOGGER.debug(
-                            "Segment {}/{} complete for {}", segmentIndex + 1, totalSegments, wavFile.getName()));
+                            "Segment {}/{} complete for {}", segmentIndex + 1, totalSegments, wavFile.getName()),
+                    errorReporter);
 
             double audioDurationSeconds = item.getTotalAudioDurationSeconds();
             TranscriptionResult result = segmentProcessor.processWithSegments(

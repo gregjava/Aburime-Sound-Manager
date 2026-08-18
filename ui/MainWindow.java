@@ -4,67 +4,57 @@
  */
 package audiomanager.ui;
 
+import audiomanager.Studio;
 import audiomanager.constants.AppConstants;
 import audiomanager.core.*;
-import audiomanager.ui.ThemeManager;
 import audiomanager.exceptions.FfmpegException;
 import audiomanager.model.*;
-import audiomanager.plugins.*;
-import audiomanager.util.*;
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import audiomanager.plugins.AudioSplitterTool;
+import audiomanager.plugins.FileCombinerTool;
+import audiomanager.util.PreferenceManager;
+import audiomanager.util.TimeLeftEstimator;
+import java.awt.SystemTray;
+import java.awt.Toolkit;
+import java.awt.TrayIcon;
 import javafx.animation.*;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.image.Image;
 import javafx.scene.layout.*;
-import javafx.stage.Stage;
 import javafx.stage.DirectoryChooser;
-import javafx.scene.control.ChoiceDialog;
-import javafx.scene.control.Alert;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.ButtonBar;
-import javafx.scene.control.TextArea;
-import javafx.scene.control.CheckMenuItem;
+import javafx.stage.Stage;
 import javafx.util.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.stream.Collectors;
-import javafx.scene.Node;
-import java.awt.SystemTray;
-import java.awt.Toolkit;
-import java.awt.TrayIcon;
+import java.util.function.Consumer;
 
 /**
  * Main application window
  */
 public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
-    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
-    private static void setStyled(javafx.scene.Node node, String style) {
-        node.setStyle(style);
-        ThemeManager.stripForCurrentTheme(node);
-    }
     private static final Logger LOGGER = LoggerFactory.getLogger(MainWindow.class);
-    
+
     private final Stage stage;
     private PreferenceManager prefManager;
     private final DependencyManager dependencyManager;
@@ -72,102 +62,80 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     private final WhisperXTranscriptionService transcriptionService;
     private final TimeLeftEstimator timeEstimator;
     private final BatchProcessor batchProcessor;
-    
+
     // UI Components
     private FileSelectionPanel fileSelectionPanel;
     private ConfigurationPanel configurationPanel;
     private ControlPanel controlPanel;
     private TextArea logArea;
-    
+
     // Tools
     private final AudioSplitterTool audioSplitter;
     private final FileCombinerTool fileCombiner;
     private final SoundRecorderPanel soundRecorderPanel;
-    
+
     // State
     private final ObservableList<BatchFileItem> batchFiles;
     private Timeline timeUpdateTimeline;
 
-    // FIX (consolidation): the old parallelBatchRunning/isAnyBatchRunning()
-    // workaround and MainWindow's own separate ParallelProcessingManager
-    // instance are gone. They existed only because MainWindow used to call
-    // parallelManager.processBatchParallel() directly, bypassing
-    // batchProcessor entirely, for any batch with max-parallel > 1 — which
-    // is why batchProcessor.isProcessing() couldn't be trusted alone. Now
-    // that batchProcessor.processBatch() always delegates to its own
-    // internal parallelManager (see BatchProcessor.java), there's only ever
-    // one thing running a batch, so batchProcessor.isProcessing() /
-    // batchProcessor.cancel() are sufficient everywhere again, the same as
-    // before parallel processing was added.
-
-    // FIX: added — Total/Completed/Failed/Pending counts need a source of
-    // truth that survives items being removed from batchFiles mid-run
-    // (auto-remove-completed removes each item the instant it finishes).
-    // Tallying "completed" by iterating batchFiles live would undercount
-    // the moment a completed item is removed — it'd have already vanished
-    // from the list it's being counted from. These identity-keyed sets
-    // record "this exact BatchFileItem object was seen as COMPLETED/FAILED"
-    // once and keep it counted even after the item itself is gone from the
-    // visible queue. originalBatchSize is snapshotted once when a batch
-    // starts so "Total"/"Pending" stay meaningful as the queue shrinks.
     private final Set<BatchFileItem> countedCompleted =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<BatchFileItem> countedFailed =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private int originalBatchSize = 0;
 
-    // FIX (watch-folder feature): tracks the active FolderWatcher (if any) so
-    // it can be toggled off from the same menu item and cleanly stopped on exit.
     private FolderWatcher folderWatcher;
-    private audiomanager.core.RestApiServer restApiServer;
+    private RestApiServer restApiServer;
     private Thread folderWatcherThread;
     private MenuItem watchFolderMenuItem;
-    
+
+    private static final int PRIVACY_DISCLOSURE_VERSION = 2;
+    private static final int LOG_AREA_MAX_CHARS = 500_000;
+    private static final java.util.regex.Pattern EMOJI_PATTERN =
+            java.util.regex.Pattern.compile("[\\x{1F300}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{2190}-\\x{21FF}\\uFE0F]");
+    private static final java.util.regex.Pattern FONT_SIZE_RULE_PATTERN =
+            java.util.regex.Pattern.compile("-fx-font-size:\\s*[^;]+;?\\s*");
+    private ErrorReporter errorReporter;
+
     public MainWindow(Stage stage, PreferenceManager prefManager) {
         this.stage = stage;
         this.prefManager = prefManager;
 
-        // Validate preference manager
         if (prefManager == null) {
             LOGGER.error("PreferenceManager is null - creating fallback instance");
             this.prefManager = new PreferenceManager(MainWindow.class);
         }
 
-        // Initialize core services with preference manager
-        this.dependencyManager = new DependencyManager();
-        this.audioProcessor = new AudioProcessor(dependencyManager);
-        this.timeEstimator = new TimeLeftEstimator(10, this.prefManager);
-        this.transcriptionService = new WhisperXTranscriptionService(dependencyManager, timeEstimator);
+        Studio studio = Studio.getInstance();
+        ErrorReporter errorReporter = studio != null ? studio.getErrorReporter() : null;
 
-        // Initialize batch files BEFORE batch processor
+        this.dependencyManager = new DependencyManager();
+        this.audioProcessor = new AudioProcessor(dependencyManager, errorReporter);
+        this.timeEstimator = new TimeLeftEstimator(10, this.prefManager);
+        this.transcriptionService = new WhisperXTranscriptionService(
+                dependencyManager, timeEstimator, null, errorReporter);
+
         this.batchFiles = FXCollections.observableArrayList();
         this.configurationPanel = new ConfigurationPanel(prefManager);
 
-        // Create batch processor (only once)
         this.batchProcessor = new BatchProcessor(
-            audioProcessor, 
-            transcriptionService, 
-            timeEstimator,
-            prefManager,
-            this::log,
-            this,
-            batchFiles
+                audioProcessor,
+                transcriptionService,
+                timeEstimator,
+                prefManager,
+                this::log,
+                this,
+                batchFiles,
+                errorReporter
         );
 
-        // Initialize tools with logger
         this.audioSplitter = new AudioSplitterTool(dependencyManager, prefManager);
         this.audioSplitter.setLogger(this::log);
 
         this.fileCombiner = new FileCombinerTool(prefManager);
         this.fileCombiner.setLogger(this::log);
 
-        // FIX: SoundRecorderPanel existed as a complete, working class but
-        // was never constructed or added to the scene graph anywhere in
-        // MainWindow -- so it silently never appeared in the running app.
-        // Per its own class javadoc it's deliberately a peer section to
-        // Audio File Selection, not a Tools-accordion entry like the two
-        // tools above, so it's wired differently below (see createScene()).
-        this.soundRecorderPanel = new SoundRecorderPanel(batchFiles, prefManager, this::log);
+        this.soundRecorderPanel = new SoundRecorderPanel(batchFiles, prefManager, this::log, errorReporter);
 
         LOGGER.info("Application components initialized");
     }
@@ -175,28 +143,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     @Override
     public void onFileCompleted(BatchFileItem item, boolean wasSuccessful) {
         Platform.runLater(() -> {
-            // FIX: this is the actual root cause of the "done count never
-            // updates" bug, which survived an earlier fix to how ControlPanel
-            // *consumed* countedCompleted/countedFailed. The producer side was
-            // still wrong: countedCompleted/countedFailed used to be populated
-            // by scanning batchFiles once a second in the timeline tick below.
-            // But removeItemFromBatchQueue() (called a few lines down) removes
-            // the item from batchFiles immediately, via its own Platform.runLater
-            // — which reliably beats the once-per-second tick to the punch. By
-            // the time the tick's scan ran, the completed item was routinely
-            // already gone from the list, so it was never added to
-            // countedCompleted at all. onFileCompleted() fires exactly once per
-            // file, synchronously with the real completion event — count here,
-            // not by racing a 1-second poll against an immediate removal.
             if (wasSuccessful) {
                 countedCompleted.add(item);
                 log("✅ File completed successfully: " + item.getFileName());
-                // FIX: was calling removeItemFromBatchQueue(item) unconditionally
-                // for both success AND failure. removeItemFromBatchQueue() itself
-                // doesn't check status, so a failed file would silently vanish
-                // from the queue too whenever auto-remove was on — the opposite
-                // of what the setting is for (failed files need to stay visible
-                // so they can be investigated/retried).
                 fileSelectionPanel.removeItemFromBatchQueue(item);
             } else {
                 countedFailed.add(item);
@@ -211,14 +160,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         scene.getAccelerators().put(
                 javafx.scene.input.KeyCombination.keyCombination("Shortcut+R"),
                 this::handleProcessButtonClick);
-        // FIX (short-term improvement list): Open-file and Open-directory
-        // had no keyboard shortcut at all — "Browse..."/"Output
-        // Directory..." are toolbar buttons, not File-menu items, so there
-        // was nothing to attach a MenuItem accelerator to. Wired as
-        // scene-level accelerators instead, same mechanism as Shortcut+R
-        // above, calling into public wrapper methods on FileSelectionPanel
-        // so its private selection logic doesn't need to be exposed
-        // directly.
         scene.getAccelerators().put(
                 javafx.scene.input.KeyCombination.keyCombination("Shortcut+O"),
                 fileSelectionPanel::triggerBrowse);
@@ -227,13 +168,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 fileSelectionPanel::triggerOutputDirectoryChooser);
         stage.setScene(scene);
 
-        // FIX: darkModeItem.setSelected(...) only set the *checkbox's*
-        // visual state to match the saved preference — it never actually
-        // called toggleTheme(), so a saved "Dark" preference showed a
-        // checked menu item while the app still rendered in light mode
-        // until the user manually toggled it off and on again. Applying it
-        // for real here, after the scene exists (toggleTheme() needs
-        // stage.getScene() to be non-null).
         toggleTheme("Dark".equals(prefManager.getTheme()));
 
         configurationPanel.setFontSizeChangeListener(this::applyFontSize);
@@ -242,16 +176,13 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         applyFontSize(prefManager.getFontSize());
         restoreWindowState();
 
-        // Moved setupTimeUpdater() before restoreBatchQueueState()
-        setupTimeUpdater();        // <-- now called earlier
-
-        restoreBatchQueueState();  // may call startBatchProcessing()
-
+        setupTimeUpdater();
+        restoreBatchQueueState();
         setupEventHandlers();
 
         if (fileSelectionPanel != null && batchProcessor != null) {
             fileSelectionPanel.getClearQueueButton().disableProperty().bind(
-                batchProcessor.isRunningProperty() 
+                    batchProcessor.isRunningProperty()
             );
         }
 
@@ -260,6 +191,99 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         stage.show();
 
         CompletableFuture.runAsync(this::checkDependencies);
+    }
+
+    private Scene createScene() {
+        BorderPane root = new BorderPane();
+        root.setPadding(new Insets(0));
+
+        MenuBar menuBar = createMenuBar();
+
+        fileSelectionPanel = new FileSelectionPanel(
+                batchFiles,
+                prefManager,
+                audioSplitter,
+                fileCombiner,
+                this::log
+        );
+
+        configurationPanel = new ConfigurationPanel(prefManager);
+
+        controlPanel = new ControlPanel(
+                this::handleProcessButtonClick,
+                this::handleExitButtonClick,
+                timeEstimator
+        );
+
+        // Wire schedule button action
+        controlPanel.setScheduleAction(this::showScheduleDialog);
+
+        // ========== WIRE CONFIGURATION PANEL TO BATCH PROCESSOR ==========
+        // This is critical for ID3 tagging and other configuration-dependent features
+        batchProcessor.setConfigurationPanel(configurationPanel);
+        // ========== END WIRING ==========
+
+        logArea = new TextArea();
+        logArea.setEditable(false);
+        logArea.setPrefHeight(150);
+        logArea.setWrapText(true);
+        setStyled(logArea, "-fx-control-inner-background: #2c3e50; -fx-text-fill: white; -fx-font-family: 'Consolas', 'Monaco', monospace;");
+
+        VBox toolsSection = createToolsSection();
+
+        VBox logSection = new VBox(0);
+        Label logLabel = new Label("📝 Terminal");
+        setStyled(logLabel, "-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10 15 5 15;");
+        logLabel.getStyleClass().add("panel-heading");
+        logSection.getChildren().addAll(logLabel, logArea);
+        setStyled(logSection, "-fx-border-color: #bdc3c7; -fx-border-width: 1 0 0 0; -fx-background-color: white;");
+        logSection.getStyleClass().add("theme-fix-surface");
+
+        VBox mainContent = new VBox(0);
+        mainContent.getChildren().addAll(
+                soundRecorderPanel.getRecorderSection(),
+                createStyledFileSelectionSection(),
+                toolsSection,
+                createStyledBatchQueueSection(),
+                createStyledControlSection(),
+                logSection
+        );
+
+        ScrollPane scrollPane = new ScrollPane(mainContent);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setFitToHeight(false);
+        scrollPane.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        scrollPane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        setStyled(scrollPane, "-fx-background-color: #ecf0f1; -fx-border-width: 0;");
+
+        root.setTop(menuBar);
+        root.setCenter(scrollPane);
+
+        Scene scene = new Scene(root, AppConstants.DEFAULT_WINDOW_WIDTH, AppConstants.DEFAULT_WINDOW_HEIGHT);
+        applyCSSIfAvailable(scene);
+
+        return scene;
+    }
+
+    private void configureStage() {
+        stage.setTitle(AppConstants.APP_TITLE + " - " + AppConstants.APP_SUBTITLE);
+        stage.setMinWidth(AppConstants.MIN_WINDOW_WIDTH);
+        stage.setMinHeight(AppConstants.MIN_WINDOW_HEIGHT);
+
+        try (InputStream iconStream = getClass().getResourceAsStream(AppConstants.ICON_PATH)) {
+            if (iconStream != null) {
+                stage.getIcons().add(new Image(iconStream));
+            } else {
+                LOGGER.warn("Application icon not found");
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Failed to load application icon", e);
+        }
+    }
+
+    private void setStyled(Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
     }
 
     private void applyFontSize(double size) {
@@ -280,26 +304,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         applyFontSizeToUIComponents(size);
     }
 
-    /**
-     * FIX: previously this called {@code setStyled(node, String.format(
-     * "-fx-font-size: %spx;", size));} for every button/label/text-field/
-     * text-area in the whole scene. {@code setStyled(Node, );} REPLACES the
-     * entire inline style string — it doesn't merge with what's already
-     * there. Since most buttons throughout this app get their color/shape
-     * from an inline style set elsewhere (e.g.
-     * {@code "-fx-background-color: #e67e22; -fx-text-fill: white; ..."}),
-     * every one of those was being silently wiped back to default Modena
-     * styling on every "Apply" in Preferences — for ANY setting, not
-     * specifically the log level (that was just what the user happened to
-     * be changing when they noticed the whole window revert to plain
-     * default-looking buttons). Now it strips only a prior
-     * {@code -fx-font-size:...;} rule (if any) from the existing style and
-     * appends the new one, leaving every other inline rule untouched.
-     */
-    private static final java.util.regex.Pattern FONT_SIZE_RULE_PATTERN =
-            java.util.regex.Pattern.compile("-fx-font-size:\\s*[^;]+;?\\s*");
-
-    private void applyFontSizeRule(javafx.scene.Node node, double size) {
+    private void applyFontSizeRule(Node node, double size) {
         String existing = node.getStyle();
         String withoutFontSize = (existing == null || existing.isBlank())
                 ? ""
@@ -345,316 +350,453 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         }
     }
 
-    private void configureStage() {
-        stage.setTitle(AppConstants.APP_TITLE + " - " + AppConstants.APP_SUBTITLE);
-        stage.setMinWidth(AppConstants.MIN_WINDOW_WIDTH);
-        stage.setMinHeight(AppConstants.MIN_WINDOW_HEIGHT);
-        
-        try (InputStream iconStream = getClass().getResourceAsStream(AppConstants.ICON_PATH)) {
-            if (iconStream != null) {
-                stage.getIcons().add(new Image(iconStream));
-            } else {
-                LOGGER.warn("Application icon not found");
+    private MenuBar createMenuBar() {
+        MenuBar menuBar = new MenuBar();
+        setStyled(menuBar, "-fx-padding: 0; -fx-background-color: #ecf0f1; -fx-border-width: 0 0 1 0; -fx-border-color: #bdc3c7;");
+
+        Menu fileMenu = new Menu("File");
+        fileMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        MenuItem preferencesItem = new MenuItem("Preferences...");
+        preferencesItem.setOnAction(e -> showPreferencesDialog());
+        preferencesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+COMMA"));
+
+        MenuItem clearSessionItem = new MenuItem("Clear Session Data");
+        clearSessionItem.setOnAction(e -> clearSessionData());
+
+        MenuItem exitItem = new MenuItem("Exit");
+        exitItem.setOnAction(e -> handleExitButtonClick());
+        exitItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Q"));
+
+        fileMenu.getItems().addAll(preferencesItem, clearSessionItem, new SeparatorMenuItem(), exitItem);
+
+        Menu editMenu = new Menu("Edit");
+        editMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        MenuItem undoItem = new MenuItem("Undo");
+        undoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Z"));
+        undoItem.setOnAction(e -> {
+            if (fileSelectionPanel != null && !fileSelectionPanel.undo()) {
+                log("Nothing to undo.");
             }
-        } catch (Exception e) {
-            LOGGER.warn("Failed to load application icon", e);
-        }
+        });
+
+        MenuItem redoItem = new MenuItem("Redo");
+        redoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+Z"));
+        redoItem.setOnAction(e -> {
+            if (fileSelectionPanel != null && !fileSelectionPanel.redo()) {
+                log("Nothing to redo.");
+            }
+        });
+
+        editMenu.getItems().addAll(undoItem, redoItem);
+
+        Menu toolsMenu = new Menu("Tools");
+        toolsMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
+        batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
+        batchSettingsItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+B"));
+
+        MenuItem whisperSettingsItem = new MenuItem("Transcription Settings...");
+        whisperSettingsItem.setOnAction(e -> showWhisperSettingsDialog());
+
+        MenuItem audioSettingsItem = new MenuItem("Audio Processing Settings...");
+        audioSettingsItem.setOnAction(e -> showAudioSettingsDialog());
+
+        MenuItem clearTimeDataItem = new MenuItem("Clear Time Estimation Data");
+        clearTimeDataItem.setOnAction(e -> clearTimeEstimationData());
+
+        watchFolderMenuItem = new MenuItem("📁 Watch Folder...");
+        watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
+        watchFolderMenuItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+W"));
+
+        MenuItem restApiMenuItem = new MenuItem("🌐 Start REST API...");
+        restApiMenuItem.setOnAction(e -> toggleRestApi(restApiMenuItem));
+
+        MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
+        performanceReportItem.setOnAction(e -> showPerformanceReportDialog());
+        performanceReportItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+P"));
+
+        toolsMenu.getItems().addAll(
+                batchSettingsItem, whisperSettingsItem, audioSettingsItem,
+                new SeparatorMenuItem(), clearTimeDataItem,
+                new SeparatorMenuItem(), watchFolderMenuItem, restApiMenuItem, performanceReportItem
+        );
+
+        Menu viewMenu = new Menu("View");
+        viewMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        CheckMenuItem darkModeItem = new CheckMenuItem("🌙 Dark Mode");
+        darkModeItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+D"));
+        darkModeItem.setSelected("Dark".equals(prefManager.getTheme()));
+        darkModeItem.setOnAction(e -> toggleTheme(darkModeItem.isSelected()));
+
+        viewMenu.getItems().add(darkModeItem);
+
+        Menu helpMenu = new Menu("Help");
+        helpMenu.setStyle("-fx-text-fill: #2c3e50;");
+
+        MenuItem aboutItem = new MenuItem("About");
+        aboutItem.setOnAction(e -> showAboutDialog());
+
+        MenuItem dependenciesItem = new MenuItem("Check Dependencies");
+        dependenciesItem.setOnAction(e -> checkDependencies());
+        dependenciesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F5"));
+
+        MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
+        setupAssistantItem.setOnAction(e -> showSetupAssistantDialog());
+
+        MenuItem userManualItem = new MenuItem("User Manual...");
+        userManualItem.setOnAction(e -> new DocumentationLauncher().open("USER_MANUAL.md"));
+
+        MenuItem troubleshootingItem = new MenuItem("Troubleshooting Guide...");
+        troubleshootingItem.setOnAction(e -> new DocumentationLauncher().open("TROUBLESHOOTING.md"));
+        troubleshootingItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F1"));
+
+        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem,
+                new SeparatorMenuItem(), userManualItem, troubleshootingItem);
+
+        menuBar.getMenus().addAll(fileMenu, editMenu, toolsMenu, viewMenu, helpMenu);
+
+        return menuBar;
     }
 
-    private Scene createScene() {
-        BorderPane root = new BorderPane();
-        root.setPadding(new Insets(0));
+    private void toggleTheme(boolean dark) {
+        Scene scene = stage.getScene();
+        if (scene == null) return;
 
-        MenuBar menuBar = createMenuBar();
+        String stylesheetUri = getClass().getResource("/styles/dark.css") != null
+                ? getClass().getResource("/styles/dark.css").toExternalForm()
+                : null;
 
-        fileSelectionPanel = new FileSelectionPanel(
-            batchFiles, 
-            prefManager,
-            audioSplitter,
-            fileCombiner,
-            this::log
-        );
-
-        // FIX (cleanup #4): removed the redundant "Analyze Volume" toolbar
-        // button (and its Tools-menu twin, removed below in createMenuBar())
-        // per cleanup request — a niche single-file action that cluttered
-        // the main file-selection toolbar.
-
-        configurationPanel = new ConfigurationPanel(prefManager);
-
-        controlPanel = new ControlPanel(
-            this::handleProcessButtonClick,
-            this::handleExitButtonClick,
-            timeEstimator
-        );
-
-        logArea = new TextArea();
-        logArea.setEditable(false);
-        logArea.setPrefHeight(150);
-        logArea.setWrapText(true);
-        setStyled(logArea, "-fx-control-inner-background: #2c3e50; -fx-text-fill: white; -fx-font-family: 'Consolas', 'Monaco', monospace;");
-
-        VBox toolsSection = createToolsSection();
-
-        VBox logSection = new VBox(0);
-        Label logLabel = new Label("📝 Terminal");
-        setStyled(logLabel, "-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10 15 5 15;"); // color removed
-        logLabel.getStyleClass().add("panel-heading");
-        logSection.getChildren().addAll(logLabel, logArea);
-        setStyled(logSection, "-fx-border-color: #bdc3c7; -fx-border-width: 1 0 0 0; -fx-background-color: white;");
-        logSection.getStyleClass().add("theme-fix-surface");   // ← add (was missed last time)
-
-        VBox mainContent = new VBox(0);
-        mainContent.getChildren().addAll(
-            soundRecorderPanel.getRecorderSection(),
-            createStyledFileSelectionSection(),
-            toolsSection,
-            createStyledBatchQueueSection(),
-            createStyledControlSection(),
-            logSection
-        );
-
-        ScrollPane scrollPane = new ScrollPane(mainContent);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setFitToHeight(false);
-        scrollPane.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        scrollPane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        setStyled(scrollPane, "-fx-background-color: #ecf0f1; -fx-border-width: 0;");
-
-        root.setTop(menuBar);
-        root.setCenter(scrollPane);
-
-        Scene scene = new Scene(root, AppConstants.DEFAULT_WINDOW_WIDTH, AppConstants.DEFAULT_WINDOW_HEIGHT);
-        applyCSSIfAvailable(scene);
-
-        return scene;
-    }
-
-    // ========== NEW METHOD: Get selected file from batch queue ==========
-    private File getSelectedFile() {
-        if (batchFiles.isEmpty()) {
-            return null;
-        }
-
-        // Get the ListView from FileSelectionPanel
-        ListView<BatchFileItem> listView = fileSelectionPanel.getBatchListView();
-        if (listView != null) {
-            BatchFileItem selectedItem = listView.getSelectionModel().getSelectedItem();
-            if (selectedItem != null) {
-                return selectedItem.getFile();
+        if (dark) {
+            if (stylesheetUri != null && !scene.getStylesheets().contains(stylesheetUri)) {
+                scene.getStylesheets().add(stylesheetUri);
+            } else if (stylesheetUri == null) {
+                LOGGER.warn("dark.css not found on the classpath at /styles/dark.css — dark mode stylesheet not applied.");
             }
-        }
-
-        // If nothing selected but files exist, show choice dialog
-        if (batchFiles.size() == 1) {
-            return batchFiles.get(0).getFile();
+            prefManager.setTheme("Dark");
         } else {
-            // Let user choose which file to analyze
-            ChoiceDialog<BatchFileItem> dialog = new ChoiceDialog<>(batchFiles.get(0), batchFiles);
-            dialog.setTitle("Select File");
-            dialog.setHeaderText("Multiple files in queue");
-            dialog.setContentText("Choose a file to analyze:");
-
-            // Custom renderer to show filenames clearly
-            dialog.getDialogPane().lookupButton(ButtonType.OK).setDisable(false);
-
-            
-            ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-            Optional<BatchFileItem> result = dialog.showAndWait();
-            if (result.isPresent()) {
-                return result.get().getFile();
+            if (stylesheetUri != null) {
+                scene.getStylesheets().remove(stylesheetUri);
             }
+            prefManager.setTheme("Light");
         }
 
-        return null;
+        ThemeManager.sweep(scene, dark);
+        prefManager.flush();
+        LOGGER.info("Theme set to: {}", prefManager.getTheme());
     }
-    // ========== END NEW METHOD ==========
 
-    // ========== NEW METHOD: Analyze selected file volume ==========
-    private void analyzeSelectedFileVolume() {
-        File selectedFile = getSelectedFile();
-        if (selectedFile == null) {
-            log("❌ Please add at least one file to the batch queue first");
+    private void showPreferencesDialog() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Preferences");
+        dialog.setHeaderText("User Interface Settings");
 
+        configurationPanel.refreshAllComponents();
+
+        VBox uiSection = configurationPanel.createUISection();
+
+        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
+        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
+
+        ScrollPane scrollPane = new ScrollPane(uiSection);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(150);
+        dialog.getDialogPane().setContent(scrollPane);
+
+        applyFontSizeToDialog(dialog, prefManager.getFontSize());
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        dialog.showAndWait().ifPresent(result -> {
+            if (result == applyButton) {
+                configurationPanel.savePreferences();
+                double newFontSize = prefManager.getFontSize();
+                applyFontSize(newFontSize);
+                log("✅ UI preferences updated - Font size: " + (int) newFontSize + "px");
+            }
+        });
+    }
+
+    private void applyFontSizeToDialog(Dialog<?> dialog, double size) {
+        Platform.runLater(() -> {
+            try {
+                String style = String.format("-fx-font-size: %spx;", (int) size);
+                dialog.getDialogPane().setStyle(style);
+            } catch (Exception e) {
+                LOGGER.warn("Failed to apply font size to dialog", e);
+                if (errorReporter != null && errorReporter.isEnabled()) {
+                    errorReporter.reportError(e, "Apply font size to dialog failed");
+                }
+            }
+        });
+    }
+
+    private void showBatchSettingsDialog() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Batch Processing Settings");
+        dialog.setHeaderText("Configure batch processing behavior");
+
+        configurationPanel.refreshAllComponents();
+
+        VBox batchSection = configurationPanel.createBatchSection();
+
+        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
+        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
+
+        ScrollPane scrollPane = new ScrollPane(batchSection);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(120);
+        dialog.getDialogPane().setContent(scrollPane);
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        dialog.showAndWait().ifPresent(result -> {
+            if (result == applyButton) {
+                configurationPanel.savePreferences();
+                log("✅ Batch processing settings updated");
+            }
+        });
+    }
+
+    private void showWhisperSettingsDialog() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Transcription Settings");
+        dialog.setHeaderText("Configure Whisper transcription parameters");
+
+        configurationPanel.refreshAllComponents();
+
+        VBox whisperSection = configurationPanel.createWhisperSection();
+
+        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
+        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
+
+        ScrollPane scrollPane = new ScrollPane(whisperSection);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(200);
+        dialog.getDialogPane().setContent(scrollPane);
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        dialog.showAndWait().ifPresent(result -> {
+            if (result == applyButton) {
+                configurationPanel.savePreferences();
+                log("✅ Transcription settings updated");
+            }
+        });
+    }
+
+    private void showAudioSettingsDialog() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Audio Processing Settings");
+        dialog.setHeaderText("Configure FFmpeg audio processing parameters");
+
+        configurationPanel.refreshAllComponents();
+
+        VBox audioSection = configurationPanel.createAudioSection();
+
+        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
+        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
+
+        ScrollPane scrollPane = new ScrollPane(audioSection);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(300);
+        dialog.getDialogPane().setContent(scrollPane);
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        dialog.showAndWait().ifPresent(result -> {
+            if (result == applyButton) {
+                configurationPanel.savePreferences();
+                log("✅ Audio processing settings updated");
+            }
+        });
+    }
+
+    private void showAboutDialog() {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("About Studio Audio Manager");
+        alert.setHeaderText("Studio Audio Manager v3.9");
+        alert.setContentText("""
+                A comprehensive audio processing tool with transcription capabilities.
+                                
+                Features:
+                \u2022 Batch audio file processing
+                \u2022 Whisper transcription integration
+                \u2022 Audio splitting and combining tools
+                \u2022 Real-time progress tracking
+                \u2022 Volume analysis and optimization
+                                
+                Built with JavaFX and FFmpeg""");
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
+    }
+
+    // ========== SCHEDULE DIALOG ==========
+
+    private void showScheduleDialog() {
+        if (batchFiles.isEmpty()) {
+            log("❌ Cannot schedule: batch queue is empty");
             Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle("No File Available");
-            alert.setHeaderText("Cannot Analyze Volume");
-            alert.setContentText("Please add at least one file to the batch queue before analyzing.");
-                        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.setTitle("Cannot Schedule");
+            alert.setHeaderText("Batch Queue is Empty");
+            alert.setContentText("Please add files to the batch queue before scheduling.");
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
             alert.showAndWait();
             return;
         }
 
-        try {
-            log("🔍 Analyzing volume for: " + selectedFile.getName());
+        Studio studio = Studio.getInstance();
+        if (studio == null || studio.getBatchScheduler() == null) {
+            log("❌ Batch scheduler not available");
+            return;
+        }
 
-            // Update UI to show analysis in progress
-            Platform.runLater(() -> {
-                controlPanel.updateProgress(0, 0, 1);
-                controlPanel.setProcessingState(true);
-                // Access statusLabel from ControlPanel (you may need to add a getter)
-                // For now, just use the log
-            });
+        BatchScheduler scheduler = studio.getBatchScheduler();
 
-            // Run analysis in background to prevent UI freeze
-            CompletableFuture.supplyAsync(() -> {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Schedule Batch Processing");
+        dialog.setHeaderText("Schedule the current batch to run later");
+
+        VBox content = new VBox(15);
+        content.setPadding(new Insets(20));
+        content.setMinWidth(350);
+
+        Label batchInfo = new Label(String.format("📊 Current batch: %d files",
+                batchFiles.size()));
+        batchInfo.setWrapText(true);
+
+        HBox timeBox = new HBox(10);
+        timeBox.setAlignment(Pos.CENTER_LEFT);
+
+        ComboBox<String> hourCombo = new ComboBox<>();
+        for (int i = 1; i <= 12; i++) {
+            hourCombo.getItems().add(String.format("%02d", i));
+        }
+        hourCombo.setValue("12");
+        hourCombo.setPrefWidth(70);
+
+        ComboBox<String> minuteCombo = new ComboBox<>();
+        for (int i = 0; i < 60; i += 5) {
+            minuteCombo.getItems().add(String.format("%02d", i));
+        }
+        minuteCombo.setValue("00");
+        minuteCombo.setPrefWidth(70);
+
+        ComboBox<String> amPmCombo = new ComboBox<>();
+        amPmCombo.getItems().addAll("AM", "PM");
+        amPmCombo.setValue("AM");
+        amPmCombo.setPrefWidth(70);
+
+        timeBox.getChildren().addAll(
+                new Label("at"),
+                hourCombo,
+                new Label(":"),
+                minuteCombo,
+                amPmCombo
+        );
+
+        Label currentTimeLabel = new Label("Current time: " +
+                LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
+        setStyled(currentTimeLabel, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+
+        Label statusLabel = new Label();
+        if (scheduler.isScheduled()) {
+            LocalDateTime scheduledTime = scheduler.getScheduledTime();
+            if (scheduledTime != null) {
+                statusLabel.setText("⚠️ Currently scheduled for: " +
+                        scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
+                statusLabel.setStyle("-fx-text-fill: #ed6c02;");
+            }
+        }
+
+        content.getChildren().addAll(
+                batchInfo,
+                new Separator(),
+                new Label("Select start time:"),
+                timeBox,
+                currentTimeLabel,
+                statusLabel
+        );
+
+        dialog.getDialogPane().setContent(content);
+
+        ButtonType scheduleBtn = new ButtonType("Schedule", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        ButtonType clearBtn = new ButtonType("Clear Schedule", ButtonBar.ButtonData.OTHER);
+        dialog.getDialogPane().getButtonTypes().addAll(scheduleBtn, cancelBtn, clearBtn);
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        dialog.showAndWait().ifPresent(response -> {
+            if (response == scheduleBtn) {
                 try {
-                    return audioProcessor.analyzeVolume(selectedFile.getAbsolutePath());
-                } catch (FfmpegException e) {
-                    // FIX: previously wrapped as a bare RuntimeException, losing the
-                    // FfmpegException's userMessage()/getStderrTail() by the time
-                    // .exceptionally() below ran. CompletableFuture's Supplier can't
-                    // declare a checked exception, so this wrap is unavoidable, but
-                    // wrapping the typed exception itself (not just its message)
-                    // lets .exceptionally() unwrap and show the specific FFmpeg
-                    // failure message instead of a generic one.
-                    throw new CompletionException(e);
-                }
-            }).thenAccept(analysis -> {
-                Platform.runLater(() -> {
-                    // Restore UI state
-                    controlPanel.setProcessingState(false);
-                    controlPanel.updateProgress(0, 0, 0);
+                    int hour = Integer.parseInt(hourCombo.getValue());
+                    int minute = Integer.parseInt(minuteCombo.getValue());
+                    boolean isPM = "PM".equals(amPmCombo.getValue());
 
-                    // Show results in dialog
-                    Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                    alert.setTitle("Volume Analysis Results");
-                    alert.setHeaderText("Volume Analysis for: " + selectedFile.getName());
+                    if (isPM && hour != 12) hour += 12;
+                    if (!isPM && hour == 12) hour = 0;
 
-                    // Create expandable content for detailed view
-                    TextArea textArea = new TextArea(audioProcessor.formatVolumeAnalysis(analysis));
-                    textArea.setEditable(false);
-                    textArea.setWrapText(true);
-                    textArea.setPrefWidth(500);
-                    textArea.setPrefHeight(300);
+                    LocalTime time = LocalTime.of(hour, minute);
+                    LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
 
-                    alert.getDialogPane().setContent(textArea);
-                    alert.getDialogPane().setPrefSize(550, 400);
-
-                    // Add action buttons
-                    ButtonType closeButton = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
-
-                    // If amplification is needed, add an "Apply Gain" button
-                    if (analysis.needsAmplification()) {
-                        ButtonType applyGainButton = new ButtonType(
-                            "Apply " + String.format("%.1f", analysis.getRecommendedGain()) + "dB Gain", 
-                            ButtonBar.ButtonData.OK_DONE);
-                        alert.getButtonTypes().setAll(applyGainButton, closeButton);
-
-                        alert.setResultConverter(buttonType -> {
-                            if (buttonType == applyGainButton) {
-                                applyRecommendedGain(selectedFile, analysis.getRecommendedGain());
-                            }
-                            return null;
-                        });
-                    } else {
-                        alert.getButtonTypes().setAll(closeButton);
+                    if (scheduledTime.isBefore(LocalDateTime.now())) {
+                        scheduledTime = scheduledTime.plusDays(1);
+                        log("📅 Scheduled time is in the past - scheduling for tomorrow");
                     }
 
-                    
-                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+                    scheduler.scheduleBatch(scheduledTime, batchFiles, batchProcessor);
+                    log("📅 Batch scheduled for: " +
+                            scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
 
+                    Alert confirm = new Alert(Alert.AlertType.INFORMATION);
+                    confirm.setTitle("Batch Scheduled");
+                    confirm.setHeaderText("Batch processing scheduled");
+                    confirm.setContentText(String.format(
+                            "Your batch of %d files will start automatically at:\n%s",
+                            batchFiles.size(),
+                            scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a"))
+                    ));
+                    ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
+                    confirm.showAndWait();
+
+                } catch (NumberFormatException e) {
+                    log("❌ Invalid time format");
+                    Alert alert = new Alert(Alert.AlertType.ERROR);
+                    alert.setTitle("Invalid Time");
+                    alert.setHeaderText("Invalid time format");
+                    alert.setContentText("Please select valid hour and minute values.");
+                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
                     alert.showAndWait();
-
-                    log("✅ Volume analysis complete for: " + selectedFile.getName());
-                });
-            }).exceptionally(ex -> {
-                Platform.runLater(() -> {
-                    // Restore UI state on error
-                    controlPanel.setProcessingState(false);
-                    controlPanel.updateProgress(0, 0, 0);
-
-                    LOGGER.error("Volume analysis failed", ex);
-                    log("❌ Volume analysis failed: " + ex.getMessage());
-                    showFfmpegAwareErrorAlert("Analysis Failed", "Volume Analysis Failed", ex);
-                });
-                return null;
-            });
-        } catch (Exception ex) {
-            LOGGER.error("Volume analysis failed", ex);
-            log("❌ Volume analysis failed: " + ex.getMessage());
-
-            Platform.runLater(() -> {
-                controlPanel.setProcessingState(false);
-                controlPanel.updateProgress(0, 0, 0);
-            });
-        }
-    }
-    // ========== END NEW METHOD ==========
-
-    // ========== NEW METHOD: Apply recommended gain ==========
-    private void applyRecommendedGain(File file, double gainDb) {
-        try {
-            log("🔊 Applying " + String.format("%.1f", gainDb) + "dB gain to: " + file.getName());
-
-            // Update UI to show amplification in progress
-            Platform.runLater(() -> {
-                controlPanel.setProcessingState(true);
-                // Update detailed status if available
-            });
-
-            // Run amplification in background
-            CompletableFuture.supplyAsync(() -> {
-                try {
-                    return audioProcessor.amplifyAudio(file.getAbsolutePath(), gainDb);
-                } catch (FfmpegException e) {
-                    // See analyzeSelectedFileVolume() above for why this wrap is
-                    // necessary (Supplier can't declare checked exceptions) and
-                    // why it preserves the typed exception rather than discarding it.
-                    throw new CompletionException(e);
                 }
-            }).thenAccept(outputPath -> {
-                Platform.runLater(() -> {
-                    // Restore UI state
-                    controlPanel.setProcessingState(false);
+            } else if (response == clearBtn) {
+                scheduler.cancelScheduledBatch();
+                log("📅 Scheduled batch cancelled");
+            }
+        });
+    }
 
-                    log("✅ Amplification complete: " + outputPath);
+    // ========== STATUS MESSAGE ==========
 
-                    // Ask if user wants to add amplified file to batch queue
-                    Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
-                    alert.setTitle("Add to Batch Queue?");
-                    alert.setHeaderText("Amplification Complete");
-                    alert.setContentText("Add the amplified file to the batch queue?");
-
-                    ButtonType yesButton = new ButtonType("Yes", ButtonBar.ButtonData.YES);
-                    ButtonType noButton = new ButtonType("No", ButtonBar.ButtonData.NO);
-                    alert.getButtonTypes().setAll(yesButton, noButton);
-
-                    
-                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
-
-                    Optional<ButtonType> result = alert.showAndWait();
-                    if (result.isPresent() && result.get() == yesButton) {
-                        File amplifiedFile = new File(outputPath);
-                        BatchFileItem newItem = new BatchFileItem(amplifiedFile);
-                        batchFiles.add(newItem);
-                        log("➕ Added amplified file to batch queue: " + amplifiedFile.getName());
-
-                        // Update the batch queue display
-                        fileSelectionPanel.updateBatchStatus(batchFiles);
-                    }
-                });
-            }).exceptionally(ex -> {
-                Platform.runLater(() -> {
-                    // Restore UI state on error
-                    controlPanel.setProcessingState(false);
-
-                    LOGGER.error("Amplification failed", ex);
-                    log("❌ Amplification failed: " + ex.getMessage());
-                    showFfmpegAwareErrorAlert("Amplification Failed", "Could Not Amplify File", ex);
-                });
-                return null;
-            });
-
-        } catch (Exception ex) {
-            LOGGER.error("Amplification failed", ex);
-            log("❌ Amplification failed: " + ex.getMessage());
-
-            Platform.runLater(() -> {
-                controlPanel.setProcessingState(false);
-            });
-        }
+    public void showStatusMessage(String message) {
+        Platform.runLater(() -> {
+            if (controlPanel != null) {
+                controlPanel.updateStatus(message, null);
+            }
+            if (logArea != null) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
+                logArea.appendText(String.format("[%s] 📊 %s%n", timestamp, message));
+                logArea.setScrollTop(Double.MAX_VALUE);
+            }
+            LOGGER.info("Status: {}", message);
+        });
     }
     // ========== END NEW METHOD ==========
 
@@ -754,179 +896,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         return controlSection;
     }
 
-    private MenuBar createMenuBar() {
-        MenuBar menuBar = new MenuBar();
-        setStyled(menuBar, "-fx-padding: 0; -fx-background-color: #ecf0f1; -fx-border-width: 0 0 1 0; -fx-border-color: #bdc3c7;");
-
-        Menu fileMenu = new Menu("File");
-        fileMenu.setStyle("-fx-text-fill: #2c3e50;");
-
-        MenuItem preferencesItem = new MenuItem("Preferences...");
-        preferencesItem.setOnAction(e -> showPreferencesDialog());
-        preferencesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+COMMA"));
-
-        MenuItem clearSessionItem = new MenuItem("Clear Session Data");
-        clearSessionItem.setOnAction(e -> clearSessionData());
-
-        MenuItem exitItem = new MenuItem("Exit");
-        exitItem.setOnAction(e -> handleExitButtonClick());
-        exitItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Q"));
-
-        fileMenu.getItems().addAll(preferencesItem, clearSessionItem, new SeparatorMenuItem(), exitItem);
-
-        // FIX (UI improvement — undo/redo menu): mirrors the Ctrl+Z/Ctrl+Shift+Z
-        // shortcuts already wired into the file queue's TableView
-        // (FileSelectionPanel.setupKeyboardShortcutsForTableView); this gives
-        // mouse-driven access to the same commands, and doubles as
-        // documentation of the shortcut for anyone who doesn't discover it
-        // by trying Ctrl+Z.
-        Menu editMenu = new Menu("Edit");
-        editMenu.setStyle("-fx-text-fill: #2c3e50;");
-
-        MenuItem undoItem = new MenuItem("Undo");
-        undoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Z"));
-        undoItem.setOnAction(e -> {
-            if (fileSelectionPanel != null && !fileSelectionPanel.undo()) {
-                log("Nothing to undo.");
-            }
-        });
-
-        MenuItem redoItem = new MenuItem("Redo");
-        redoItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+Z"));
-        redoItem.setOnAction(e -> {
-            if (fileSelectionPanel != null && !fileSelectionPanel.redo()) {
-                log("Nothing to redo.");
-            }
-        });
-
-        editMenu.getItems().addAll(undoItem, redoItem);
-
-        Menu toolsMenu = new Menu("Tools");
-        toolsMenu.setStyle("-fx-text-fill: #2c3e50;");
-
-        MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
-        batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
-        batchSettingsItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+B"));
-
-        MenuItem whisperSettingsItem = new MenuItem("Transcription Settings...");
-        whisperSettingsItem.setOnAction(e -> showWhisperSettingsDialog());
-
-        MenuItem audioSettingsItem = new MenuItem("Audio Processing Settings...");
-        audioSettingsItem.setOnAction(e -> showAudioSettingsDialog());
-
-        MenuItem clearTimeDataItem = new MenuItem("Clear Time Estimation Data");
-        clearTimeDataItem.setOnAction(e -> clearTimeEstimationData());
-
-        watchFolderMenuItem = new MenuItem("📁 Watch Folder...");
-        watchFolderMenuItem.setOnAction(e -> toggleFolderWatch());
-        watchFolderMenuItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+W"));
-
-        MenuItem restApiMenuItem = new MenuItem("🌐 Start REST API...");
-        restApiMenuItem.setOnAction(e -> toggleRestApi(restApiMenuItem));
-
-        MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
-        performanceReportItem.setOnAction(e -> showPerformanceReportDialog());
-        performanceReportItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+P"));
-
-        toolsMenu.getItems().addAll(
-            batchSettingsItem, whisperSettingsItem, audioSettingsItem,
-            new SeparatorMenuItem(), clearTimeDataItem,
-            new SeparatorMenuItem(), watchFolderMenuItem, restApiMenuItem, performanceReportItem
-        );
-
-        // FIX (UI improvement — dark mode): a best-effort dark theme. This
-        // app styles most components with inline setStyle(...) calls rather
-        // than CSS style-class selectors, and inline styles take priority
-        // over stylesheet rules in JavaFX — so this stylesheet reliably
-        // re-themes the scene background, MenuBar, TextArea/log, and any
-        // component that doesn't set its own inline background/text-fill,
-        // but can't override every hardcoded color throughout ControlPanel/
-        // FileSelectionPanel without migrating those to CSS classes (a
-        // larger, separate refactor). Treat this as a real but partial dark
-        // mode, not full coverage — panels with heavy inline styling (the
-        // Queue table, colored status buttons) will keep their light-theme
-        // colors for now.
-        Menu viewMenu = new Menu("View");
-        viewMenu.setStyle("-fx-text-fill: #2c3e50;");
-
-        CheckMenuItem darkModeItem = new CheckMenuItem("🌙 Dark Mode");
-        darkModeItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+D"));
-        darkModeItem.setSelected("Dark".equals(prefManager.getTheme()));
-        darkModeItem.setOnAction(e -> toggleTheme(darkModeItem.isSelected()));
-
-        viewMenu.getItems().add(darkModeItem);
-
-        Menu helpMenu = new Menu("Help");
-        helpMenu.setStyle("-fx-text-fill: #2c3e50;");
-
-        MenuItem aboutItem = new MenuItem("About");
-        aboutItem.setOnAction(e -> showAboutDialog());
-
-        MenuItem dependenciesItem = new MenuItem("Check Dependencies");
-        dependenciesItem.setOnAction(e -> checkDependencies());
-        dependenciesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F5"));
-
-        MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
-        setupAssistantItem.setOnAction(e -> showSetupAssistantDialog());
-
-        MenuItem userManualItem = new MenuItem("User Manual...");
-        userManualItem.setOnAction(e -> new audiomanager.ui.DocumentationLauncher().open("USER_MANUAL.md"));
-
-        MenuItem troubleshootingItem = new MenuItem("Troubleshooting Guide...");
-        troubleshootingItem.setOnAction(e -> new audiomanager.ui.DocumentationLauncher().open("TROUBLESHOOTING.md"));
-        troubleshootingItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F1"));
-
-        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem,
-                new SeparatorMenuItem(), userManualItem, troubleshootingItem);
-
-        menuBar.getMenus().addAll(fileMenu, editMenu, toolsMenu, viewMenu, helpMenu);
-
-        return menuBar;
-    }
-
-    /**
-     * Toggles the dark stylesheet on the current scene and persists the
-     * choice via PreferenceManager so it's restored on next launch. See the
-     * "FIX (UI improvement — dark mode)" note above createMenuBar() for the
-     * honest scope of what this does and doesn't re-theme.
-     */
-    private void toggleTheme(boolean dark) {
-        Scene scene = stage.getScene();
-        if (scene == null) return;
-
-        String stylesheetUri = getClass().getResource("/styles/dark.css") != null
-                ? getClass().getResource("/styles/dark.css").toExternalForm()
-                : null;
-
-        if (dark) {
-            if (stylesheetUri != null && !scene.getStylesheets().contains(stylesheetUri)) {
-                scene.getStylesheets().add(stylesheetUri);
-            } else if (stylesheetUri == null) {
-                LOGGER.warn("dark.css not found on the classpath at /styles/dark.css — dark mode stylesheet not applied. " +
-                        "Make sure dark.css is placed under src/main/resources/styles/.");
-            }
-            prefManager.setTheme("Dark");
-        } else {
-            if (stylesheetUri != null) {
-                scene.getStylesheets().remove(stylesheetUri);
-            }
-            prefManager.setTheme("Light");
-        }
-
-        // FIX: previously this only touched the stylesheet — anything with
-        // an inline style (background-color/text-fill set directly via
-        // setStyle(), which is most buttons/panels in this app) never
-        // picked up the dark theme at all. ThemeManager.sweep() walks the
-        // whole scene graph and strips/restores just the color portion of
-        // each node's inline style, letting the stylesheet's type-selector
-        // rules take over for color while everything else about the node's
-        // styling (radius, padding, font-weight) stays exactly as it was.
-        ThemeManager.sweep(scene, dark);
-
-        prefManager.flush();
-        LOGGER.info("Theme set to: {}", prefManager.getTheme());
-    }
-
     private void clearSessionData() {
         Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
         alert.setTitle("Clear Session Data");
@@ -1004,7 +973,7 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                     Platform.runLater(() -> {
                         fileSelectionPanel.addFile(file);
                         log("📁 Watch folder: added new file " + file.getName());
-                    }));
+                    }), errorReporter);
             folderWatcherThread = new Thread(folderWatcher, "FolderWatcher");
             folderWatcherThread.setDaemon(true);
             folderWatcherThread.start();
@@ -1035,168 +1004,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             watchFolderMenuItem.setText("📁 Watch Folder...");
         }
         log("📁 Stopped watching folder");
-    }
-    
-    private void showPreferencesDialog() {
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Preferences");
-        dialog.setHeaderText("User Interface Settings");
-
-        configurationPanel.refreshAllComponents();
-
-        VBox uiSection = configurationPanel.createUISection();
-
-        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
-        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
-        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
-
-        ScrollPane scrollPane = new ScrollPane(uiSection);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setPrefHeight(150);
-        dialog.getDialogPane().setContent(scrollPane);
-
-        applyFontSizeToDialog(dialog, prefManager.getFontSize());
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        dialog.showAndWait().ifPresent(result -> {
-            if (result == applyButton) {
-                configurationPanel.savePreferences();
-                double newFontSize = prefManager.getFontSize();
-                applyFontSize(newFontSize);
-                log("✅ UI preferences updated - Font size: " + (int)newFontSize + "px");
-            }
-        });
-    }
-
-    private void applyFontSizeToDialog(Dialog<?> dialog, double size) {
-        Platform.runLater(() -> {
-            try {
-                String style = String.format("-fx-font-size: %spx;", (int) size);
-                dialog.getDialogPane().setStyle(style);
-            } catch (Exception e) {
-                LOGGER.warn("Failed to apply font size to dialog", e);
-            }
-        });
-    }
-
-    private void showBatchSettingsDialog() {
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Batch Processing Settings");
-        dialog.setHeaderText("Configure batch processing behavior");
-
-        configurationPanel.refreshAllComponents();
-
-        VBox batchSection = configurationPanel.createBatchSection();
-
-        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
-        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
-        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
-
-        ScrollPane scrollPane = new ScrollPane(batchSection);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setPrefHeight(120);
-        dialog.getDialogPane().setContent(scrollPane);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        dialog.showAndWait().ifPresent(result -> {
-            if (result == applyButton) {
-                configurationPanel.savePreferences();
-                log("✅ Batch processing settings updated");
-            }
-        });
-    }
-
-    private void showWhisperSettingsDialog() {
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Transcription Settings");
-        dialog.setHeaderText("Configure Whisper transcription parameters");
-
-        configurationPanel.refreshAllComponents();
-
-        VBox whisperSection = configurationPanel.createWhisperSection();
-
-        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
-        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
-        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
-
-        ScrollPane scrollPane = new ScrollPane(whisperSection);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setPrefHeight(200);
-        dialog.getDialogPane().setContent(scrollPane);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        dialog.showAndWait().ifPresent(result -> {
-            if (result == applyButton) {
-                configurationPanel.savePreferences();
-                log("✅ Transcription settings updated");
-            }
-        });
-    }
-    
-    private void showAudioSettingsDialog() {
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Audio Processing Settings");
-        dialog.setHeaderText("Configure FFmpeg audio processing parameters");
-
-        configurationPanel.refreshAllComponents();
-
-        VBox audioSection = configurationPanel.createAudioSection();
-
-        ButtonType applyButton = new ButtonType("Apply", ButtonBar.ButtonData.APPLY);
-        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
-        dialog.getDialogPane().getButtonTypes().addAll(applyButton, cancelButton);
-
-        ScrollPane scrollPane = new ScrollPane(audioSection);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setPrefHeight(300);
-        dialog.getDialogPane().setContent(scrollPane);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        
-        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-
-        dialog.showAndWait().ifPresent(result -> {
-            if (result == applyButton) {
-                configurationPanel.savePreferences();
-                log("✅ Audio processing settings updated");
-            }
-        });
-    }
-    
-    private void showAboutDialog() {
-        Alert alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("About Studio Audio Manager");
-        alert.setHeaderText("Studio Audio Manager v3.9");
-        alert.setContentText("""
-                             A comprehensive audio processing tool with transcription capabilities.
-                             
-                             Features:
-                             \u2022 Batch audio file processing
-                             \u2022 Whisper transcription integration
-                             \u2022 Audio splitting and combining tools
-                             \u2022 Real-time progress tracking
-                             \u2022 Volume analysis and optimization
-                             
-                             Built with JavaFX and FFmpeg""");
-                ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
-        alert.showAndWait();
     }
 
     /**
@@ -1298,49 +1105,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
 
         dialog.showAndWait();
     }
-
-    /**
-     * Build and show an error alert that recognizes {@link FfmpegException}
-     * specifically: uses its user-friendly message plus (if recognized) a
-     * specific hint for its exit code, with the raw stderr tail tucked into
-     * an expandable "Show Details" section rather than dumped straight into
-     * the main dialog text. Falls back to a generic message for any other
-     * exception type. Previously this logic was duplicated between the
-     * volume-analysis and amplification error handlers with no exit-code
-     * hint or stderr detail at all — just {@code getUserMessage()}.
-     */
-    /**
-     * Shown once, on first launch only (gated on a persisted preference),
-     * before the main window appears. Deliberately factual rather than
-     * generic boilerplate — every claim below is traceable to a specific
-     * code path in this app, not a template disclosure copied from
-     * somewhere else:
-     *
-     * <ul>
-     *   <li>Audio processing (ffmpeg) and transcription (WhisperX) run
-     *       entirely locally — via the bundled runtime when packaged, or
-     *       whatever's on the system PATH otherwise. Nothing about the
-     *       audio file itself is ever sent anywhere for these two steps.</li>
-     *   <li>Speaker diarization is opt-in (requires the user to supply
-     *       their own HuggingFace token in Preferences) and sends audio
-     *       segments to HuggingFace's pyannote models when enabled.</li>
-     *   <li>Translation is opt-in and self-directed — nothing is sent
-     *       anywhere unless the user configures a LibreTranslate-compatible
-     *       endpoint themselves; the app has no built-in translation
-     *       provider of its own.</li>
-     *   <li>The REST API (also opt-in, off by default) binds to localhost
-     *       only — see {@code RestApiServer}'s own scope comment.</li>
-     * </ul>
-     */
-    /**
-     * Bump this whenever the disclosure text materially changes (a new
-     * network-relevant behavior added or an existing one's description
-     * changes) — ties the acknowledgment to content actually seen, so an
-     * old dismissal doesn't silently suppress a materially different new
-     * version forever. Was 1 (implicit) when this only covered outbound
-     * sending; bumped to 2 to add the alignment-model download note.
-     */
-    private static final int PRIVACY_DISCLOSURE_VERSION = 2;
 
     private void showPrivacyDisclosureIfNeeded() {
         if (prefManager.getInt("privacy_disclosure_acknowledged_version", 0) >= PRIVACY_DISCLOSURE_VERSION) {
@@ -1600,7 +1364,10 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
                 configurationPanel.savePreferences();
                 LOGGER.info("Configuration panel preferences saved");
             } catch (Exception e) {
-                LOGGER.error("Failed to save configuration panel preferences", e);
+                LOGGER.error("Failed to save application state", e);
+                if (errorReporter != null && errorReporter.isEnabled()) {
+                    errorReporter.reportError(e, "Save application state failed");
+                }
             }
         }
 
@@ -1734,6 +1501,9 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
             }
         } catch (Exception e) {
             LOGGER.error("Failed to restore batch queue state", e);
+            if (errorReporter != null && errorReporter.isEnabled()) {
+                errorReporter.reportError(e, "Restore batch queue state failed");
+            }
         }
     }
 
@@ -2285,6 +2055,16 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         alert.showAndWait();
     }
 
+    /**
+     * Format file size for display.
+     */
+    private String formatFileSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+        return String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
     // FIX (consolidation): cancelAnyRunningBatch() is gone —
     // BatchProcessor.cancel() now handles cancelling its internal
     // parallelManager itself (including running that off a background
@@ -2354,10 +2134,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
         LogLevel(String prefix) { this.prefix = prefix; }
     }
 
-    /** Emoji/pictographic characters stripped from the plain-text logger line. */
-    private static final java.util.regex.Pattern EMOJI_PATTERN =
-            java.util.regex.Pattern.compile("[\\x{1F300}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{2190}-\\x{21FF}\\uFE0F]");
-
     /**
      * Log at INFO with no auto-derived styling. Call sites that already embed
      * their own emoji (the vast majority in this class) get exactly what they
@@ -2366,22 +2142,6 @@ public class MainWindow implements BatchProcessor.FileCompletionCallback {
     private void log(String message) {
         log(message, LogLevel.INFO);
     }
-
-    /**
-     * Maximum characters retained in the on-screen log area before older
-     * lines are trimmed from the front.
-     *
-     * <p>FIX: {@code logArea.appendText()} previously ran with no cap at
-     * all for the life of the session. Over a long batch with many retries
-     * (each retry re-logs several lines, and some call sites — like the
-     * WhisperX dependency check — used to also dump multi-kilobyte CLI
-     * output, see the separate fix in {@code WhisperXTranscriptionService}),
-     * this could accumulate into the megabytes of retained text sitting in
-     * a single JavaFX {@code TextArea}, contributing to JVM heap exhaustion
-     * on long-running batches. 500,000 characters (~500KB) keeps a
-     * generous scrollback while giving growth a ceiling.</p>
-     */
-    private static final int LOG_AREA_MAX_CHARS = 500_000;
 
     private void log(String message, LogLevel level) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));

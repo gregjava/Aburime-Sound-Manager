@@ -5,11 +5,8 @@
 package audiomanager.ui;
 
 import audiomanager.core.DependencyManager;
-import audiomanager.ui.ThemeManager;
 import audiomanager.model.BatchFileItem;
 import audiomanager.util.TimeLeftEstimator;
-import java.util.ArrayList;
-import java.util.List;
 import javafx.application.Platform;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
@@ -19,17 +16,14 @@ import javafx.scene.layout.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Control panel — status label, overall progress bar, time report grid,
  * and action buttons.
  */
 public class ControlPanel {
-
-    /** See FileSelectionPanel.setStyled() for why every setStyle() call in this class routes through here. */
-    private static void setStyled(javafx.scene.Node node, String style) {
-        node.setStyle(style);
-        ThemeManager.stripForCurrentTheme(node);
-    }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ControlPanel.class);
 
@@ -44,6 +38,8 @@ public class ControlPanel {
     private final Button processButton;
     private final Button clearLogButton;
     private final Button exitButton;
+    private final Button scheduleButton;
+    private final HBox buttonBox;
 
     private final Label fileTimeSpentLabel;
     private final Label fileTimeLeftLabel;
@@ -60,21 +56,23 @@ public class ControlPanel {
                         TimeLeftEstimator timeEstimator) {
         this.timeEstimator = timeEstimator;
 
-        statusLabel           = new Label("Ready");
-        detailedStatusLabel   = new Label("Run dependency check to begin");
-        resourceStatusLabel   = new Label("");
-        overallProgressBar    = new ProgressBar(0);
+        statusLabel = new Label("Ready");
+        detailedStatusLabel = new Label("Run dependency check to begin");
+        resourceStatusLabel = new Label("");
+        overallProgressBar = new ProgressBar(0);
         overallPercentageLabel = new Label("0%");
-        processButton         = new Button("🚀 Start Processing");
-        clearLogButton        = new Button("🧹 Clear Log");
-        exitButton            = new Button("🚪 Exit");
-        fileTimeSpentLabel    = new Label("0s");
-        fileTimeLeftLabel     = new Label("N/A");
-        totalTimeSpentLabel   = new Label("0s");
-        totalTimeLeftLabel    = new Label("N/A");
-        dataStatusLabel       = new Label("Using default estimates");
-        individualProgressRows   = new VBox(4);
+        processButton = new Button("🚀 Start Processing");
+        clearLogButton = new Button("🧹 Clear Log");
+        exitButton = new Button("🚪 Exit");
+        scheduleButton = new Button("📅 Schedule");
+        fileTimeSpentLabel = new Label("0s");
+        fileTimeLeftLabel = new Label("N/A");
+        totalTimeSpentLabel = new Label("0s");
+        totalTimeLeftLabel = new Label("N/A");
+        dataStatusLabel = new Label("Using default estimates");
+        individualProgressRows = new VBox(4);
         individualProgressSection = buildIndividualProgressSection();
+        buttonBox = buildButtonBox(onProcessClick, onExitClick);
 
         this.root = buildUI(onProcessClick, onExitClick);
     }
@@ -86,7 +84,7 @@ public class ControlPanel {
 
         VBox statusBox = new VBox(8);
         setStyled(statusBox, "-fx-padding: 10; -fx-background-color: #f8f9fa; -fx-border-radius: 5;");
-        statusBox.getStyleClass().add("theme-fix-surface-alt");  // ← add
+        statusBox.getStyleClass().add("theme-fix-surface-alt");
 
         setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
         statusLabel.getStyleClass().setAll("panel-heading");
@@ -164,25 +162,25 @@ public class ControlPanel {
         grid.setVgap(8);
         grid.setPadding(new Insets(5, 0, 0, 0));
 
-        grid.add(titleLabel("File Time Spent:"),  0, 0);
-        grid.add(fileTimeSpentLabel,              1, 0);
-        grid.add(titleLabel("File Time Left:"),   2, 0);
-        grid.add(fileTimeLeftLabel,               3, 0);
+        grid.add(titleLabel("File Time Spent:"), 0, 0);
+        grid.add(fileTimeSpentLabel, 1, 0);
+        grid.add(titleLabel("File Time Left:"), 2, 0);
+        grid.add(fileTimeLeftLabel, 3, 0);
         grid.add(titleLabel("Total Time Spent:"), 4, 0);
-        grid.add(totalTimeSpentLabel,             5, 0);
-        grid.add(titleLabel("Total Time Left:"),  6, 0);
-        grid.add(totalTimeLeftLabel,              7, 0);
+        grid.add(totalTimeSpentLabel, 5, 0);
+        grid.add(titleLabel("Total Time Left:"), 6, 0);
+        grid.add(totalTimeLeftLabel, 7, 0);
 
-        setStyled(fileTimeSpentLabel,  "-fx-font-weight: bold; -fx-font-size: 11px;");
+        setStyled(fileTimeSpentLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
         fileTimeSpentLabel.getStyleClass().add("tool-subheading");
 
-        setStyled(fileTimeLeftLabel,   "-fx-font-weight: bold; -fx-font-size: 11px;");
+        setStyled(fileTimeLeftLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
         fileTimeLeftLabel.getStyleClass().add("status-negative");
 
         setStyled(totalTimeSpentLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
         totalTimeSpentLabel.getStyleClass().add("tool-subheading");
 
-        setStyled(totalTimeLeftLabel,  "-fx-font-weight: bold; -fx-font-size: 11px;");
+        setStyled(totalTimeLeftLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
         totalTimeLeftLabel.getStyleClass().add("status-negative");
 
         setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
@@ -204,11 +202,18 @@ public class ControlPanel {
         setStyled(clearLogButton, "");
         clearLogButton.getStyleClass().add("action-btn-clear-log");
 
+        setStyled(scheduleButton, "");
+        scheduleButton.getStyleClass().add("action-btn-schedule");
+        scheduleButton.setMinWidth(120);
+        scheduleButton.setTooltip(new Tooltip("Schedule batch to run later"));
+        // scheduleButton action is set externally via setScheduleAction()
+
         setStyled(exitButton, "");
         exitButton.getStyleClass().add("action-btn-exit");
         exitButton.setOnAction(e -> onExitClick.run());
 
-        box.getChildren().addAll(processButton, clearLogButton, exitButton);
+        box.getChildren().addAll(processButton, clearLogButton, scheduleButton, exitButton);
+
         return box;
     }
 
@@ -218,8 +223,13 @@ public class ControlPanel {
         return l;
     }
 
-    private void styleTimeValue(Label label, String color) {
-        setStyled(label, "-fx-font-weight: bold; -fx-text-fill: " + color + "; -fx-font-size: 11px;");
+    private void setStyled(javafx.scene.Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
+
+    public void setScheduleAction(Runnable action) {
+        scheduleButton.setOnAction(e -> action.run());
     }
 
     public void updateStatus(String main, String detail) {
@@ -276,8 +286,25 @@ public class ControlPanel {
         batchStartTimeMs = System.currentTimeMillis();
     }
 
-    public Button getClearLogButton() { return clearLogButton; }
-    public VBox   getRoot()           { return root; }
+    public Button getClearLogButton() {
+        return clearLogButton;
+    }
+
+    public Button getExitButton() {
+        return exitButton;
+    }
+
+    public Button getScheduleButton() {
+        return scheduleButton;
+    }
+
+    public VBox getRoot() {
+        return root;
+    }
+
+    public HBox getButtonBox() {
+        return buttonBox;
+    }
 
     public void updateDependencyStatus(DependencyManager.DependencyStatus ffmpegStatus,
                                        DependencyManager.DependencyStatus whisperStatus) {
@@ -293,7 +320,7 @@ public class ControlPanel {
             if (ffmpegStatus.isAvailable()) {
                 statusLabel.setText("Ready to Process");
                 setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
-                statusLabel.getStyleClass().setAll("status-success");   // new class, see CSS below
+                statusLabel.getStyleClass().setAll("status-success");
             } else {
                 statusLabel.setText("FFmpeg Missing");
                 setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
@@ -306,21 +333,6 @@ public class ControlPanel {
         });
     }
 
-    /**
-     * FIX: previously this derived completed/failed/total AND the overall
-     * percentage purely by scanning {@code items} — {@code total =
-     * items.size()}, {@code completed}/{@code failed} counted by scanning
-     * current statuses. That's correct only if {@code items} never shrinks.
-     * But the caller (MainWindow) auto-removes COMPLETED items from that
-     * same list moments after each one finishes — so on every tick after
-     * the first, completed files simply aren't there to be counted anymore,
-     * and both the "done" count AND the total (hence "pending") silently
-     * went wrong together. PROCESSING items are never auto-removed, so
-     * deriving the live "currently processing" rows and their partial
-     * progress from {@code items} is still safe and kept; completed/failed/
-     * total now come from the caller's own cumulative, removal-proof
-     * counters instead of being re-derived here.
-     */
     public void updateProgress(ObservableList<BatchFileItem> items,
                                 int cumulativeCompleted, int cumulativeFailed, int cumulativeTotal) {
         Platform.runLater(() -> {
@@ -343,13 +355,6 @@ public class ControlPanel {
                 }
             }
 
-            // Completed and failed files are both "done being worked on" —
-            // each counts as a full 1.0 toward overall completion, same as
-            // the old code did for completed (failed previously counted its
-            // last partial progress instead of 1.0; since a failed file
-            // won't be retried automatically, treating it as fully resolved
-            // here is more representative of "how much of the batch is
-            // finished, successfully or not").
             double overall = Math.min(1.0,
                     (cumulativeCompleted + cumulativeFailed + processingWeighted) / (double) cumulativeTotal);
             overallProgressBar.setProgress(overall);
@@ -371,7 +376,7 @@ public class ControlPanel {
     public void updateProgress(int completed, int failed, int total) {
         Platform.runLater(() -> {
             if (total > 0) {
-                double progress = (double)(completed + failed) / total;
+                double progress = (double) (completed + failed) / total;
                 overallProgressBar.setProgress(progress);
                 overallPercentageLabel.setText(String.format("%.0f%%", progress * 100));
             } else {
@@ -386,11 +391,11 @@ public class ControlPanel {
         if (timeEstimator == null) return;
 
         Platform.runLater(() -> {
-            long fileSpent  = timeEstimator.getCurrentFileTimeSpent();
+            long fileSpent = timeEstimator.getCurrentFileTimeSpent();
             long totalSpent = timeEstimator.getTotalTimeSpent();
 
-            long fileLeft   = timeEstimator.getLiveCurrentFileTimeLeftMs();
-            long totalLeft  = timeEstimator.getLiveTotalTimeLeftMs();
+            long fileLeft = timeEstimator.getLiveCurrentFileTimeLeftMs();
+            long totalLeft = timeEstimator.getLiveTotalTimeLeftMs();
 
             LOGGER.debug("Time estimates — fileSpent={}, fileLeft={}, totalSpent={}, totalLeft={}",
                     fileSpent, fileLeft, totalSpent, totalLeft);

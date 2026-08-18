@@ -33,11 +33,12 @@ public class AudioProcessor {
 
     /** Cached FFmpeg major version (lazy-initialised once, then reused). */
     private volatile int cachedFfmpegMajor = -1;
-
     private final DependencyManager dependencyManager;
+    private ErrorReporter errorReporter;
 
-    public AudioProcessor(DependencyManager dependencyManager) {
+    public AudioProcessor(DependencyManager dependencyManager, ErrorReporter errorReporter) {
         this.dependencyManager = dependencyManager;
+        this.errorReporter = errorReporter;
     }
 
     // =========================================================================
@@ -212,16 +213,19 @@ public class AudioProcessor {
                 "-f", "null", "-"
         );
         StringBuilder output = new StringBuilder();
-        int exitCode;
+        int exitCode = 0;
         try {
             exitCode = ProcessRunner.runCommand(command, 30, TimeUnit.SECONDS,
                     line -> output.append(line).append("\n"), null);
         } catch (Exception e) {
+            if (errorReporter != null && errorReporter.isEnabled()) {
+                errorReporter.reportError(e, "Volume analysis: " + audioFilePath);
+            }
             throw new FfmpegException(
-                "Failed to run ffmpeg volumedetect on " + audioFilePath,
-                "Couldn't analyze the volume of '" + inputFile.getName() + "'. " +
-                "The file may be corrupt or in an unsupported format.",
-                e);
+                        "Failed to run ffmpeg volumedetect on " + audioFilePath,
+                        "Couldn't analyze the volume of '" + inputFile.getName() + "'. " +
+                        "The file may be corrupt or in an unsupported format.",
+                        e);
         }
         if (exitCode != 0) {
             throw new FfmpegException(
@@ -260,10 +264,13 @@ public class AudioProcessor {
             exitCode = ProcessRunner.runCommand(command, 60, TimeUnit.SECONDS,
                     line -> { LOGGER.debug("FFmpeg: {}", line); output.append(line).append("\n"); }, null);
         } catch (Exception e) {
+            if (errorReporter != null && errorReporter.isEnabled()) {
+                errorReporter.reportError(e, "Audio amplification: " + inputFilePath);
+            }
             throw new FfmpegException(
-                "Failed to run ffmpeg amplification on " + inputFilePath,
-                "Couldn't amplify '" + fileName + "'. The file may be corrupt or in an unsupported format.",
-                e);
+                    "Failed to run ffmpeg amplification on " + inputFilePath,
+                    "Couldn't amplify '" + fileName + "'. The file may be corrupt or in an unsupported format.",
+                    e);
         }
         if (exitCode != 0) {
             throw new FfmpegException(
@@ -499,7 +506,10 @@ public class AudioProcessor {
             if (callback != null) callback.updateProgress(1.0);
 
         } catch (InterruptedException e) {
-            interrupted = true;   // remember for finally block
+            interrupted = true;
+            if (errorReporter != null && errorReporter.isEnabled()) {
+                errorReporter.reportError(e, "FFmpeg execution interrupted: " + String.join(" ", command));
+            }
             throw e;
         } finally {
             if (process != null && process.isAlive()) {

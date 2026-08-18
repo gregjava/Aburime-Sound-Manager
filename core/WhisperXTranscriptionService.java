@@ -18,6 +18,10 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -83,6 +87,12 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
     private static final java.util.regex.Pattern STAGE_TIMING_PATTERN =
             java.util.regex.Pattern.compile("STAGE_TIMING:([a-zA-Z_]+):(-?[0-9.]+)");
+    private static final String ALIGNMENT_MODEL_URL = 
+        "https://download.pytorch.org/torchaudio/models/wav2vec2_fairseq_base_ls960_asr_ls960.pth";
+    private static final long ALIGNMENT_MODEL_MIN_SIZE = 300_000_000L; // 300 MB minimum
+    private static final String ALIGNMENT_MODEL_FILENAME = 
+        "wav2vec2_fairseq_base_ls960_asr_ls960.pth";
+    private ErrorReporter errorReporter;
 
     private void parseStageTimingLine(String line) {
         java.util.regex.Matcher m = STAGE_TIMING_PATTERN.matcher(line);
@@ -139,18 +149,21 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     //  Constructors
     // -------------------------------------------------------------------------
 
-    public WhisperXTranscriptionService(DependencyManager dependencyManager) {
-        this(dependencyManager, null);
+    public WhisperXTranscriptionService(DependencyManager dependencyManager, 
+                          ErrorReporter errorReporter) {
+        this(dependencyManager, null, errorReporter);
     }
 
     public WhisperXTranscriptionService(DependencyManager dependencyManager,
-                                        TimeLeftEstimator timeEstimator) {
-        this(dependencyManager, timeEstimator, null);
+                                        TimeLeftEstimator timeEstimator, 
+                          ErrorReporter errorReporter) {
+        this(dependencyManager, timeEstimator, null,  errorReporter);
     }
 
     public WhisperXTranscriptionService(DependencyManager dependencyManager,
                                         TimeLeftEstimator timeEstimator,
-                                        SegmentProgressListener listener) {
+                                        SegmentProgressListener listener, 
+                          ErrorReporter errorReporter) {
         this.dependencyManager = dependencyManager;
         this.timeEstimator     = timeEstimator;
         this.gson              = new Gson();
@@ -239,6 +252,170 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
         return null;
     }
+    
+    /**
+     * Ensures the alignment model is available before alignment is attempted.
+     * Downloads it on first use with progress reporting.
+     * 
+     * <p>The alignment model (~360MB) is required for precise timestamp alignment
+     * and speaker diarization. It's downloaded from PyTorch's official repository
+     * and cached in ~/.cache/torch/hub/checkpoints/</p>
+     * 
+     * <p>This method is called automatically when alignment or diarization is enabled.
+     * It will download the model with progress reporting if not already present.</p>
+     * 
+     * @param progressCallback callback for download progress updates, may be null
+     * @throws Exception if download fails or the model is corrupted
+     */
+    private void ensureAlignmentModelAvailable(AudioProcessor.ProgressCallback progressCallback) 
+            throws Exception {
+
+        // Determine the model path based on OS
+        Path modelPath = getAlignmentModelPath();
+
+        // Check if model already exists and is valid
+        if (Files.exists(modelPath) && Files.size(modelPath) >= ALIGNMENT_MODEL_MIN_SIZE) {
+            LOGGER.info("Alignment model found at: {} ({} MB)", 
+                modelPath, Files.size(modelPath) / (1024 * 1024));
+            return;
+        }
+
+        // Check if there's a partial/incomplete file
+        if (Files.exists(modelPath)) {
+            long currentSize = Files.size(modelPath);
+            LOGGER.warn("Alignment model exists but is incomplete: {} bytes (expected > {} bytes)",
+                currentSize, ALIGNMENT_MODEL_MIN_SIZE);
+            Files.deleteIfExists(modelPath);
+            LOGGER.info("Removed incomplete alignment model, will re-download");
+        }
+
+        // Create parent directories
+        Files.createDirectories(modelPath.getParent());
+
+        LOGGER.info("Alignment model not found. Downloading from: {}", ALIGNMENT_MODEL_URL);
+
+        // Notify progress start
+        if (progressCallback != null) {
+            progressCallback.updateProgress(0.0);
+        }
+
+        // Download with progress tracking
+        long downloadedBytes = 0;
+        long totalBytes = -1;
+
+        try {
+            URL url = new URL(ALIGNMENT_MODEL_URL);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestProperty("User-Agent", "AudioManager/2.0");
+            conn.setConnectTimeout(30000); // 30 second timeout
+            conn.setReadTimeout(60000);    // 60 second read timeout
+            conn.connect();
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP error: " + responseCode + " - " + conn.getResponseMessage());
+            }
+
+            totalBytes = conn.getContentLengthLong();
+            if (totalBytes <= 0) {
+                LOGGER.warn("Content length unknown, using fallback size check");
+            }
+
+            // Download the file
+            try (InputStream in = conn.getInputStream();
+                 FileOutputStream out = new FileOutputStream(modelPath.toFile())) {
+
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                double lastProgressUpdate = 0;
+
+                while ((bytesRead = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, bytesRead);
+                    downloadedBytes += bytesRead;
+
+                    // Update progress at most every 1% or 100ms
+                    if (progressCallback != null && totalBytes > 0) {
+                        double progress = (double) downloadedBytes / totalBytes;
+                        if (progress - lastProgressUpdate > 0.01 || progress >= 1.0) {
+                            lastProgressUpdate = progress;
+                            // Reserve 90% for download, 10% for verification
+                            progressCallback.updateProgress(progress * 0.9);
+                        }
+                    }
+                }
+            }
+
+            // Verify download
+            long actualSize = Files.size(modelPath);
+            if (actualSize < ALIGNMENT_MODEL_MIN_SIZE) {
+                throw new IOException(String.format(
+                    "Downloaded file is too small: %d bytes (expected > %d bytes)",
+                    actualSize, ALIGNMENT_MODEL_MIN_SIZE));
+            }
+
+            LOGGER.info("Alignment model downloaded successfully: {} MB", 
+                actualSize / (1024 * 1024));
+
+            if (progressCallback != null) {
+                progressCallback.updateProgress(1.0);
+            }
+
+        } catch (Exception e) {
+            // Clean up partial download
+            try {
+                Files.deleteIfExists(modelPath);
+            } catch (IOException cleanupEx) {
+                LOGGER.warn("Failed to clean up partial download: {}", cleanupEx.getMessage());
+            }
+
+            LOGGER.error("Failed to download alignment model", e);
+            throw new Exception("Failed to download alignment model: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Creates a progress callback that maps alignment model download progress
+     * to the overall transcription progress.
+     * 
+     * @param parentCallback the main progress callback
+     * @param weight the weight of alignment progress in the overall progress (0.0 to 1.0)
+     * @return a wrapped callback, or null if parentCallback is null
+     */
+    private AudioProcessor.ProgressCallback wrapAlignmentProgress(
+            AudioProcessor.ProgressCallback parentCallback, double weight) {
+        if (parentCallback == null) return null;
+        return p -> parentCallback.updateProgress(Math.min(1.0, p * weight));
+    }
+
+    /**
+     * Gets the platform-appropriate path for the alignment model.
+     * 
+     * @return Path where the alignment model should be stored
+     */
+    private Path getAlignmentModelPath() {
+        String os = System.getProperty("os.name").toLowerCase();
+        Path basePath;
+
+        if (os.contains("win")) {
+            // Windows: %APPDATA%/.cache/torch/hub/checkpoints/
+            String appData = System.getenv("APPDATA");
+            if (appData != null && !appData.isBlank()) {
+                basePath = Paths.get(appData, ".cache", "torch", "hub", "checkpoints");
+            } else {
+                basePath = Paths.get(System.getProperty("user.home"), ".cache", "torch", "hub", "checkpoints");
+            }
+        } else if (os.contains("mac")) {
+            // macOS: ~/Library/Caches/torch/hub/checkpoints/
+            basePath = Paths.get(System.getProperty("user.home"), 
+                "Library", "Caches", "torch", "hub", "checkpoints");
+        } else {
+            // Linux/Unix: ~/.cache/torch/hub/checkpoints/
+            basePath = Paths.get(System.getProperty("user.home"), 
+                ".cache", "torch", "hub", "checkpoints");
+        }
+
+        return basePath.resolve(ALIGNMENT_MODEL_FILENAME);
+    }
 
     // -------------------------------------------------------------------------
     //  Python interpreter resolution
@@ -269,7 +446,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     // FIX: package-private (was private) so DependencyManager can reuse this exact
     // resolution logic for its "can WhisperX's Python see FFmpeg?" check — avoids
     // duplicating/drifting the venv-interpreter-detection logic in two places.
-    static String resolvePythonExecutable() {
+    public static String resolvePythonExecutable() {
         final boolean isWindows =
                 System.getProperty("os.name", "").toLowerCase().contains("win");
 
@@ -529,17 +706,34 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         // HuggingFace folder; the actual folder is "faster-whisper-large-v2".
         String model = normaliseModelName(config.getModel());
 
+        // FIX: Ensure alignment model is available if diarization is enabled
+        // Alignment is implied by diarization - no separate isAlignmentEnabled() method exists
+        if (config.isDiarizeEnabled()) {
+            LOGGER.info("Diarization enabled - ensuring alignment model is available");
+            try {
+                AudioProcessor.ProgressCallback alignmentProgress = 
+                    wrapAlignmentProgress(progressCallback, 0.05);
+                ensureAlignmentModelAvailable(alignmentProgress);
+                LOGGER.info("Alignment model is ready");
+            } catch (Exception e) {
+                LOGGER.warn("Failed to ensure alignment model: {}", e.getMessage());
+                LOGGER.warn("Diarization will be disabled for this transcription");
+                // Create a fallback config with diarization disabled
+                config = createFallbackConfig(config);
+            }
+        }
+
         // Delegate to SegmentProcessor for large models unless segmentation is suppressed.
         if (model.contains("large") && !config.isSkipSegmentation()) {
             LOGGER.info("Using segmentation for large model: {}", model);
             SegmentProcessor processor = new SegmentProcessor(
-                    this, dependencyManager, timeEstimator, segmentListener);
+                    this, dependencyManager, timeEstimator, segmentListener, errorReporter);  // ADD errorReporter
             return processor.processWithSegments(audioFilePath, config, progressCallback, audioDuration);
         }
 
         showModelCacheStatus();
 
-        // whisperxModel is now the same normalised value — no second conversion needed.
+        // whisperxModel is now the ame normalised value — no second conversion needed.
         String whisperxModel = model;
 
         try {
@@ -704,52 +898,59 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     // -------------------------------------------------------------------------
 
     /**
-     * Calculate a process timeout proportional to the audio length, with a
-     * minimum of 5 minutes plus 10-minute overhead for model loading.
-     *
-     * <p>FIX: original code enforced a minimum of 1 hour (3 600 s) regardless
-     * of clip length, causing the application to appear frozen for short test
-     * files when WhisperX hung.  The new minimum is 5 minutes plus overhead,
-     * which is still generous for small clips.</p>
-     */
-    private int calculateTimeout(double audioDuration, String model) {
-        if (!useGPU && (model.contains("large") || model.equals("large-v2") || model.equals("large-v3"))) {
-            // Large model on CPU: allow up to 4 hours per segment
-            return 4 * 3600; // 14400 seconds
-        }
-        
-        double factor;
-        switch (model.toLowerCase()) {
-            case "tiny"     -> factor = 10.0;  // increased from 1.0
-            case "base"     -> factor = 15.0;  // increased from 1.5
-            case "small"    -> factor = 25.0;  // increased from 2.5
-            case "medium"   -> factor = 40.0; // increased from 4.0
-            case "large"    -> factor = 60.0; // increased from 6.0
-            case "large-v2" -> factor = 60.0;
-            case "large-v3" -> factor = 72.0;
-            default         -> factor = 15.0;
-        }
+    * Calculate a process timeout proportional to the audio length, with a
+    * minimum of 5 minutes plus 10-minute overhead for model loading.
+    *
+    * <p>FIX: original code enforced a minimum of 1 hour (3 600 s) regardless
+    * of clip length, causing the application to appear frozen for short test
+    * files when WhisperX hung.  The new minimum is 5 minutes plus overhead,
+    * which is still generous for small clips.</p>
+    */
+   private int calculateTimeout(double audioDuration, String model) {
+       if (!useGPU && (model.contains("large") || model.equals("large-v2") || model.equals("large-v3"))) {
+           // Large model on CPU: allow up to 4 hours per segment
+           return 4 * 3600; // 14400 seconds
+       }
 
-        // Check if running on CPU (no GPU)
-        if (!useGPU) {
-            factor = factor * 2.5;  // CPU is much slower
-        }
+       double factor;
+       switch (model.toLowerCase()) {
+           case "tiny"     -> factor = 10.0;  // increased from 1.0
+           case "base"     -> factor = 15.0;  // increased from 1.5
+           case "small"    -> factor = 25.0;  // increased from 2.5
+           case "medium"   -> factor = 40.0; // increased from 4.0
+           case "large"    -> factor = 60.0; // increased from 6.0
+           case "large-v2" -> factor = 60.0;
+           case "large-v3" -> factor = 72.0;
+           default         -> factor = 15.0;
+       }
 
-        // Proportional estimate + 10-minute overhead for model loading
-        long estimated  = (long) (audioDuration * factor);
-        long overhead   = 10 * 60L;                 // 10 minutes
-        long timeout    = estimated + overhead;
+       // Check if running on CPU (no GPU)
+       if (!useGPU) {
+           factor = factor * 2.5;  // CPU is much slower
+       }
 
-        // FIX: minimum is now 5 minutes (300 s) + overhead, NOT 1 hour.
-        long minimum    = 5 * 60L + overhead;        // 5 min + 10 min = 15 min
-        timeout         = Math.max(timeout, minimum);
+       // Proportional estimate + 10-minute overhead for model loading
+       long estimated  = (long) (audioDuration * factor);
+       long overhead   = 10 * 60L;                 // 10 minutes
+       long timeout    = estimated + overhead;
 
-        // Cap at 48 hours to avoid absurd waits
-        timeout         = Math.min(timeout, 48 * 3600L);
+       // FIX: minimum is now 5 minutes (300 s) + overhead, NOT 1 hour.
+       long minimum    = 5 * 60L + overhead;        // 5 min + 10 min = 15 min
+       timeout         = Math.max(timeout, minimum);
 
-        LOGGER.info("Timeout for model={} audioDuration={}s → {}s", model, audioDuration, timeout);
-        return (int) timeout;
-    }
+       // Cap at 48 hours to avoid absurd waits
+       timeout         = Math.min(timeout, 48 * 3600L);
+
+       LOGGER.info("Timeout for model={} audioDuration={}s → {}s", model, audioDuration, timeout);
+
+       // FIX: Prevent lossy conversion from long to int
+       // If timeout exceeds Integer.MAX_VALUE (~24.8 days), cap it safely
+       if (timeout > Integer.MAX_VALUE) {
+           LOGGER.warn("Timeout value {} exceeds integer max, capping at {}", timeout, Integer.MAX_VALUE);
+           timeout = Integer.MAX_VALUE;
+       }
+       return (int) timeout;
+   }
 
     // -------------------------------------------------------------------------
     //  Core transcription (delegates to submethod for testability)
@@ -1487,4 +1688,38 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         if (bytes < 1_073_741_824) return String.format("%.1f MB", bytes / 1_048_576.0);
         return String.format("%.2f GB", bytes / 1_073_741_824.0);
     }
+
+    /**
+    * Creates a fallback config with diarization disabled.
+    * 
+    * <p>This is used when the alignment model cannot be downloaded or verified.
+    * Diarization is disabled because it requires the alignment model to work properly.
+    * All other settings from the original config are preserved.</p>
+    * 
+    * @param original the original configuration to clone
+    * @return a new configuration with diarization disabled
+    */
+   private TranscriptionConfig createFallbackConfig(TranscriptionConfig original) {
+       return TranscriptionConfig.builder()
+           .model(original.getModel())
+           .language(original.getLanguage())
+           .timestampsEnabled(original.isTimestampsEnabled())
+           .confidenceEnabled(original.isConfidenceEnabled())
+           .outputFormat(original.getOutputFormat())
+           .volumeBoost(original.getVolumeBoost())
+           .silenceThreshold(original.getSilenceThreshold())
+           .silenceDuration(original.getSilenceDuration())
+           .noiseReduction(original.isNoiseReduction())
+           .srtMaxChars(original.getSrtMaxChars())
+           .srtMaxLines(original.getSrtMaxLines())
+           // Disable diarization (which also disables the alignment requirement)
+           .diarizeEnabled(false)
+           .hfToken(original.getHfToken())
+           .maxSegmentDuration(original.getMaxSegmentDuration())
+           .enabled(original.isEnabled())
+           .skipSegmentation(original.isSkipSegmentation())
+           // NOTE: alignmentEnabled field does NOT exist in TranscriptionConfig
+           // Alignment is controlled implicitly by diarizeEnabled
+           .build();
+   }
 }

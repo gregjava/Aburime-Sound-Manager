@@ -64,6 +64,7 @@ public class SegmentProcessor {
     private final Gson gson;
     private final TimeLeftEstimator timeEstimator;
     private final SegmentProgressListener segmentListener;
+    private ErrorReporter errorReporter = null;
 
     private Path workDir;
 
@@ -89,11 +90,12 @@ public class SegmentProcessor {
     public SegmentProcessor(WhisperXTranscriptionService transcriptionService,
                             DependencyManager dependencyManager,
                             TimeLeftEstimator timeEstimator,
-                            SegmentProgressListener listener) {
+                            SegmentProgressListener listener, ErrorReporter errorReporter) {
         this.transcriptionService = transcriptionService;
         this.dependencyManager    = dependencyManager;
         this.timeEstimator        = timeEstimator;
         this.segmentListener      = listener;
+        this.errorReporter = errorReporter;
         this.gson                 = new Gson();
 
         // Best-effort orphan sweep on first construction in this JVM session
@@ -101,6 +103,10 @@ public class SegmentProcessor {
             orphanSweepDone = true;
             sweepOrphanedWorkDirs();
         }
+    }
+
+    SegmentProcessor(WhisperXTranscriptionService transcriptionService, DependencyManager dependencyManager, TimeLeftEstimator timeEstimator, Object object) {
+        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
     }
 
     /**
@@ -318,6 +324,9 @@ public class SegmentProcessor {
                 Thread.currentThread().interrupt();
                 throw ie;
             } catch (Exception e) {
+                if (errorReporter != null && errorReporter.isEnabled()) {
+                    errorReporter.reportError(e, "Segment transcription: " + segment + " (attempt " + retryCount + ")");
+                }
                 retryCount++;
                 if (retryCount >= MAX_RETRIES) {
                     LOGGER.error("Segment {}/{} failed after {} attempts: {}",

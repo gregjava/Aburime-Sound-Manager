@@ -4,8 +4,8 @@
  */
 package audiomanager.core;
 
-import audiomanager.constants.AppConstants;
 import audiomanager.model.*;
+import audiomanager.ui.ConfigurationPanel;
 import audiomanager.util.TimeLeftEstimator;
 import audiomanager.util.PreferenceManager;
 import javafx.application.Platform;
@@ -15,17 +15,12 @@ import javafx.collections.ObservableList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
-import java.lang.reflect.InvocationTargetException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import java.io.Reader;
@@ -64,11 +59,13 @@ public class BatchProcessor implements SegmentProgressListener {
     private static final Logger LOGGER = LoggerFactory.getLogger(BatchProcessor.class);
 
     private final AudioProcessor audioProcessor;
+    private ErrorReporter errorReporter;
     private final WhisperXTranscriptionService transcriptionService;
     private final TimeLeftEstimator timeEstimator;
     private final PreferenceManager preferenceManager;
     private final Consumer<String> logger;
     private final ParallelProcessingManager parallelManager;
+    private ConfigurationPanel configurationPanel;  // ADDED for ID3 tagging
 
     // FIX (consolidation): the standalone `executor` field is gone — it
     // backed the now-removed executeBatch()/processItem() sequential
@@ -133,8 +130,10 @@ public class BatchProcessor implements SegmentProgressListener {
                           WhisperXTranscriptionService transcriptionService,
                           TimeLeftEstimator timeEstimator,
                           Consumer<String> logger,
-                          ObservableList<BatchFileItem> items) {
-        this(audioProcessor, transcriptionService, timeEstimator, null, logger, null, items);
+                          ObservableList<BatchFileItem> items, 
+                          ErrorReporter errorReporter) {
+        this(audioProcessor, transcriptionService, timeEstimator, null, logger, null, items, errorReporter);
+        this.errorReporter = errorReporter;
     }
 
     public BatchProcessor(AudioProcessor audioProcessor,
@@ -143,7 +142,8 @@ public class BatchProcessor implements SegmentProgressListener {
                           PreferenceManager preferenceManager,
                           Consumer<String> logger,
                           FileCompletionCallback completionCallback,
-                          ObservableList<BatchFileItem> items) {
+                          ObservableList<BatchFileItem> items, 
+                          ErrorReporter errorReporter) {
         this.audioProcessor     = audioProcessor;
         this.parallelManager    = new ParallelProcessingManager(
                 audioProcessor, transcriptionService, logger, timeEstimator);
@@ -181,6 +181,14 @@ public class BatchProcessor implements SegmentProgressListener {
         } catch (IOException e) {
             LOGGER.error("Failed to create state directory", e);
         }
+        this.errorReporter = errorReporter;
+    }
+
+    /**
+     * Set the configuration panel reference so ID3 tagging status can be checked.
+     */
+    public void setConfigurationPanel(ConfigurationPanel configPanel) {
+        this.configurationPanel = configPanel;
     }
 
     // -------------------------------------------------------------------------
