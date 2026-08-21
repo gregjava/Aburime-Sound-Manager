@@ -8,9 +8,17 @@ public final class AppConstants {
     private AppConstants() {} // Prevent instantiation
     
     // Application Info
-    public static final String APP_TITLE = "Aburime Sound Manager v3.9";
-    public static final String APP_SUBTITLE = "Convert, Clean & Split Audio";
-    public static final String VERSION = "0.3.9";
+    public static final String APP_TITLE = "Aburime Sound Manager";
+    public static final String APP_SUBTITLE = "Professional Audio Transcription & Processing";
+    public static final String APP_VERSION = "4.0.0";  // Change from 3.9
+    public static final int APP_VERSION_MAJOR = 4;
+    public static final int APP_VERSION_MINOR = 0;
+    public static final int APP_VERSION_PATCH = 0;
+    public static final String APP_VERSION_CODENAME = "Phoenix";  // Optional
+    
+    // Version history URL for update checks
+    public static final String APP_WEBSITE = "https://poseidon.org.uk/aburimesoundmanager.app";
+    public static final String APP_RELEASE_NOTES = "https://poseidon.org.uk/aburimesoundmanager.app/release-notes/4.0.0";
     
     // File Constraints
     //

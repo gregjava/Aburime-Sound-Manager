@@ -4,13 +4,16 @@
  */
 package audiomanager.ui;
 
+import audiomanager.constants.AppConstants;
 import audiomanager.core.DependencyManager;
+import audiomanager.core.LicenseManager;
 import audiomanager.model.BatchFileItem;
 import audiomanager.util.TimeLeftEstimator;
 import javafx.application.Platform;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import org.slf4j.Logger;
@@ -18,18 +21,24 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Control panel — status label, overall progress bar, time report grid,
- * and action buttons.
+ * Control panel with AppState binding.
+ * 
+ * <p>All button disable states are controlled via AppState bindings
+ * to avoid the "A bound value cannot be set" error.</p>
  */
 public class ControlPanel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ControlPanel.class);
 
+    // ===== UI Components =====
     private final VBox root;
+    private final AppState appState;
     private final TimeLeftEstimator timeEstimator;
 
+    private final Label versionLabel;
     private final Label statusLabel;
     private final Label detailedStatusLabel;
     private final Label resourceStatusLabel;
@@ -50,32 +59,57 @@ public class ControlPanel {
     private final VBox individualProgressSection;
     private final VBox individualProgressRows;
 
+    private final Label licenseStatusLabel;
+
+    // ===== State =====
     private long batchStartTimeMs = 0L;
 
-    public ControlPanel(Runnable onProcessClick, Runnable onExitClick,
+    // ========================================================================
+    //  Construction
+    // ========================================================================
+
+    public ControlPanel(AppState appState, Runnable onProcessClick, Runnable onExitClick,
                         TimeLeftEstimator timeEstimator) {
+        this.appState = appState;
         this.timeEstimator = timeEstimator;
 
-        statusLabel = new Label("Ready");
-        detailedStatusLabel = new Label("Run dependency check to begin");
-        resourceStatusLabel = new Label("");
-        overallProgressBar = new ProgressBar(0);
-        overallPercentageLabel = new Label("0%");
-        processButton = new Button("🚀 Start Processing");
-        clearLogButton = new Button("🧹 Clear Log");
-        exitButton = new Button("🚪 Exit");
-        scheduleButton = new Button("📅 Schedule");
-        fileTimeSpentLabel = new Label("0s");
-        fileTimeLeftLabel = new Label("N/A");
-        totalTimeSpentLabel = new Label("0s");
-        totalTimeLeftLabel = new Label("N/A");
-        dataStatusLabel = new Label("Using default estimates");
-        individualProgressRows = new VBox(4);
-        individualProgressSection = buildIndividualProgressSection();
-        buttonBox = buildButtonBox(onProcessClick, onExitClick);
+        this.versionLabel = new Label("v" + AppConstants.APP_VERSION);
+        setStyled(this.versionLabel, "-fx-font-size: 10px; -fx-text-fill: #95a5a6;");
+
+        LicenseManager license = LicenseManager.getInstance();
+        this.licenseStatusLabel = new Label(license.getLicenseStatusText());
+        setStyled(this.licenseStatusLabel,
+            license.isPro()
+                ? "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-weight: bold;"
+                : "-fx-font-size: 10px; -fx-text-fill: #ed6c02;");
+
+        this.statusLabel = new Label("Ready");
+        this.detailedStatusLabel = new Label("Run dependency check to begin");
+        this.resourceStatusLabel = new Label("");
+        this.overallProgressBar = new ProgressBar(0);
+        this.overallPercentageLabel = new Label("0%");
+        this.processButton = new Button("🚀 Start Processing");
+        this.clearLogButton = new Button("🧹 Clear Log");
+        this.exitButton = new Button("🚪 Exit");
+        this.scheduleButton = new Button("📅 Schedule");
+        this.fileTimeSpentLabel = new Label("0s");
+        this.fileTimeLeftLabel = new Label("N/A");
+        this.totalTimeSpentLabel = new Label("0s");
+        this.totalTimeLeftLabel = new Label("N/A");
+        this.dataStatusLabel = new Label("Using default estimates");
+        this.individualProgressRows = new VBox(4);
+        this.individualProgressSection = buildIndividualProgressSection();
+        this.buttonBox = buildButtonBox(onProcessClick, onExitClick);
 
         this.root = buildUI(onProcessClick, onExitClick);
+        bindToState();
+
+        LOGGER.debug("ControlPanel initialized with AppState binding");
     }
+
+    // ========================================================================
+    //  UI Construction
+    // ========================================================================
 
     private VBox buildUI(Runnable onProcessClick, Runnable onExitClick) {
         VBox container = new VBox(10);
@@ -95,6 +129,17 @@ public class ControlPanel {
         resourceStatusLabel.setManaged(false);
         resourceStatusLabel.setVisible(false);
 
+        HBox licenseBox = new HBox(5);
+        licenseBox.setAlignment(Pos.CENTER_LEFT);
+        licenseBox.getChildren().add(licenseStatusLabel);
+
+        if (!LicenseManager.getInstance().isPro()) {
+            Button upgradeButton = new Button("💎 Upgrade");
+            upgradeButton.setStyle("-fx-background-color: #f9a825; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 10px; -fx-padding: 2 10;");
+            upgradeButton.setOnAction(e -> showUpgradeDialog());
+            licenseBox.getChildren().add(upgradeButton);
+        }
+
         overallProgressBar.setMaxWidth(Double.MAX_VALUE);
         setStyled(overallProgressBar, "-fx-accent: #27ae60; -fx-background-color: #ecf0f1;");
         HBox.setHgrow(overallProgressBar, Priority.ALWAYS);
@@ -106,11 +151,16 @@ public class ControlPanel {
 
         VBox timeSection = buildTimeReportSection();
 
-        statusBox.getChildren().addAll(statusLabel, detailedStatusLabel, resourceStatusLabel, progressBox, timeSection,
-                individualProgressSection);
+        statusBox.getChildren().addAll(
+            statusLabel, detailedStatusLabel, resourceStatusLabel,
+            licenseBox, progressBox, timeSection, individualProgressSection);
+
+        HBox statusFooter = new HBox();
+        statusFooter.setAlignment(Pos.CENTER_RIGHT);
+        statusFooter.getChildren().add(versionLabel);
+        statusBox.getChildren().add(statusFooter);
 
         HBox buttonBox = buildButtonBox(onProcessClick, onExitClick);
-
         container.getChildren().addAll(statusBox, buttonBox);
         return container;
     }
@@ -125,30 +175,9 @@ public class ControlPanel {
         setStyled(individualProgressRows, "-fx-padding: 4 0 0 8;");
 
         section.getChildren().addAll(header, individualProgressRows);
-
         section.setVisible(false);
         section.setManaged(false);
         return section;
-    }
-
-    private HBox buildIndividualProgressRow(BatchFileItem item) {
-        Label nameLabel = new Label(item.getFileName());
-        setStyled(nameLabel, "-fx-font-size: 11px; -fx-text-fill: #34495e;");
-        nameLabel.setMaxWidth(220);
-        nameLabel.setMinWidth(220);
-
-        ProgressBar bar = new ProgressBar(item.getProgress());
-        bar.setPrefWidth(140);
-        setStyled(bar, "-fx-accent: #2196F3;");
-        HBox.setHgrow(bar, Priority.ALWAYS);
-
-        Label pct = new Label(String.format("%.0f%%", item.getProgress() * 100));
-        setStyled(pct, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
-        pct.setMinWidth(36);
-
-        HBox row = new HBox(8, nameLabel, bar, pct);
-        row.setAlignment(Pos.CENTER_LEFT);
-        return row;
     }
 
     private VBox buildTimeReportSection() {
@@ -172,17 +201,9 @@ public class ControlPanel {
         grid.add(totalTimeLeftLabel, 7, 0);
 
         setStyled(fileTimeSpentLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
-        fileTimeSpentLabel.getStyleClass().add("tool-subheading");
-
         setStyled(fileTimeLeftLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
-        fileTimeLeftLabel.getStyleClass().add("status-negative");
-
         setStyled(totalTimeSpentLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
-        totalTimeSpentLabel.getStyleClass().add("tool-subheading");
-
         setStyled(totalTimeLeftLabel, "-fx-font-weight: bold; -fx-font-size: 11px;");
-        totalTimeLeftLabel.getStyleClass().add("status-negative");
-
         setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
 
         section.getChildren().addAll(header, grid, dataStatusLabel);
@@ -206,14 +227,12 @@ public class ControlPanel {
         scheduleButton.getStyleClass().add("action-btn-schedule");
         scheduleButton.setMinWidth(120);
         scheduleButton.setTooltip(new Tooltip("Schedule batch to run later"));
-        // scheduleButton action is set externally via setScheduleAction()
 
         setStyled(exitButton, "");
         exitButton.getStyleClass().add("action-btn-exit");
         exitButton.setOnAction(e -> onExitClick.run());
 
         box.getChildren().addAll(processButton, clearLogButton, scheduleButton, exitButton);
-
         return box;
     }
 
@@ -223,197 +242,271 @@ public class ControlPanel {
         return l;
     }
 
-    private void setStyled(javafx.scene.Node node, String style) {
+    private void setStyled(Node node, String style) {
         node.setStyle(style);
         ThemeManager.stripForCurrentTheme(node);
     }
+
+    // ========================================================================
+    //  AppState Binding
+    // ========================================================================
+
+    private void bindToState() {
+        statusLabel.textProperty().bind(appState.processingStatusProperty());
+        detailedStatusLabel.textProperty().bind(appState.detailedStatusProperty());
+        resourceStatusLabel.textProperty().bind(appState.resourceStatusProperty());
+        resourceStatusLabel.visibleProperty().bind(appState.resourceStatusProperty().isNotEmpty());
+        resourceStatusLabel.managedProperty().bind(appState.resourceStatusProperty().isNotEmpty());
+
+        overallProgressBar.progressProperty().bind(appState.overallProgressProperty());
+        overallPercentageLabel.textProperty().bind(
+            appState.overallProgressProperty().multiply(100).asString("%.0f%%")
+        );
+
+        // FIX: Combine isCancelling and dependencyCheckInProgress for the disable binding
+        processButton.disableProperty().bind(
+            appState.isCancellingProperty().or(appState.dependencyCheckInProgressProperty())
+        );
+
+        processButton.textProperty().bind(
+            appState.isProcessingProperty().asString().map(p ->
+                Boolean.parseBoolean(p) ? "⏹️ Cancel Processing" : "🚀 Start Processing"
+            )
+        );
+
+        individualProgressSection.visibleProperty().bind(appState.isProcessingProperty());
+        individualProgressSection.managedProperty().bind(appState.isProcessingProperty());
+    }
+
+    // ========================================================================
+    //  Public Methods
+    // ========================================================================
 
     public void setScheduleAction(Runnable action) {
         scheduleButton.setOnAction(e -> action.run());
     }
 
     public void updateStatus(String main, String detail) {
-        Platform.runLater(() -> {
-            statusLabel.setText(main);
-            if (detail != null) detailedStatusLabel.setText(detail);
-        });
+        appState.setStatus(main, detail);
     }
 
     public void updateResourceStatus(String message) {
-        Platform.runLater(() -> {
-            boolean show = message != null && !message.isBlank();
-            resourceStatusLabel.setText(show ? message : "");
-            resourceStatusLabel.setManaged(show);
-            resourceStatusLabel.setVisible(show);
-        });
+        appState.setResourceStatus(message);
     }
 
     public void setOverallProgress(double progress) {
-        Platform.runLater(() -> {
-            overallProgressBar.setProgress(progress);
-            overallPercentageLabel.setText(String.format("%.0f%%", progress * 100));
-        });
+        appState.setOverallProgress(progress);
     }
 
     public void setProcessingState(boolean processing) {
-        Platform.runLater(() -> {
-            if (processing) {
-                processButton.setText("⏹️ Cancel Processing");
-                processButton.getStyleClass().setAll("action-btn-cancel");
-                setStyled(overallProgressBar, "-fx-accent: #2196F3; -fx-background-color: #E3F2FD;");
-            } else {
-                processButton.setText("🚀 Start Processing");
-                processButton.getStyleClass().setAll("action-btn-start");
-                setStyled(overallProgressBar, "-fx-accent: #4CAF50; -fx-background-color: #E8F5E8;");
-            }
-            individualProgressSection.setVisible(processing);
-            individualProgressSection.setManaged(processing);
-            if (!processing) {
-                individualProgressRows.getChildren().clear();
-            }
-        });
+        appState.setProcessing(processing);
+        if (!processing) {
+            individualProgressRows.getChildren().clear();
+        }
     }
 
     public void setProcessingEnabled(boolean enabled) {
-        Platform.runLater(() -> processButton.setDisable(!enabled));
+        // Use AppState instead of direct button manipulation
+        appState.setCancelling(!enabled);
     }
 
+    /**
+     * Sets the dependency check in progress state.
+     * Uses AppState to avoid the "A bound value cannot be set" error.
+     */
     public void setDependencyCheckInProgress(boolean inProgress) {
-        Platform.runLater(() -> processButton.setDisable(inProgress));
+        appState.setDependencyCheckInProgress(inProgress);
     }
 
     public void startBatchProcessing() {
-        batchStartTimeMs = System.currentTimeMillis();
+        this.batchStartTimeMs = System.currentTimeMillis();
     }
 
-    public Button getClearLogButton() {
-        return clearLogButton;
-    }
+    public void updateProgress(ObservableList<BatchFileItem> items, int completed, int failed, int total) {
+        int pending = Math.max(0, total - completed - failed);
+        appState.updateBatchStats(total, completed, failed, pending);
 
-    public Button getExitButton() {
-        return exitButton;
-    }
-
-    public Button getScheduleButton() {
-        return scheduleButton;
-    }
-
-    public VBox getRoot() {
-        return root;
-    }
-
-    public HBox getButtonBox() {
-        return buttonBox;
-    }
-
-    public void updateDependencyStatus(DependencyManager.DependencyStatus ffmpegStatus,
-                                       DependencyManager.DependencyStatus whisperStatus) {
-        Platform.runLater(() -> {
-            if (ffmpegStatus == null || whisperStatus == null) {
-                statusLabel.setText("Dependency Check Failed");
-                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
-                statusLabel.getStyleClass().setAll("status-negative");
-                detailedStatusLabel.setText("Could not verify system dependencies.");
-                return;
-            }
-
-            if (ffmpegStatus.isAvailable()) {
-                statusLabel.setText("Ready to Process");
-                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
-                statusLabel.getStyleClass().setAll("status-success");
-            } else {
-                statusLabel.setText("FFmpeg Missing");
-                setStyled(statusLabel, "-fx-font-weight: bold; -fx-font-size: 16px;");
-                statusLabel.getStyleClass().setAll("status-negative");
-            }
-
-            String detail = ffmpegStatus.getMessage();
-            if (!whisperStatus.isAvailable()) detail += " | " + whisperStatus.getMessage();
-            detailedStatusLabel.setText(detail);
-        });
-    }
-
-    public void updateProgress(ObservableList<BatchFileItem> items,
-                                int cumulativeCompleted, int cumulativeFailed, int cumulativeTotal) {
-        Platform.runLater(() -> {
-            if (cumulativeTotal == 0) {
-                overallProgressBar.setProgress(0);
-                overallPercentageLabel.setText("0%");
-                detailedStatusLabel.setText("📊 No files in queue");
-                individualProgressRows.getChildren().clear();
-                return;
-            }
-
-            double processingWeighted = 0.0;
-            int processing = 0;
-            List<BatchFileItem> processingItems = new ArrayList<>();
-            for (BatchFileItem item : items) {
-                if ("PROCESSING".equals(item.getStatus())) {
-                    processingWeighted += item.getProgress();
-                    processing++;
-                    processingItems.add(item);
-                }
-            }
-
-            double overall = Math.min(1.0,
-                    (cumulativeCompleted + cumulativeFailed + processingWeighted) / (double) cumulativeTotal);
-            overallProgressBar.setProgress(overall);
-            overallPercentageLabel.setText(String.format("%.0f%%", overall * 100));
-
-            long pending = Math.max(0, cumulativeTotal - cumulativeCompleted - cumulativeFailed - processing);
-            detailedStatusLabel.setText(String.format(
-                    "📊 Queue: %d total | ⏳ %d pending | 🔄 %d processing | ✅ %d done | ❌ %d failed",
-                    cumulativeTotal, pending, processing, cumulativeCompleted, cumulativeFailed));
-
-            individualProgressRows.getChildren().setAll(
-                    processingItems.stream().map(this::buildIndividualProgressRow).toList());
-
-            LOGGER.debug("Queue progress updated: overall={}%, completed={}, failed={}, processing={}, pending={}",
-                    String.format("%.1f", overall * 100), cumulativeCompleted, cumulativeFailed, processing, pending);
-        });
+        if (total > 0) {
+            double progress = (double) (completed + failed) / total;
+            appState.setOverallProgress(Math.min(1.0, progress));
+        }
+        updateIndividualProgressRows(items);
     }
 
     public void updateProgress(int completed, int failed, int total) {
-        Platform.runLater(() -> {
-            if (total > 0) {
-                double progress = (double) (completed + failed) / total;
-                overallProgressBar.setProgress(progress);
-                overallPercentageLabel.setText(String.format("%.0f%%", progress * 100));
-            } else {
-                overallProgressBar.setProgress(0);
-                overallPercentageLabel.setText("0%");
-            }
-            LOGGER.debug("ControlPanel progress: {}/{}/{}", completed, failed, total);
-        });
+        int pending = Math.max(0, total - completed - failed);
+        appState.updateBatchStats(total, completed, failed, pending);
+
+        if (total > 0) {
+            double progress = (double) (completed + failed) / total;
+            appState.setOverallProgress(Math.min(1.0, progress));
+        }
     }
 
     public void updateTimeEstimates(ObservableList<BatchFileItem> items, long currentTime) {
         if (timeEstimator == null) return;
 
+        appState.updateTimeEstimates(
+            timeEstimator.getCurrentFileTimeSpent(),
+            timeEstimator.getLiveCurrentFileTimeLeftMs(),
+            timeEstimator.getTotalTimeSpent(),
+            timeEstimator.getLiveTotalTimeLeftMs()
+        );
+
+        int learnedProcesses = timeEstimator.getLearnedPatternCount();
+        if (learnedProcesses > 0) {
+            dataStatusLabel.setText("Using learned estimates (" + learnedProcesses
+                + " process type" + (learnedProcesses == 1 ? "" : "s") + " learned)");
+            setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-style: italic;");
+        } else {
+            dataStatusLabel.setText("Using default estimates");
+            setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
+        }
+    }
+
+    public void updateDependencyStatus(DependencyManager.DependencyStatus ffmpegStatus,
+                                       DependencyManager.DependencyStatus whisperStatus) {
+        if (ffmpegStatus == null || whisperStatus == null) {
+            appState.setStatus("Dependency Check Failed", "Could not verify system dependencies.");
+            return;
+        }
+
+        if (ffmpegStatus.isAvailable()) {
+            appState.setStatus("Ready to Process", ffmpegStatus.getMessage());
+        } else {
+            appState.setStatus("FFmpeg Missing", ffmpegStatus.getMessage());
+        }
+
+        if (!whisperStatus.isAvailable()) {
+            String currentDetail = appState.detailedStatusProperty().get();
+            appState.detailedStatusProperty().set(currentDetail + " | " + whisperStatus.getMessage());
+        }
+    }
+
+    // ========================================================================
+    //  Individual Progress Rows
+    // ========================================================================
+
+    private void updateIndividualProgressRows(ObservableList<BatchFileItem> items) {
         Platform.runLater(() -> {
-            long fileSpent = timeEstimator.getCurrentFileTimeSpent();
-            long totalSpent = timeEstimator.getTotalTimeSpent();
+            List<BatchFileItem> processingItems = new ArrayList<>();
+            for (BatchFileItem item : items) {
+                if ("PROCESSING".equals(item.getStatus())) {
+                    processingItems.add(item);
+                }
+            }
 
-            long fileLeft = timeEstimator.getLiveCurrentFileTimeLeftMs();
-            long totalLeft = timeEstimator.getLiveTotalTimeLeftMs();
+            if (processingItems.isEmpty()) {
+                individualProgressRows.getChildren().clear();
+                return;
+            }
 
-            LOGGER.debug("Time estimates — fileSpent={}, fileLeft={}, totalSpent={}, totalLeft={}",
-                    fileSpent, fileLeft, totalSpent, totalLeft);
+            individualProgressRows.getChildren().setAll(
+                processingItems.stream().map(this::buildIndividualProgressRow).toList()
+            );
+        });
+    }
 
-            fileTimeSpentLabel.setText(TimeLeftEstimator.formatTime(fileSpent));
-            fileTimeLeftLabel.setText(TimeLeftEstimator.formatTime(fileLeft));
-            totalTimeSpentLabel.setText(TimeLeftEstimator.formatTime(totalSpent));
-            totalTimeLeftLabel.setText(TimeLeftEstimator.formatTime(totalLeft));
+    private HBox buildIndividualProgressRow(BatchFileItem item) {
+        Label nameLabel = new Label(item.getDisplayName());
+        setStyled(nameLabel, "-fx-font-size: 11px; -fx-text-fill: #34495e;");
+        nameLabel.setMaxWidth(220);
+        nameLabel.setMinWidth(220);
 
-            int learnedProcesses = timeEstimator.getLearnedPatternCount();
-            if (learnedProcesses > 0) {
-                dataStatusLabel.setText("Using learned estimates (" + learnedProcesses
-                        + " process type" + (learnedProcesses == 1 ? "" : "s") + " learned)");
-                setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-style: italic;");
-            } else {
-                dataStatusLabel.setText("Using default estimates");
-                setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #666; -fx-font-style: italic;");
+        ProgressBar bar = new ProgressBar(item.getProgress());
+        bar.setPrefWidth(140);
+        setStyled(bar, "-fx-accent: #2196F3;");
+        HBox.setHgrow(bar, Priority.ALWAYS);
+
+        Label pct = new Label(String.format("%.0f%%", item.getProgress() * 100));
+        setStyled(pct, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+        pct.setMinWidth(36);
+
+        HBox row = new HBox(8, nameLabel, bar, pct);
+        row.setAlignment(Pos.CENTER_LEFT);
+        return row;
+    }
+
+    // ========================================================================
+    //  Getters
+    // ========================================================================
+
+    public Button getClearLogButton() { return clearLogButton; }
+    public Button getExitButton() { return exitButton; }
+    public Button getScheduleButton() { return scheduleButton; }
+    public VBox getRoot() { return root; }
+    public HBox getButtonBox() { return buttonBox; }
+
+    // ========================================================================
+    //  Upgrade Dialog
+    // ========================================================================
+
+    private void showUpgradeDialog() {
+        LicenseManager license = LicenseManager.getInstance();
+
+        if (license.isPro()) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Pro License");
+            alert.setHeaderText("💎 Pro License - Active");
+            alert.setContentText(license.getFeatureSummary());
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.showAndWait();
+            return;
+        }
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Upgrade to Pro");
+        alert.setHeaderText("💎 Unlock Pro Features");
+        alert.setContentText(license.getFeatureSummary() + "\n\nEnter your license key:");
+        alert.getButtonTypes().add(new ButtonType("Enter Key", ButtonBar.ButtonData.OK_DONE));
+        alert.getButtonTypes().add(ButtonType.CANCEL);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+
+        alert.showAndWait().ifPresent(response -> {
+            if (response.getButtonData() == ButtonBar.ButtonData.OK_DONE) {
+                TextInputDialog keyDialog = new TextInputDialog();
+                keyDialog.setTitle("Enter License Key");
+                keyDialog.setHeaderText("Paste your Pro license key");
+                keyDialog.setContentText("License Key:");
+                ThemeManager.applyCurrentThemeToDialog(keyDialog.getDialogPane(), null);
+
+                Optional<String> result = keyDialog.showAndWait();
+                result.ifPresent(key -> {
+                    if (license.activateLicense(key)) {
+                        refreshLicenseUI();
+                        showInfoAlert("✅ Pro License Activated", "You now have access to all Pro features!");
+                    } else {
+                        showErrorAlert("❌ Invalid License", "The license key you entered is invalid.");
+                    }
+                });
             }
         });
+    }
+
+    private void refreshLicenseUI() {
+        LicenseManager license = LicenseManager.getInstance();
+        licenseStatusLabel.setText(license.getLicenseStatusText());
+        setStyled(licenseStatusLabel,
+            license.isPro()
+                ? "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-weight: bold;"
+                : "-fx-font-size: 10px; -fx-text-fill: #ed6c02;");
+    }
+
+    private void showInfoAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
+    }
+
+    private void showErrorAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
     }
 }

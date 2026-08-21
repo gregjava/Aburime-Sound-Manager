@@ -46,6 +46,7 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.function.Consumer;
+import javafx.scene.Node;
 
 /**
  * "Sound Recorder Panel" — microphone input recording, added as a peer
@@ -219,6 +220,21 @@ public class SoundRecorderPanel {
         outputRow.getChildren().addAll(outputLabel, outputPathField, chooseLocationButton);
 
         section.getChildren().addAll(titleLabel, deviceRow, controlsRow, levelMeter, statusLabel, outputRow);
+        return section;
+    }
+
+    /**
+     * Returns the recorder section without the title label.
+     * Used for embedding in a TitledPane.
+     */
+    public Node getRecorderSectionWithoutTitle() {
+        Node section = getRecorderSection();
+        // If it's a VBox with a title label as first child, remove it
+        if (section instanceof VBox vbox) {
+            if (!vbox.getChildren().isEmpty() && vbox.getChildren().get(0) instanceof Label) {
+                vbox.getChildren().remove(0);
+            }
+        }
         return section;
     }
 

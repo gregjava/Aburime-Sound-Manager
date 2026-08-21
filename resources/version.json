@@ -1,0 +1,10 @@
+{
+    "version": "4.0.0",
+    "releaseDate": "2026-08-19",
+    "downloadUrl": "https://downloads.aburimesoundmanager.app/AburimeSoundManager-4.0.0.jar",
+    "sizeBytes": 25000000,
+    "checksum": "",
+    "releaseNotes": "AburimeSoundManager 4.0.0 - Phoenix\n\nNew Features:\n- Adaptive concurrency scaling\n- Performance reporting\n- ID3 tagging support\n- Speaker diarization improvements\n\nBug Fixes:\n- Fixed NPE on non-Windows systems\n- Fixed output file generation in parallel batches\n- Improved error reporting\n\nEnhancements:\n- Faster batch processing\n- Better resource management\n- Enhanced UI responsiveness",
+    "isCritical": true,
+    "minimumVersion": "3.9.0"
+}

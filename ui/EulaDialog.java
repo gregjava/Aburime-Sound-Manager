@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 public class EulaDialog {
 
     private static final String EULA_RESOURCE_PATH = "/eula.txt";
-    private static final int CURRENT_EULA_VERSION = 1;
+    private static final int CURRENT_EULA_VERSION = 2;
 
     private final Stage stage;
     private boolean accepted = false;
@@ -183,25 +183,37 @@ public class EulaDialog {
         return """
             END USER LICENSE AGREEMENT
 
-            Version 1.0
+            Version 2.0
 
             1. GRANT OF LICENSE
-            AudioManager is provided free of charge for personal and commercial use.
+            ------------------------
+            Aburime Sound Manager v4.0.0 ("Phoenix") is provided free of charge for personal and commercial use.
             You may use, copy, and distribute the software subject to the terms below.
 
             2. RESTRICTIONS
+            ------------------------
             You may not:
             - Sell, rent, or lease the software
             - Modify, reverse engineer, or decompile the software
             - Remove any copyright or proprietary notices
 
             3. DISCLAIMER OF WARRANTY
-            THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND.
+            ------------------------
+            THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+            EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+            OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+            NONINFRINGEMENT.
 
             4. LIMITATION OF LIABILITY
-            IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DAMAGES.
+            ------------------------
+            IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+            ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+            CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+            CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+            SOFTWARE.
 
             5. THIRD-PARTY COMPONENTS
+            ------------------------
             This software uses:
             - FFmpeg (LGPL)
             - WhisperX (MIT)
@@ -209,14 +221,17 @@ public class EulaDialog {
             - Apache Log4j/SLF4J (Apache 2.0)
 
             6. DATA COLLECTION
+            ------------------------
             By default, no data is collected. Optional error reporting can be enabled
             in Preferences and is subject to your consent.
 
             7. GOVERNING LAW
+            ------------------------
             This agreement shall be governed by the laws of the jurisdiction
             where the user resides.
 
             8. CONTACT
+            ------------------------
             For questions, contact: support@audiomanager.app
 
             _________________________________________________

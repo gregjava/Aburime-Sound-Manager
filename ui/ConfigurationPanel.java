@@ -6,22 +6,28 @@ package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
+import audiomanager.core.LicenseManager;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.util.PreferenceManager;
+import java.util.Optional;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.function.Consumer;
-import javafx.scene.Node;
 
 /**
- * Configuration panel for audio processing and transcription settings
+ * Configuration panel for audio processing and transcription settings.
+ * 
+ * <p>Theme and font settings now use AppState as the single source of truth,
+ * eliminating the split state where UI settings came from PreferenceManager
+ * while UI state came from AppState.</p>
  */
 public class ConfigurationPanel {
 
@@ -29,6 +35,7 @@ public class ConfigurationPanel {
 
     private final ScrollPane root;
     private final PreferenceManager prefManager;
+    private final AppState appState = AppState.getInstance();
 
     // UI Components
     private ComboBox<String> modelComboBox;
@@ -47,7 +54,7 @@ public class ConfigurationPanel {
     private CheckBox keepProcessedCheckBox;
     private CheckBox enableTranscriptionCheckBox;
     private CheckBox autoRemoveCompletedCheckBox;
-    private CheckBox adaptiveScalingCheckBox;
+    public CheckBox adaptiveScalingCheckBox;
     private CheckBox skipSegmentationCheckBox;
     private CheckBox removeSilenceCheckBox;
     private CheckBox normalizeCheckBox;
@@ -65,6 +72,10 @@ public class ConfigurationPanel {
     // ========== ID3 Tagging Checkbox ==========
     private CheckBox id3TaggingCheckBox;
 
+    // ===== License Section Components =====
+    private Label licenseLabel;
+    private VBox licenseBox;
+
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
         
@@ -74,6 +85,7 @@ public class ConfigurationPanel {
         
         this.root = createRootPane();
         loadPreferences();
+        bindToAppState();
     }
     
     public ScrollPane getRoot() {
@@ -108,6 +120,63 @@ public class ConfigurationPanel {
         }
     }
 
+    // ========================================================================
+    //  AppState Binding
+    // ========================================================================
+
+    /**
+     * Bind UI components to AppState properties.
+     * This eliminates split state where theme/font came from PreferenceManager
+     * while other UI state came from AppState.
+     */
+    private void bindToAppState() {
+        // Font size - bidirectional binding with AppState
+        fontSizeSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
+            appState.setFontSize(newVal.doubleValue());
+            if (fontSizeChangeListener != null) {
+                fontSizeChangeListener.accept(newVal.doubleValue());
+            }
+        });
+
+        // When AppState changes font size, update the slider
+        appState.fontSizeProperty().addListener((obs, oldVal, newVal) -> {
+            if (fontSizeSlider != null) {
+                fontSizeSlider.setValue(newVal.doubleValue());
+            }
+        });
+
+        // Dark mode is handled via toggleTheme() in MainWindow,
+        // but we keep AppState in sync
+        appState.darkModeProperty().addListener((obs, oldVal, newVal) -> {
+            // Theme toggle is triggered from MainWindow's menu
+            // This just ensures AppState reflects the current state
+            LOGGER.debug("Dark mode state changed to: {}", newVal);
+        });
+
+        // License status - update when license changes
+        LicenseManager license = LicenseManager.getInstance();
+        licenseLabel.setText(license.getLicenseStatusText());
+        updateLicenseUI(license);
+    }
+
+    private void updateLicenseUI(LicenseManager license) {
+        licenseLabel.setText(license.getLicenseStatusText());
+        setStyled(licenseLabel,
+            license.isPro()
+                ? "-fx-font-weight: bold; -fx-text-fill: #2e7d32; -fx-font-size: 12px; -fx-padding: 10 0 0 0;"
+                : "-fx-font-size: 12px; -fx-text-fill: #ed6c02; -fx-padding: 10 0 0 0;");
+
+        // Update upgrade button visibility
+        if (licenseBox != null) {
+            // Rebuild license section to reflect changes
+            // This will be refreshed when the UI is recreated
+        }
+    }
+
+    // ========================================================================
+    //  Save Preferences
+    // ========================================================================
+
     public void savePreferences() {
         try {
             // Save Transcription
@@ -137,8 +206,7 @@ public class ConfigurationPanel {
             prefManager.putBoolean("remove_silence", removeSilenceCheckBox.isSelected());
             prefManager.setNormalizeAudioEnabled(normalizeCheckBox.isSelected());
             
-            // ========== ID3 Tagging Save ==========
-            // Using PreferenceManager convenience method
+            // ID3 Tagging Save
             prefManager.setID3TaggingEnabled(id3TaggingCheckBox.isSelected());
             
             // Save Silence Detection
@@ -148,8 +216,8 @@ public class ConfigurationPanel {
             // Save Max Parallel Files
             prefManager.putInt(PreferenceKeys.MAX_PARALLEL, maxParallelSpinner.getValue());
             
-            // Save Font Size
-            prefManager.setFontSize(fontSizeSlider.getValue());
+            // Save Font Size - now using AppState
+            appState.setFontSize(fontSizeSlider.getValue());
             
             // Save new transcription settings
             if (transcriptionFormatComboBox.getValue() != null) {
@@ -175,6 +243,10 @@ public class ConfigurationPanel {
         loadPreferences();
     }
     
+    // ========================================================================
+    //  Component Initialization
+    // ========================================================================
+
     private void initializeComponents() {
         // Initialize all UI components here
         modelComboBox = new ComboBox<>(FXCollections.observableArrayList(
@@ -206,8 +278,12 @@ public class ConfigurationPanel {
         volumeSlider.setMajorTickUnit(AppConstants.VOLUME_BOOST_TICK);
         volumeSlider.setPrefWidth(200);
 
-        // Font size slider
-        fontSizeSlider = new Slider(8, 20, AppConstants.DEFAULT_FONT_SIZE);
+        // Font size slider - now bound to AppState
+        double initialFontSize = appState.getFontSize();
+        if (initialFontSize <= 0) {
+            initialFontSize = AppConstants.DEFAULT_FONT_SIZE;
+        }
+        fontSizeSlider = new Slider(8, 20, initialFontSize);
         fontSizeSlider.setShowTickMarks(true);
         fontSizeSlider.setShowTickLabels(true);
         fontSizeSlider.setMajorTickUnit(2);
@@ -232,25 +308,16 @@ public class ConfigurationPanel {
         skipSegmentationCheckBox = new CheckBox("Baseline Mode (Skip Segmentation & Per-Segment Retry)");
         skipSegmentationCheckBox.setSelected(false);
 
-        // ========== ID3 Tagging Checkbox ==========
+        // ID3 Tagging Checkbox
         id3TaggingCheckBox = new CheckBox("Generate ID3 Tags (sidecar .meta file)");
         id3TaggingCheckBox.setTooltip(new Tooltip("Create a .meta file with title, artist, and other metadata"));
-        
-        // Load initial state using PreferenceManager convenience method
         id3TaggingCheckBox.setSelected(prefManager.isID3TaggingEnabled());
-        
-        // ========== ID3 Tagging Listener ==========
-        // Using PreferenceManager convenience method for save
         id3TaggingCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
             prefManager.setID3TaggingEnabled(newVal);
             prefManager.flush();
         });
 
-        // FIX: "Adaptive Concurrency Scaling" and "Baseline Mode" are used
-        // alternatively — one represents the app's normal, recommended
-        // fault-tolerant/adaptive behavior, the other represents a
-        // deliberately stripped-down CLI-parity mode for controlled
-        // baseline comparisons.
+        // Adaptive Scaling and Baseline Mode mutual exclusivity
         adaptiveScalingCheckBox.selectedProperty().addListener((obs, wasSelected, isSelected) -> {
             if (isSelected) skipSegmentationCheckBox.setSelected(false);
         });
@@ -320,6 +387,10 @@ public class ConfigurationPanel {
         setTooltips();
     }
 
+    // ========================================================================
+    //  Tooltips
+    // ========================================================================
+
     private void setTooltips() {
         modelComboBox.setTooltip(new Tooltip("Model size: tiny (fastest) → large (most accurate)"));
         languageComboBox.setTooltip(new Tooltip("Select 'auto' for automatic language detection"));
@@ -336,21 +407,16 @@ public class ConfigurationPanel {
             "fixed: Fixed duration segments"));
         confidenceCheckBox.setTooltip(new Tooltip("Add confidence metrics to transcription"));
         exportWordCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save a genuine .docx copy Word can open and edit directly"));
-        exportPdfCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save an .html copy formatted for printing to PDF from a browser or Word (no PDF library is bundled, so this isn't a native .pdf file)"));
+        exportPdfCopyCheckBox.setTooltip(new Tooltip("In addition to the .srt/.txt, save an .html copy formatted for printing to PDF from a browser or Word"));
         keepProcessedCheckBox.setTooltip(new Tooltip("Keep processed audio files"));
         enableTranscriptionCheckBox.setTooltip(new Tooltip("Enable audio-to-text transcription"));
         autoRemoveCompletedCheckBox.setTooltip(new Tooltip("Remove files from queue after completion"));
         adaptiveScalingCheckBox.setTooltip(new Tooltip(
                 "Automatically reduce concurrency under high memory/CPU pressure (recommended). " +
-                "Turn off to run at a fixed concurrency level regardless of measured pressure — " +
-                "useful for baseline performance measurements."));
+                "Turn off to run at a fixed concurrency level regardless of measured pressure."));
         skipSegmentationCheckBox.setTooltip(new Tooltip(
                 "Off (recommended): long files are split into segments that are transcribed and " +
-                "retried independently, so one bad segment doesn't fail the whole file.\n" +
-                "On: transcribes each file as a single unbroken unit, matching plain CLI " +
-                "whisperx behavior — no segmentation, no per-segment retry, a file either " +
-                "fully succeeds or fully throws. Use this only to collect a genuine baseline " +
-                "run for comparison against the app's normal (fault-tolerant) behavior."));
+                "retried independently.\nOn: transcribes each file as a single unbroken unit."));
         removeSilenceCheckBox.setTooltip(new Tooltip("Detect and remove silent sections"));
         normalizeCheckBox.setTooltip(new Tooltip("Normalize to broadcast standard (-16 LUFS)"));
         silenceThresholdSlider.setTooltip(new Tooltip("Loudness threshold for silence detection (dB)"));
@@ -360,10 +426,12 @@ public class ConfigurationPanel {
         srtMaxLinesSpinner.setTooltip(new Tooltip("Maximum lines per subtitle (1-10)"));
         maxSegmentDurationSpinner.setTooltip(new Tooltip("Maximum segment duration in seconds (5-60)"));
         logLevelComboBox.setTooltip(new Tooltip("Application log verbosity (affects the log file, not the on-screen Terminal)"));
-        
-        // ========== ID3 Tagging Tooltip ==========
         id3TaggingCheckBox.setTooltip(new Tooltip("Create a sidecar .meta file with title, artist, and other metadata for each processed audio file"));
     }
+
+    // ========================================================================
+    //  UI Sections
+    // ========================================================================
 
     public VBox createUISection() {
         VBox section = new VBox(10);
@@ -384,6 +452,8 @@ public class ConfigurationPanel {
         fontSizeSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
             fontValueLabel.setText(String.format("%.0fpx", newVal.doubleValue()));
             applyFontSize(newVal.doubleValue());
+            // Update AppState
+            appState.setFontSize(newVal.doubleValue());
         });
 
         fontBox.getChildren().addAll(fontLabel, fontSizeSlider, fontValueLabel);
@@ -398,70 +468,44 @@ public class ConfigurationPanel {
             if (newVal != null) applyLogLevel(newVal);
         });
 
-        section.getChildren().addAll(title, fontBox, logLevelBox);
+        // ========== LICENSE SECTION ==========
+        LicenseManager license = LicenseManager.getInstance();
+
+        this.licenseLabel = new Label(license.getLicenseStatusText());
+        setStyled(licenseLabel,
+            license.isPro()
+                ? "-fx-font-weight: bold; -fx-text-fill: #2e7d32; -fx-font-size: 12px; -fx-padding: 10 0 0 0;"
+                : "-fx-font-size: 12px; -fx-text-fill: #ed6c02; -fx-padding: 10 0 0 0;");
+
+        this.licenseBox = new VBox(5);
+        licenseBox.getChildren().add(licenseLabel);
+
+        if (!license.isPro()) {
+            Button upgradeButton = new Button("💎 Upgrade to Pro");
+            upgradeButton.setStyle("-fx-background-color: #f9a825; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 20;");
+            upgradeButton.setOnAction(e -> showUpgradeDialog());
+            licenseBox.getChildren().add(upgradeButton);
+
+            Label upgradeInfo = new Label("Free: Single file, 100MB limit\nPro: Batch processing, 750MB limit");
+            setStyled(upgradeInfo, "-fx-font-size: 11px; -fx-text-fill: #666;");
+            licenseBox.getChildren().add(upgradeInfo);
+        }
+
+        // Version info
+        Label versionInfo = new Label("Aburime Sound Manager v" + AppConstants.APP_VERSION + 
+            " - " + (license.isPro() ? "Pro" : "Free"));
+        setStyled(versionInfo, "-fx-font-size: 10px; -fx-text-fill: #95a5a6; -fx-padding: 10 0 0 0;");
+
+        section.getChildren().addAll(
+            title, 
+            fontBox, 
+            logLevelBox,
+            new Separator(),
+            licenseBox,
+            versionInfo
+        );
 
         return section;
-    }
-
-    // ========== ID3 Tagging Getter ==========
-    public boolean isID3TaggingEnabled() {
-        return prefManager.isID3TaggingEnabled();
-    }
-
-    private void applyLogLevel(String levelName) {
-        if (tryApplyLogLevelViaLogback(levelName)) {
-            return;
-        }
-        applyLogLevelViaJUL(levelName);
-    }
-
-    private boolean tryApplyLogLevelViaLogback(String levelName) {
-        try {
-            Class<?> logbackLoggerClass = Class.forName("ch.qos.logback.classic.Logger");
-            Class<?> levelClass = Class.forName("ch.qos.logback.classic.Level");
-
-            Object rootLogger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
-            if (!logbackLoggerClass.isInstance(rootLogger)) {
-                return false;
-            }
-
-            Object level = levelClass.getMethod("toLevel", String.class).invoke(null, levelName);
-            logbackLoggerClass.getMethod("setLevel", levelClass).invoke(rootLogger, level);
-            LOGGER.info("Log level changed to {} (via Logback)", levelName);
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        } catch (Exception | LinkageError e) {
-            LOGGER.warn("Could not apply log level '{}' via Logback: {}", levelName, e.getMessage());
-            return false;
-        }
-    }
-
-    private void applyLogLevelViaJUL(String levelName) {
-        try {
-            java.util.logging.Level level = switch (levelName) {
-                case "ERROR" -> java.util.logging.Level.SEVERE;
-                case "WARN"  -> java.util.logging.Level.WARNING;
-                case "INFO"  -> java.util.logging.Level.INFO;
-                case "DEBUG" -> java.util.logging.Level.FINE;
-                case "TRACE" -> java.util.logging.Level.FINEST;
-                default      -> java.util.logging.Level.INFO;
-            };
-            java.util.logging.Logger.getLogger("").setLevel(level);
-            LOGGER.info("Log level changed to {} (via java.util.logging)", levelName);
-        } catch (Exception e) {
-            LOGGER.warn("Could not apply log level '{}': {}", levelName, e.getMessage());
-        }
-    }
-
-    private void applyFontSize(double size) {
-        if (fontSizeChangeListener != null) {
-            fontSizeChangeListener.accept(size);
-        }
-    }
-
-    public void setFontSizeChangeListener(Consumer<Double> listener) {
-        this.fontSizeChangeListener = listener;
     }
 
     public VBox createBatchSection() {
@@ -618,7 +662,7 @@ public class ConfigurationPanel {
         GridPane.setColumnSpan(keepProcessedCheckBox, 4);
         grid.add(keepProcessedCheckBox, 0, 5);
 
-        // ========== Row 6: ID3 Tagging Checkbox ==========
+        // Row 6: ID3 Tagging Checkbox
         GridPane.setColumnSpan(id3TaggingCheckBox, 4);
         grid.add(id3TaggingCheckBox, 0, 6);
 
@@ -652,7 +696,7 @@ public class ConfigurationPanel {
         durBox.setAlignment(Pos.CENTER_LEFT);
         grid.add(durBox, 1, 8, 3, 1);
 
-        // Row 9-10: Auto Volume Optimization
+        // Row 9: Auto Volume Optimization
         CheckBox autoVolumeCheckBox = new CheckBox("Auto Volume Optimization");
         autoVolumeCheckBox.setTooltip(new Tooltip("Automatically analyze and optimize audio volume for best transcription accuracy"));
         autoVolumeCheckBox.setSelected(prefManager.isAutoVolumeOptimizationEnabled());
@@ -666,14 +710,22 @@ public class ConfigurationPanel {
         return section;
     }
 
+    // ========================================================================
+    //  Load Preferences
+    // ========================================================================
+
     public void loadPreferences() {
         if (prefManager == null) {
             LOGGER.error("PreferenceManager is null - cannot load preferences");
             return;
         }
 
-        // Load font size
-        fontSizeSlider.setValue(prefManager.getFontSize());
+        // Load font size from AppState (not PreferenceManager)
+        double fontSize = appState.getFontSize();
+        if (fontSize <= 0) {
+            fontSize = AppConstants.DEFAULT_FONT_SIZE;
+        }
+        fontSizeSlider.setValue(fontSize);
 
         // Load log level
         logLevelComboBox.setValue(prefManager.getString("log_level", "INFO"));
@@ -704,8 +756,7 @@ public class ConfigurationPanel {
         removeSilenceCheckBox.setSelected(prefManager.getBoolean("remove_silence", false));
         normalizeCheckBox.setSelected(prefManager.isNormalizeAudioEnabled());
 
-        // ========== Load ID3 Tagging preference ==========
-        // Using PreferenceManager convenience method
+        // Load ID3 Tagging preference
         id3TaggingCheckBox.setSelected(prefManager.isID3TaggingEnabled());
 
         // Load silence detection
@@ -727,12 +778,12 @@ public class ConfigurationPanel {
         srtMaxLinesSpinner.getValueFactory().setValue(prefManager.getInt("srt_max_lines", 3));
         maxSegmentDurationSpinner.getValueFactory().setValue(prefManager.getDouble("max_segment_duration", 30.0));
 
-        LOGGER.debug("Preferences loaded successfully");
+        LOGGER.debug("Preferences loaded successfully - font size from AppState: {}", appState.getFontSize());
     }
 
-    // =============================
-    // Config Builders
-    // =============================
+    // ========================================================================
+    //  Config Builders
+    // ========================================================================
 
     public ProcessingConfig getProcessingConfig() {
         return new ProcessingConfig.Builder()
@@ -773,9 +824,9 @@ public class ConfigurationPanel {
             .build();
     }
 
-    // =============================
-    // Utility Methods
-    // =============================
+    // ========================================================================
+    //  Utility Methods
+    // ========================================================================
 
     public int getMaxParallelFiles() {
         return maxParallelSpinner.getValue();
@@ -805,6 +856,10 @@ public class ConfigurationPanel {
         return skipSegmentationCheckBox.isSelected();
     }
 
+    public boolean isID3TaggingEnabled() {
+        return prefManager.isID3TaggingEnabled();
+    }
+
     public void setEnabled(boolean enabled) {
         // Set all components enabled/disabled state
         modelComboBox.setDisable(!enabled);
@@ -830,8 +885,6 @@ public class ConfigurationPanel {
         srtMaxCharsSpinner.setDisable(!enabled);
         srtMaxLinesSpinner.setDisable(!enabled);
         maxSegmentDurationSpinner.setDisable(!enabled);
-        
-        // ========== ID3 Tagging checkbox disable ==========
         id3TaggingCheckBox.setDisable(!enabled);
 
         // Silence controls only enabled when remove silence is checked and panel is enabled
@@ -840,9 +893,154 @@ public class ConfigurationPanel {
         silenceDurationSlider.setDisable(!silenceEnabled);
     }
 
-    /**
-     * Creates a checkbox for enabling/disabling error reporting.
-     */
+    public void setFontSizeChangeListener(Consumer<Double> listener) {
+        this.fontSizeChangeListener = listener;
+        // Immediately notify with current value
+        if (listener != null) {
+            listener.accept(fontSizeSlider.getValue());
+        }
+    }
+
+    public void refreshAllComponents() {
+        loadPreferences();
+    }
+
+    // ========================================================================
+    //  Styling Helper
+    // ========================================================================
+
+    private void setStyled(Node node, String style) {
+        node.setStyle(style);
+        ThemeManager.stripForCurrentTheme(node);
+    }
+
+    // ========================================================================
+    //  Private Helpers
+    // ========================================================================
+
+    private void applyFontSize(double size) {
+        if (fontSizeChangeListener != null) {
+            fontSizeChangeListener.accept(size);
+        }
+    }
+
+    private void applyLogLevel(String levelName) {
+        if (tryApplyLogLevelViaLogback(levelName)) {
+            return;
+        }
+        applyLogLevelViaJUL(levelName);
+    }
+
+    private boolean tryApplyLogLevelViaLogback(String levelName) {
+        try {
+            Class<?> logbackLoggerClass = Class.forName("ch.qos.logback.classic.Logger");
+            Class<?> levelClass = Class.forName("ch.qos.logback.classic.Level");
+
+            Object rootLogger = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
+            if (!logbackLoggerClass.isInstance(rootLogger)) {
+                return false;
+            }
+
+            Object level = levelClass.getMethod("toLevel", String.class).invoke(null, levelName);
+            logbackLoggerClass.getMethod("setLevel", levelClass).invoke(rootLogger, level);
+            LOGGER.info("Log level changed to {} (via Logback)", levelName);
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        } catch (Exception | LinkageError e) {
+            LOGGER.warn("Could not apply log level '{}' via Logback: {}", levelName, e.getMessage());
+            return false;
+        }
+    }
+
+    private void applyLogLevelViaJUL(String levelName) {
+        try {
+            java.util.logging.Level level = switch (levelName) {
+                case "ERROR" -> java.util.logging.Level.SEVERE;
+                case "WARN"  -> java.util.logging.Level.WARNING;
+                case "INFO"  -> java.util.logging.Level.INFO;
+                case "DEBUG" -> java.util.logging.Level.FINE;
+                case "TRACE" -> java.util.logging.Level.FINEST;
+                default      -> java.util.logging.Level.INFO;
+            };
+            java.util.logging.Logger.getLogger("").setLevel(level);
+            LOGGER.info("Log level changed to {} (via java.util.logging)", levelName);
+        } catch (Exception e) {
+            LOGGER.warn("Could not apply log level '{}': {}", levelName, e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    //  Upgrade Dialog
+    // ========================================================================
+
+    private void showUpgradeDialog() {
+        LicenseManager license = LicenseManager.getInstance();
+
+        if (license.isPro()) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Pro License");
+            alert.setHeaderText("💎 Pro License - Active");
+            alert.setContentText(license.getFeatureSummary());
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.showAndWait();
+            return;
+        }
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Upgrade to Pro");
+        alert.setHeaderText("💎 Unlock Pro Features");
+        alert.setContentText(license.getFeatureSummary() + "\n\nEnter your license key to upgrade:");
+        alert.getButtonTypes().add(new ButtonType("Enter Key", ButtonBar.ButtonData.OK_DONE));
+        alert.getButtonTypes().add(ButtonType.CANCEL);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+
+        alert.showAndWait().ifPresent(response -> {
+            if (response.getButtonData() == ButtonBar.ButtonData.OK_DONE) {
+                TextInputDialog keyDialog = new TextInputDialog();
+                keyDialog.setTitle("Enter License Key");
+                keyDialog.setHeaderText("Paste your Pro license key");
+                keyDialog.setContentText("License Key:");
+                ThemeManager.applyCurrentThemeToDialog(keyDialog.getDialogPane(), null);
+
+                Optional<String> result = keyDialog.showAndWait();
+                result.ifPresent(key -> {
+                    if (license.activateLicense(key)) {
+                        refreshAllComponents();
+                        updateLicenseUI(license);
+                        showInfoAlert("✅ Pro License Activated", 
+                            "You now have access to all Pro features.");
+                    } else {
+                        showErrorAlert("❌ Invalid License", 
+                            "The license key you entered is invalid. Please check and try again.");
+                    }
+                });
+            }
+        });
+    }
+
+    private void showInfoAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
+    }
+
+    private void showErrorAlert(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+        alert.showAndWait();
+    }
+
+    // ========================================================================
+    //  Error Reporting & Auto-Update Checkboxes
+    // ========================================================================
+
     public CheckBox createErrorReportingCheckBox() {
         CheckBox cb = new CheckBox("Send anonymous error reports");
         cb.setTooltip(new Tooltip("Help improve the app by sending anonymous error reports"));
@@ -861,9 +1059,6 @@ public class ConfigurationPanel {
         return cb;
     }
 
-    /**
-     * Creates a checkbox for enabling/disabling automatic update checks.
-     */
     public CheckBox createAutoUpdateCheckBox() {
         CheckBox cb = new CheckBox("Check for updates automatically");
         cb.setTooltip(new Tooltip("Automatically check for new versions on startup"));
@@ -875,18 +1070,5 @@ public class ConfigurationPanel {
             LOGGER.info("Auto-update {}", enabled ? "enabled" : "disabled");
         });
         return cb;
-    }
-
-    public void refreshAllComponents() {
-        loadPreferences();
-    }
-
-    // =============================
-    // Styling Helper
-    // =============================
-
-    private void setStyled(Node node, String style) {
-        node.setStyle(style);
-        ThemeManager.stripForCurrentTheme(node);
     }
 }

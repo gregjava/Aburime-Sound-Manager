@@ -420,11 +420,11 @@ public class Studio extends Application {
                 version = getClass().getPackage().getImplementationVersion();
             }
             if (version == null || version.isEmpty()) {
-                version = "0.3.9";
+                version = "4.0.0";  // Change from 3.9
             }
             return version;
         } catch (Exception e) {
-            return "0.3.9";
+            return "4.0.0";
         }
     }
 
@@ -825,8 +825,8 @@ public class Studio extends Application {
 
     public static void main(String[] args) {
         LOGGER.info("=================================================");
-        LOGGER.info("  Studio Audio Manager v3.9");
-        LOGGER.info("  Convert, Clean & Split Audio");
+        LOGGER.info("  Aburime Sound Manager v4.0.0 - Phoenix");
+        LOGGER.info("  Professional Audio Transcription & Processing");
         LOGGER.info("=================================================");
 
         System.setProperty("prism.lcdtext", "false");

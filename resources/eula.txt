@@ -4,7 +4,7 @@ Version 1.0
 
 1. GRANT OF LICENSE
 ------------------------
-AudioManager is provided free of charge for personal and commercial use.
+Aburime Sound Manager v4.0.0 ("Phoenix") is provided free of charge for personal and commercial use.
 You may use, copy, and distribute the software subject to the terms below.
 
 2. RESTRICTIONS

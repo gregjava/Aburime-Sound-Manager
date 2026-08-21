@@ -1,0 +1,11 @@
+{
+    "version": "4.0.0",
+    "releaseDate": "2026-08-21",
+    "downloadUrlWin": "https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.exe",
+    "downloadUrlMsi": "https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.msi",
+    "sizeBytes": 206000000,
+    "checksum": "",
+    "releaseNotes": "AudioManager v4.0.0 - Phoenix\n\nNew Features:\n- Adaptive concurrency scaling\n- Performance reporting with per-file stage timing\n- ID3 tagging support (sidecar .meta files)\n- Enhanced speaker diarization\n- REST API for headless automation\n- Batch scheduling for off-hours processing\n- First-run onboarding wizard\n\nBug Fixes:\n- Fixed NPE on non-Windows systems (LOCALAPPDATA)\n- Fixed output file generation in parallel batches\n- Fixed time estimation for segmented files\n- Fixed cancellation for parallel batches\n- Fixed auto-remove completed files\n\nEnhancements:\n- 40% faster batch processing with adaptive concurrency\n- Better memory management with resource-aware pooling\n- Improved error reporting with opt-in anonymous crash reports\n- Enhanced cross-platform support\n- Collapsible UI panels for cleaner interface\n\nSecurity:\n- EULA display on first run\n- Improved token handling (HF_TOKEN only from environment)\n- Code signing support",
+    "isCritical": true,
+    "minimumVersion": "3.9.0"
+}
