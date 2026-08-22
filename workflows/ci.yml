@@ -8,36 +8,68 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
+    runs-on: windows-latest
+    # FIX: this project bundles Windows-specific tooling (jpackage MSI/EXE
+    # generation, signtool, the bundled Windows venv layout in Studio.java)
+    # and its test suite constructs real javax.sound.sampled /
+    # ProcessBuilder objects tied to this platform — ubuntu-latest was
+    # never going to be able to build or test this project meaningfully.
+
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Set up JDK 17
+
+    - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
-        java-version: '17'
+        java-version: '21'
         distribution: 'temurin'
-        cache: maven
-    
-    - name: Build with Maven
-      run: mvn -B clean compile
-    
+        # FIX: was '17' — this project's javac.source/javac.target in
+        # project.properties are both 21. Compiling against 17 either
+        # fails outright on any 18-21 language feature already in use, or
+        # silently produces bytecode built against a different target
+        # than what's actually shipped to users.
+
+    - name: Set up Apache Ant
+      run: choco install ant -y
+      # FIX: this whole workflow previously assumed Maven (mvn, pom.xml,
+      # target/surefire-reports/) — this project has no pom.xml at all
+      # and is built entirely with Ant (build.xml + NetBeans
+      # project.properties, established earlier in this project's
+      # history). The Maven steps below never had anything to build
+      # against. Using Chocolatey (pre-installed on windows-latest
+      # runners) rather than a third-party marketplace action, since
+      # that's a directly verifiable, well-established install path
+      # rather than depending on an action whose exact current name/
+      # maintenance status I can't confirm from here.
+
+    - name: Refresh environment (pick up Ant on PATH from choco)
+      run: refreshenv
+      shell: pwsh
+
+    - name: Build (compile only, matches build.xml's "default" target)
+      run: ant jar
+
     - name: Run tests
-      run: mvn -B test
-    
-    - name: Build JAR
-      run: mvn -B package
-    
+      run: ant ci-test
+      # build.xml already defines this target specifically for CI use:
+      # <target name="ci-test" depends="clean,compile-test,test" .../>
+      # — reuses the project's own test wiring rather than inventing a
+      # parallel one here.
+
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: test-results
-        path: target/surefire-reports/
-    
+        path: build/test/results/
+        # FIX: was target/surefire-reports/ (Maven's default report path,
+        # meaningless here). This project's own build.xml defines
+        # build.test.results.dir=${build.dir}/test/results.
+
     - name: Upload JAR
       uses: actions/upload-artifact@v4
       with:
         name: audiomanager-jar
-        path: target/*.jar
+        path: dist/*.jar
+        # FIX: was target/*.jar (Maven's default output dir). This
+        # project's build.xml defines dist.dir=dist, dist.jar=${dist.dir}/${application.title}.jar.
