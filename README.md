@@ -11,4 +11,3 @@ Download AudioManager v4.0.0 for your platform:
 | Windows MSI | [AudioManager-Setup.exe](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.msi) |
 | macOS | [AudioManager.dmg](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AudioManager.dmg) |
 | Linux | [audiomanager.deb](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/linux/audiomanager.deb) |
-| Windows Portable | [AudioManager.jar](https://poseidon.org.uk/AburimeSoundManager-4.0.0-portable.zip) |
