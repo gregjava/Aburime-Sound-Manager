@@ -1,8 +1,110 @@
+# ============================================
+# Commercial / Proprietary Files
+# ============================================
+
+# Licensing files - KEEP PRIVATE
 core/LicenseManager.java
 tools/LicenseKeyGenerator.java
+src/audiomanager/resources/license-keys/
+src/audiomanager/resources/keys/
+*.license
+
+# Private keys and certificates
 *.p12
 *.pfx
 *.jks
 *.pem
 *.key
+*.crt
+*.cer
+*.der
+*.pkcs12
+keystore/
+certificates/
+
+# ============================================
+# Build Artifacts
+# ============================================
+
+target/
+build/
+dist/
+out/
+*.jar
+*.war
+*.ear
+*.exe
+*.msi
+*.dmg
+*.deb
+*.rpm
+*.pkg
+
+# ============================================
+# IDE Files
+# ============================================
+
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.classpath
+.project
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+nbproject/
+nb-configuration.xml
+
+# ============================================
+# Local Configuration
+# ============================================
+
 local.properties
+gradle-local.properties
+.env
+.env.local
+.env.*.local
+secrets/
+src/audiomanager/resources/tokens/
+
+# ============================================
+# Logs & Temporary Files
+# ============================================
+
+*.log
+*.tmp
+*.temp
+cache/
+user-data/
+session/
+logs/
+
+# ============================================
+# User Data
+# ============================================
+
+*.db
+*.sqlite
+*.sqlite3
+*.h2.db
+*.lck
+
+# ============================================
+# Testing
+# ============================================
+
+test-output/
+*.test
+*.fail
+
+# ============================================
+# Documentation Builds
+# ============================================
+
+docs/_build/
+docs/api/
