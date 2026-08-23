@@ -367,12 +367,13 @@ public class PreferenceManager {
     }
 
     // Theme Settings
-    public String getTheme() {
-        return getString(PreferenceKeys.THEME, "Light");
-    }
-
     public void setTheme(String theme) {
         putString(PreferenceKeys.THEME, theme);
+        flush();
+    }
+
+    public String getTheme() {
+        return getString(PreferenceKeys.THEME, "Light");
     }
     
     /**

@@ -17,6 +17,9 @@ import java.util.Map;
  * of it not at all, before the Python script gained timing instrumentation).
  * This is the structured, in-memory form surfaced in the UI's Performance
  * Report dialog.</p>
+ * 
+ * <p>Now includes GPU usage tracking to show whether GPU acceleration
+ * was used for each file processed.</p>
  */
 public class FileTimingReport {
 
@@ -119,6 +122,75 @@ public class FileTimingReport {
     public String getFailureExceptionMessage() { return failureExceptionMessage; }
     public boolean isFailed() { return failureExceptionType != null; }
 
+    // ===== GPU Support =====
+    private boolean gpuUsed = false;
+    private String gpuName = "None";
+    private String gpuComputeCapability = "N/A";
+    private long gpuMemoryMB = 0;
+
+    /**
+     * Sets whether GPU acceleration was used for this file.
+     */
+    public void setGpuUsed(boolean used) { this.gpuUsed = used; }
+
+    /**
+     * Returns true if GPU acceleration was used for this file.
+     */
+    public boolean isGpuUsed() { return gpuUsed; }
+
+    /**
+     * Sets the GPU name used for this file (e.g., "NVIDIA GeForce RTX 3080").
+     */
+    public void setGpuName(String name) { this.gpuName = name != null ? name : "None"; }
+
+    /**
+     * Returns the GPU name used for this file.
+     */
+    public String getGpuName() { return gpuName; }
+
+    /**
+     * Sets the GPU compute capability (e.g., "8.6").
+     */
+    public void setGpuComputeCapability(String capability) { 
+        this.gpuComputeCapability = capability != null ? capability : "N/A"; 
+    }
+
+    /**
+     * Returns the GPU compute capability.
+     */
+    public String getGpuComputeCapability() { return gpuComputeCapability; }
+
+    /**
+     * Sets the GPU memory in MB.
+     */
+    public void setGpuMemoryMB(long memoryMB) { this.gpuMemoryMB = memoryMB; }
+
+    /**
+     * Returns the GPU memory in MB.
+     */
+    public long getGpuMemoryMB() { return gpuMemoryMB; }
+
+    /**
+     * Returns a formatted GPU status string for display.
+     */
+    public String getGpuStatus() {
+        if (!gpuUsed) {
+            return "CPU";
+        }
+        return String.format("GPU: %s (%d MB)", gpuName, gpuMemoryMB);
+    }
+
+    /**
+     * Returns a detailed GPU info string for display.
+     */
+    public String getGpuDetails() {
+        if (!gpuUsed) {
+            return "No GPU acceleration";
+        }
+        return String.format("%s | Memory: %d MB | Compute: %s", 
+            gpuName, gpuMemoryMB, gpuComputeCapability);
+    }
+
     public FileTimingReport(String fileName) {
         this.fileName = fileName;
     }
@@ -144,5 +216,54 @@ public class FileTimingReport {
 
     public long getTotalMillis() {
         return stageMillis.getOrDefault("total_pipeline", -1L);
+    }
+
+    // ========================================================================
+    //  Builder-style methods for convenient chaining
+    // ========================================================================
+
+    /**
+     * Convenience method to set all GPU-related fields at once.
+     * 
+     * @param gpuConfig the GpuConfig instance to read GPU info from
+     * @param used whether GPU was actually used for this file
+     */
+    public void setGpuInfo(GpuConfig gpuConfig, boolean used) {
+        setGpuUsed(used);
+        if (used && gpuConfig.isGpuAvailable()) {
+            setGpuName(gpuConfig.getGpuName());
+            setGpuComputeCapability(gpuConfig.getComputeCapability());
+            setGpuMemoryMB(gpuConfig.getGpuMemoryMB());
+        } else {
+            setGpuName("CPU");
+            setGpuComputeCapability("N/A");
+            setGpuMemoryMB(0);
+        }
+    }
+
+    /**
+     * Creates a copy of this report with GPU info added.
+     * Useful for when GPU info is determined after the report is created.
+     */
+    public FileTimingReport withGpuInfo(GpuConfig gpuConfig, boolean used) {
+        FileTimingReport copy = new FileTimingReport(this.fileName);
+        copy.stageMillis.putAll(this.stageMillis);
+        copy.stageStartEpochMs.putAll(this.stageStartEpochMs);
+        copy.batchStartEpochMs = this.batchStartEpochMs;
+        copy.peakHeapUsedMB = this.peakHeapUsedMB;
+        copy.avgCpuLoadPercent = this.avgCpuLoadPercent;
+        copy.pythonPeakMemoryMb = this.pythonPeakMemoryMb;
+        copy.pythonAvgCpuPercent = this.pythonAvgCpuPercent;
+        copy.processingMode = this.processingMode;
+        copy.failureExceptionType = this.failureExceptionType;
+        copy.failureExceptionMessage = this.failureExceptionMessage;
+        copy.setGpuInfo(gpuConfig, used);
+        return copy;
+    }
+
+    @Override
+    public String toString() {
+        return String.format("FileTimingReport{fileName='%s', totalMillis=%d, gpuUsed=%s, gpuName='%s'}",
+                fileName, getTotalMillis(), gpuUsed, gpuName);
     }
 }

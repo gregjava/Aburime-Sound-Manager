@@ -279,9 +279,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     // ========================================================================
 
     private VBox createBatchQueueSection() {
-        VBox section = new VBox(10);
-        section.setPadding(new Insets(15, -5, 15, -5));
-        setStyled(section, "-fx-border-color: #e0e0e0; -fx-border-width: 1; -fx-border-radius: 5;");
+        VBox section = new VBox(8);
+        section.setPadding(new Insets(10, 10, 10, 10));
+        section.setStyle("-fx-border-color: transparent; -fx-border-width: 0;");
+        section.getStyleClass().add("theme-fix-surface");
 
         Label title = new Label("📊 Batch Queue Status");
         setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
@@ -289,34 +290,29 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         GridPane statusGrid = new GridPane();
         statusGrid.setHgap(15);
-        statusGrid.setVgap(8);
-        statusGrid.setPadding(new Insets(10, 0, 10, 0));
+        statusGrid.setVgap(6);
+        statusGrid.setPadding(new Insets(8, 0, 8, 0));
 
         // USE THE PRE-CREATED LABELS (they are bound to AppState)
         Label totalTitle = new Label("Total Files:");
         setStyled(totalTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
-        // queueTotalLabel is already bound - just add it
         setStyled(queueTotalLabel, "-fx-font-size: 12px;");
 
         Label durationTitle = new Label("Total Duration:");
         setStyled(durationTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
-        // queueDurationLabel is already bound
         setStyled(queueDurationLabel, "-fx-font-size: 12px;");
 
         Label completedTitle = new Label("Completed:");
         setStyled(completedTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
-        // completedCountLabel is already bound
         setStyled(completedCountLabel, "-fx-font-size: 12px; -fx-text-fill: #2e7d32;");
 
         Label failedTitle = new Label("Failed:");
         setStyled(failedTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
-        // failedCountLabel is already bound
         setStyled(failedCountLabel, "-fx-font-size: 12px;");
         failedCountLabel.getStyleClass().add("status-negative");
 
         Label pendingTitle = new Label("Pending:");
         setStyled(pendingTitle, "-fx-font-weight: bold; -fx-font-size: 12px;");
-        // pendingCountLabel is already bound
         setStyled(pendingCountLabel, "-fx-font-size: 12px;");
         pendingCountLabel.getStyleClass().add("status-accent");
 
@@ -332,16 +328,19 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         statusGrid.add(pendingTitle, 0, 2);
         statusGrid.add(pendingCountLabel, 1, 2);
 
-        // Table
+        // Table - with constrained height
         TableView<BatchFileItem> fileTableView = createFileTableView();
         this.batchQueueTableView = fileTableView;
         fileTableView.setItems(batchFiles);
-        fileTableView.setPrefHeight(200);
-        VBox.setVgrow(fileTableView, Priority.ALWAYS);
+        fileTableView.setPrefHeight(180);
+        fileTableView.setMaxHeight(250);
+        fileTableView.setMinHeight(100);
+        VBox.setVgrow(fileTableView, Priority.NEVER);
 
         // Action buttons
         HBox actionBox = new HBox(10);
         actionBox.setAlignment(Pos.CENTER_LEFT);
+        actionBox.setPadding(new Insets(8, 0, 4, 0));
 
         Button clearCompletedButton = new Button("Clear Completed");
         clearCompletedButton.setOnAction(e -> clearCompletedFiles());
@@ -356,10 +355,17 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         actionBox.getChildren().addAll(clearCompletedButton, removeSelectedButton, clearAllButton);
 
-        section.getChildren().addAll(title, statusGrid, fileTableView, actionBox);
-        
-        // Add batch status label below the table
-        section.getChildren().add(batchStatusLabel);
+        // Queue status label
+        setStyled(batchStatusLabel, "-fx-text-fill: #666; -fx-font-size: 11px; -fx-padding: 4 0 0 0;");
+
+        // Add all to section with proper spacing
+        section.getChildren().addAll(
+            title,
+            statusGrid,
+            fileTableView,
+            actionBox,
+            batchStatusLabel
+        );
 
         return section;
     }
@@ -978,6 +984,14 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         );
 
         tableView.setContextMenu(contextMenu);
+    }
+    
+    /**
+    * Returns the observable list of batch files.
+     * @return 
+    */
+    public ObservableList<BatchFileItem> getBatchFiles() {
+        return batchFiles;
     }
 
     private void setupDragAndDropForTableView(TableView<BatchFileItem> tableView) {

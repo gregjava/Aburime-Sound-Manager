@@ -6,6 +6,7 @@ package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
+import audiomanager.core.GpuConfig;
 import audiomanager.core.LicenseManager;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
@@ -28,6 +29,8 @@ import java.util.function.Consumer;
  * <p>Theme and font settings now use AppState as the single source of truth,
  * eliminating the split state where UI settings came from PreferenceManager
  * while UI state came from AppState.</p>
+ * 
+ * <p>Includes GPU acceleration configuration in the Performance section.</p>
  */
 public class ConfigurationPanel {
 
@@ -36,6 +39,7 @@ public class ConfigurationPanel {
     private final ScrollPane root;
     private final PreferenceManager prefManager;
     private final AppState appState = AppState.getInstance();
+    private final GpuConfig gpuConfig = GpuConfig.getInstance();
 
     // UI Components
     private ComboBox<String> modelComboBox;
@@ -76,6 +80,11 @@ public class ConfigurationPanel {
     private Label licenseLabel;
     private VBox licenseBox;
 
+    // ===== GPU Section Components =====
+    private CheckBox enableGpuCheckBox;
+    private Label gpuStatusLabel;
+    private Label gpuInfoLabel;
+
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
         
@@ -86,6 +95,7 @@ public class ConfigurationPanel {
         this.root = createRootPane();
         loadPreferences();
         bindToAppState();
+        updateGpuStatus();
     }
     
     public ScrollPane getRoot() {
@@ -101,7 +111,8 @@ public class ConfigurationPanel {
             createUISection(),
             createBatchSection(),
             createWhisperSection(),
-            createAudioSection()
+            createAudioSection(),
+            createPerformanceSection()  // NEW: GPU section
         );
         
         ScrollPane scrollPane = new ScrollPane(mainContent);
@@ -124,11 +135,6 @@ public class ConfigurationPanel {
     //  AppState Binding
     // ========================================================================
 
-    /**
-     * Bind UI components to AppState properties.
-     * This eliminates split state where theme/font came from PreferenceManager
-     * while other UI state came from AppState.
-     */
     private void bindToAppState() {
         // Font size - bidirectional binding with AppState
         fontSizeSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
@@ -138,22 +144,16 @@ public class ConfigurationPanel {
             }
         });
 
-        // When AppState changes font size, update the slider
         appState.fontSizeProperty().addListener((obs, oldVal, newVal) -> {
             if (fontSizeSlider != null) {
                 fontSizeSlider.setValue(newVal.doubleValue());
             }
         });
 
-        // Dark mode is handled via toggleTheme() in MainWindow,
-        // but we keep AppState in sync
         appState.darkModeProperty().addListener((obs, oldVal, newVal) -> {
-            // Theme toggle is triggered from MainWindow's menu
-            // This just ensures AppState reflects the current state
             LOGGER.debug("Dark mode state changed to: {}", newVal);
         });
 
-        // License status - update when license changes
         LicenseManager license = LicenseManager.getInstance();
         licenseLabel.setText(license.getLicenseStatusText());
         updateLicenseUI(license);
@@ -165,12 +165,6 @@ public class ConfigurationPanel {
             license.isPro()
                 ? "-fx-font-weight: bold; -fx-text-fill: #2e7d32; -fx-font-size: 12px; -fx-padding: 10 0 0 0;"
                 : "-fx-font-size: 12px; -fx-text-fill: #ed6c02; -fx-padding: 10 0 0 0;");
-
-        // Update upgrade button visibility
-        if (licenseBox != null) {
-            // Rebuild license section to reflect changes
-            // This will be refreshed when the UI is recreated
-        }
     }
 
     // ========================================================================
@@ -183,7 +177,6 @@ public class ConfigurationPanel {
             prefManager.putString(PreferenceKeys.MODEL, modelComboBox.getValue());
             prefManager.putString(PreferenceKeys.LANGUAGE, languageComboBox.getValue());
             
-            // Save timestamp mode
             if (timestampModeComboBox.getValue() != null) {
                 prefManager.putString("timestamp_mode", timestampModeComboBox.getValue().getValue());
             }
@@ -230,6 +223,11 @@ public class ConfigurationPanel {
 
             if (logLevelComboBox.getValue() != null) {
                 prefManager.putString("log_level", logLevelComboBox.getValue());
+            }
+
+            // GPU settings
+            if (enableGpuCheckBox != null) {
+                prefManager.putBoolean("gpu.enabled", enableGpuCheckBox.isSelected());
             }
 
             prefManager.flush();
@@ -383,6 +381,29 @@ public class ConfigurationPanel {
         ));
         logLevelComboBox.setPrefWidth(100);
 
+        // ===== GPU Components =====
+        enableGpuCheckBox = new CheckBox("Enable GPU Acceleration (CUDA)");
+        enableGpuCheckBox.setTooltip(new Tooltip(
+            "Use NVIDIA GPU for faster transcription.\n" +
+            "Requires CUDA-compatible GPU and NVIDIA drivers.\n" +
+            "If enabled, transcription will be 2-3x faster on compatible hardware."
+        ));
+        enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
+
+        enableGpuCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            prefManager.putBoolean("gpu.enabled", newVal);
+            prefManager.flush();
+            updateGpuStatus();
+        });
+
+        // GPU Status Label
+        gpuStatusLabel = new Label();
+        gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-padding: 4 0 4 0;");
+
+        // GPU Info Label (shows detailed GPU info)
+        gpuInfoLabel = new Label();
+        gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #718096; -fx-padding: 0 0 4 0;");
+
         // Set tooltips
         setTooltips();
     }
@@ -427,6 +448,53 @@ public class ConfigurationPanel {
         maxSegmentDurationSpinner.setTooltip(new Tooltip("Maximum segment duration in seconds (5-60)"));
         logLevelComboBox.setTooltip(new Tooltip("Application log verbosity (affects the log file, not the on-screen Terminal)"));
         id3TaggingCheckBox.setTooltip(new Tooltip("Create a sidecar .meta file with title, artist, and other metadata for each processed audio file"));
+        enableGpuCheckBox.setTooltip(new Tooltip(
+            "Use NVIDIA GPU for faster transcription.\n" +
+            "Requires CUDA-compatible GPU and NVIDIA drivers.\n" +
+            "If enabled, transcription will be 2-3x faster on compatible hardware."
+        ));
+    }
+
+    // ========================================================================
+    //  GPU Status Update
+    // ========================================================================
+
+    private void updateGpuStatus() {
+        if (gpuStatusLabel == null) return;
+
+        // Detect GPU if not already done
+        gpuConfig.detectGpu();
+
+        boolean gpuAvailable = gpuConfig.isGpuAvailable();
+        boolean gpuEnabled = enableGpuCheckBox != null && enableGpuCheckBox.isSelected();
+
+        if (gpuAvailable) {
+            String statusText = "🟢 GPU Detected: " + gpuConfig.getGpuName();
+            gpuStatusLabel.setText(statusText);
+            gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #2e7d32; -fx-padding: 4 0 4 0;");
+            
+            // Show detailed GPU info
+            String infoText = String.format(
+                "Memory: %d MB | Compute Capability: %s | Cores: %d",
+                gpuConfig.getGpuMemoryMB(),
+                gpuConfig.getComputeCapability(),
+                gpuConfig.getCudaCores()
+            );
+            gpuInfoLabel.setText(infoText);
+            gpuInfoLabel.setVisible(true);
+            gpuInfoLabel.setManaged(true);
+
+            // If GPU is available but disabled, show a hint
+            if (!gpuEnabled) {
+                gpuInfoLabel.setText(gpuInfoLabel.getText() + " (currently disabled)");
+                gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #ed6c02; -fx-padding: 0 0 4 0;");
+            }
+        } else {
+            gpuStatusLabel.setText("🔴 No GPU detected — running on CPU mode");
+            gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #d32f2f; -fx-padding: 4 0 4 0;");
+            gpuInfoLabel.setVisible(false);
+            gpuInfoLabel.setManaged(false);
+        }
     }
 
     // ========================================================================
@@ -452,7 +520,6 @@ public class ConfigurationPanel {
         fontSizeSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
             fontValueLabel.setText(String.format("%.0fpx", newVal.doubleValue()));
             applyFontSize(newVal.doubleValue());
-            // Update AppState
             appState.setFontSize(newVal.doubleValue());
         });
 
@@ -711,6 +778,74 @@ public class ConfigurationPanel {
     }
 
     // ========================================================================
+    //  Performance Section (NEW - GPU Settings)
+    // ========================================================================
+
+    public VBox createPerformanceSection() {
+        VBox section = new VBox(10);
+        section.setPadding(new Insets(10));
+        
+        Label title = new Label("⚡ Performance");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
+
+        // GPU Status
+        gpuStatusLabel = new Label();
+        gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-padding: 4 0 4 0;");
+        updateGpuStatus();
+
+        // GPU Info Label
+        gpuInfoLabel = new Label();
+        gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #718096; -fx-padding: 0 0 4 0;");
+        gpuInfoLabel.setVisible(false);
+        gpuInfoLabel.setManaged(false);
+
+        // GPU Enable Checkbox
+        enableGpuCheckBox = new CheckBox("Enable GPU Acceleration (CUDA)");
+        enableGpuCheckBox.setTooltip(new Tooltip(
+            "Use NVIDIA GPU for faster transcription.\n" +
+            "Requires CUDA-compatible GPU and NVIDIA drivers.\n" +
+            "If enabled, transcription will be 2-3x faster on compatible hardware."
+        ));
+        enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
+
+        enableGpuCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            prefManager.putBoolean("gpu.enabled", newVal);
+            prefManager.flush();
+            // Update the WhisperXTranscriptionService GPU setting
+            audiomanager.Studio studio = audiomanager.Studio.getInstance();
+            if (studio != null) {
+                // The service will read the preference on next transcription
+            }
+            updateGpuStatus();
+        });
+
+        // Refresh GPU button
+        Button refreshGpuButton = new Button("🔄 Refresh GPU Detection");
+        refreshGpuButton.setTooltip(new Tooltip("Re-detect GPU (useful after driver updates or plugging in a GPU)"));
+        refreshGpuButton.setOnAction(e -> {
+            gpuConfig.resetDetection();
+            gpuConfig.detectGpu();
+            updateGpuStatus();
+            LOGGER.info("GPU detection refreshed: {}", gpuConfig.getGpuSummary());
+        });
+        setStyled(refreshGpuButton, "-fx-background-radius: 4; -fx-padding: 4 12;");
+
+        HBox buttonBox = new HBox(10);
+        buttonBox.setAlignment(Pos.CENTER_LEFT);
+        buttonBox.getChildren().add(refreshGpuButton);
+
+        section.getChildren().addAll(
+            title,
+            gpuStatusLabel,
+            gpuInfoLabel,
+            enableGpuCheckBox,
+            buttonBox
+        );
+
+        return section;
+    }
+
+    // ========================================================================
     //  Load Preferences
     // ========================================================================
 
@@ -777,6 +912,11 @@ public class ConfigurationPanel {
         srtMaxCharsSpinner.getValueFactory().setValue(prefManager.getInt("srt_max_chars", 80));
         srtMaxLinesSpinner.getValueFactory().setValue(prefManager.getInt("srt_max_lines", 3));
         maxSegmentDurationSpinner.getValueFactory().setValue(prefManager.getDouble("max_segment_duration", 30.0));
+
+        // GPU settings
+        if (enableGpuCheckBox != null) {
+            enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
+        }
 
         LOGGER.debug("Preferences loaded successfully - font size from AppState: {}", appState.getFontSize());
     }
@@ -860,6 +1000,10 @@ public class ConfigurationPanel {
         return prefManager.isID3TaggingEnabled();
     }
 
+    public boolean isGpuEnabled() {
+        return enableGpuCheckBox != null && enableGpuCheckBox.isSelected();
+    }
+
     public void setEnabled(boolean enabled) {
         // Set all components enabled/disabled state
         modelComboBox.setDisable(!enabled);
@@ -886,6 +1030,7 @@ public class ConfigurationPanel {
         srtMaxLinesSpinner.setDisable(!enabled);
         maxSegmentDurationSpinner.setDisable(!enabled);
         id3TaggingCheckBox.setDisable(!enabled);
+        enableGpuCheckBox.setDisable(!enabled);
 
         // Silence controls only enabled when remove silence is checked and panel is enabled
         boolean silenceEnabled = enabled && removeSilenceCheckBox.isSelected();
@@ -903,6 +1048,7 @@ public class ConfigurationPanel {
 
     public void refreshAllComponents() {
         loadPreferences();
+        updateGpuStatus();
     }
 
     // ========================================================================

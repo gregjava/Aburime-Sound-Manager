@@ -37,14 +37,15 @@
 
 ---
 
-## 🚀 Download
+## Download
 
-### Secure Windows Installers
+Download AudioManager v4.0.0:
 
-| Platform | Download Link | Size |
-| :--- | :--- | :--- |
-| **Windows (EXE)** | [⬇ Download AudioManager-Setup.exe](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.exe) | ~197 MB |
-| **Windows (MSI)** | [⬇ Download AudioManager-Installer.msi](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.msi) | ~197 MB |
+| Platform | Download |
+|----------|----------|
+| **Windows EXE** | [⬇ Download](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.exe) |
+| **Windows MSI** | [⬇ Download](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/AburimeSoundManager-v4.0.0.msi) |
+| **Source Code** | [GitHub](https://github.com/gregjava/Aburime-Sound-Manager) |
 
 > **🔒 Security Note:** We distribute native Windows installers (`.exe`/`.msi`) instead of a `.jar` file to protect our licensing logic and provide a seamless installation experience. This is a deliberate security decision.
 

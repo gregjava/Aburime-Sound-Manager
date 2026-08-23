@@ -8,7 +8,6 @@ import audiomanager.model.BatchFileItem;
 import audiomanager.model.ProcessingConfig;
 import audiomanager.model.TranscriptionConfig;
 import audiomanager.model.TranscriptionResult;
-import audiomanager.ui.ConfigurationPanel;
 import audiomanager.util.TimeLeftEstimator;
 import audiomanager.util.ProcessRunner;
 import org.slf4j.Logger;
@@ -25,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Simplified parallel processing manager.
+ * Simplified parallel processing manager with GPU support.
  * 
  * <p>Key simplifications vs. original:</p>
  * <ul>
@@ -33,6 +32,7 @@ import java.util.function.Consumer;
  *   <li>BlockingQueue-based model pool instead of custom semaphore + instance tracking</li>
  *   <li>No resource monitor thread - memory pressure is handled via admission staggering</li>
  *   <li>Cleaner cancellation semantics</li>
+ *   <li>GPU acceleration support via GpuConfig</li>
  * </ul>
  */
 public class ParallelProcessingManager {
@@ -52,6 +52,7 @@ public class ParallelProcessingManager {
     private final Consumer<String> logger;
     private final TimeLeftEstimator timeEstimator;
     private final TranscriptionOutputWriter outputWriter;
+    private final GpuConfig gpuConfig = GpuConfig.getInstance();
 
     // ===== Threading =====
     private final ExecutorService workerPool;
@@ -73,10 +74,6 @@ public class ParallelProcessingManager {
     // ===== Error handling =====
     private ErrorReporter errorReporter;
     private BatchProcessor.FileCompletionCallback completionCallback;
-    private boolean adaptiveScalingEnabled;
-
-    // ========== NEW: ConfigurationPanel for ID3 Tagging ==========
-    private ConfigurationPanel configurationPanel;
 
     // ========================================================================
     //  Construction
@@ -102,6 +99,14 @@ public class ParallelProcessingManager {
         this.maxConcurrentFiles = Math.max(1, maxConcurrentFiles);
         this.outputWriter = new TranscriptionOutputWriter();
 
+        // Initialize GPU detection
+        gpuConfig.detectGpu();
+        if (gpuConfig.isGpuAvailable()) {
+            LOGGER.info("✅ GPU available: {}", gpuConfig.getGpuSummary());
+        } else {
+            LOGGER.info("ℹ️ No GPU detected — running on CPU mode");
+        }
+
         // Create worker pool with fixed size
         this.workerPool = Executors.newFixedThreadPool(
             this.maxConcurrentFiles,
@@ -119,8 +124,9 @@ public class ParallelProcessingManager {
             }
         }
 
-        LOGGER.info("ParallelProcessingManager initialized: {} workers, {} model instances",
-            this.maxConcurrentFiles, modelPool.size());
+        LOGGER.info("ParallelProcessingManager initialized: {} workers, {} model instances, GPU: {}",
+            this.maxConcurrentFiles, modelPool.size(), 
+            gpuConfig.isGpuAvailable() ? "available" : "not available");
     }
 
     // ========================================================================
@@ -141,6 +147,17 @@ public class ParallelProcessingManager {
 
     public void setErrorReporter(ErrorReporter errorReporter) {
         this.errorReporter = errorReporter;
+    }
+
+    public void setAdaptiveScalingEnabled(boolean enabled) {
+        // Adaptive scaling is now handled by the fixed thread pool + staggered admission
+        // This is kept for API compatibility but does nothing in the simplified model
+        LOGGER.debug("Adaptive scaling enabled: {} (fixed pool model)", enabled);
+    }
+
+    public boolean isAdaptiveScalingEnabled() {
+        // In the simplified model, adaptive scaling is always "enabled" via staggered admission
+        return true;
     }
 
     /**
@@ -164,7 +181,9 @@ public class ParallelProcessingManager {
         }
 
         int effectiveParallel = Math.min(maxParallel, maxConcurrentFiles);
-        LOGGER.info("Starting parallel batch: {} files, {} workers", items.size(), effectiveParallel);
+        LOGGER.info("Starting parallel batch: {} files, {} workers, GPU: {}", 
+            items.size(), effectiveParallel, 
+            gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
 
         return CompletableFuture.supplyAsync(() -> {
             long startTime = System.currentTimeMillis();
@@ -227,7 +246,9 @@ public class ParallelProcessingManager {
             ParallelBatchResult result = new ParallelBatchResult(
                 items.size(), completed, failed, duration, cancelled);
 
-            LOGGER.info("Batch complete: {}/{} files in {}ms", completed, items.size(), duration);
+            LOGGER.info("Batch complete: {}/{} files in {}ms (GPU: {})", 
+                completed, items.size(), duration,
+                gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
             return result;
 
         }, workerPool);
@@ -288,7 +309,9 @@ public class ParallelProcessingManager {
 
             try {
                 long queueWaitMs = System.currentTimeMillis() - queueEnteredMs;
-                LOGGER.debug("Processing {} (queue wait: {}ms)", file.getName(), queueWaitMs);
+                LOGGER.debug("Processing {} (queue wait: {}ms, GPU: {})", 
+                    file.getName(), queueWaitMs,
+                    gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
 
                 // Update item status
                 item.setStatus("PROCESSING");
@@ -328,7 +351,7 @@ public class ParallelProcessingManager {
                 long totalMs = System.currentTimeMillis() - queueEnteredMs;
                 long completedEpoch = System.currentTimeMillis();
 
-                // Record timing report
+                // Record timing report with GPU info
                 recordTimingReport(file, queueWaitMs, preprocessMs, modelAcquireMs,
                     transcribeMs, saveMs, totalMs, batchStartEpochMs,
                     queueEnteredMs, preprocessStart, modelAcquiredEpoch,
@@ -348,7 +371,7 @@ public class ParallelProcessingManager {
                 item.setErrorMessage(e.getMessage());
                 setItemProgress(item, 0.0);
 
-                // Record failure report
+                // Record failure report with GPU info
                 recordFailureReport(file, e, batchStartEpochMs, transcriptionConfig);
 
                 if (completionCallback != null) {
@@ -400,6 +423,10 @@ public class ParallelProcessingManager {
     private TranscriptionResult transcribeFile(File wavFile,
                                                TranscriptionConfig config,
                                                BatchFileItem item) throws Exception {
+        // Check GPU status before transcription
+        boolean gpuEnabled = gpuConfig.shouldUseGpu();
+        LOGGER.debug("Transcribing {} with GPU: {}", wavFile.getName(), gpuEnabled ? "enabled" : "disabled");
+        
         return transcriptionService.transcribe(
             wavFile.getAbsolutePath(),
             config,
@@ -517,6 +544,15 @@ public class ParallelProcessingManager {
         report.setStageEpoch("save_start", saveStart);
         report.setStageEpoch("completed", completedEpoch);
 
+        // GPU Info
+        boolean gpuUsed = gpuConfig.shouldUseGpu();
+        report.setGpuInfo(gpuConfig, gpuUsed);
+        
+        // Log GPU status for this file
+        if (gpuUsed) {
+            LOGGER.debug("File {} processed with GPU: {}", file.getName(), gpuConfig.getGpuName());
+        }
+
         // JVM-side resource snapshot
         Runtime rt = Runtime.getRuntime();
         report.setPeakHeapUsedMB((rt.totalMemory() - rt.freeMemory()) / (1024 * 1024));
@@ -531,6 +567,11 @@ public class ParallelProcessingManager {
         report.setFailure(e);
         report.setBatchStartEpochMs(batchStartEpochMs);
         report.setStageEpoch("failed_at", System.currentTimeMillis());
+        
+        // Include GPU info even for failures
+        boolean gpuUsed = gpuConfig.shouldUseGpu();
+        report.setGpuInfo(gpuConfig, gpuUsed);
+        
         recordTimingReport(report);
     }
 
@@ -602,12 +643,20 @@ public class ParallelProcessingManager {
     // ========================================================================
 
     private WhisperXTranscriptionService createModelInstance() {
-        return new WhisperXTranscriptionService(
+        // Ensure GPU detection is initialized
+        gpuConfig.detectGpu();
+        
+        WhisperXTranscriptionService instance = new WhisperXTranscriptionService(
             new DependencyManager(),
             timeEstimator,
             null,
             errorReporter
         );
+        
+        // Set GPU preference based on config
+        instance.setGpuEnabled(gpuConfig.shouldUseGpu());
+        
+        return instance;
     }
 
     private String getBaseName(String fileName) {
@@ -667,29 +716,5 @@ public class ParallelProcessingManager {
             t.setDaemon(true);
             return t;
         }
-    }/**
-     * @param enabled false pins every pool (model, IO, CPU, pipeline) at its
-     *                full static ceiling for the remainder of the batch,
-     *                ignoring measured CPU/memory pressure entirely — use
-     *                this to collect a fixed-concurrency baseline run.
-     *                true (default) restores normal adaptive throttling.
-     */
-    public void setAdaptiveScalingEnabled(boolean enabled) {
-        LicenseManager license = LicenseManager.getInstance();
-
-        // Free version: adaptive scaling is ALWAYS disabled
-        if (!license.isPro()) {
-            this.adaptiveScalingEnabled = false;
-            configurationPanel.adaptiveScalingCheckBox.setVisible(license.isPro());
-            LOGGER.info("Adaptive concurrency scaling FORCED DISABLED for Free version");
-            return;
-        }
-
-        this.adaptiveScalingEnabled = enabled;
-        LOGGER.info("Adaptive concurrency scaling {}", enabled ? "ENABLED" : "DISABLED");
-    }
-
-    public boolean isAdaptiveScalingEnabled() {
-        return adaptiveScalingEnabled;
     }
 }

@@ -1,0 +1,641 @@
+/*
+ * dark.css - Dark theme counterpart to styles.css
+ *
+ * Loaded ON TOP of styles.css (added to scene.getStylesheets() after it,
+ * only while dark mode is active) — JavaFX resolves equal-specificity rules
+ * by stylesheet order, so every selector here overrides styles.css's
+ * version of the same selector without needing !important anywhere.
+ *
+ * Two things had to both be true for dark mode to actually work, and this
+ * file is only the second: (1) MainWindow.ThemeManager strips inline
+ * -fx-background-color/-fx-text-fill/-fx-border-color rules when dark mode
+ * is toggled on, so stylesheet rules can reach nodes that would otherwise
+ * always keep their inline (light-theme) colors regardless of what
+ * stylesheet is active; (2) THIS file has to actually define dark colors
+ * for every control type those stripped nodes fall back to — without it,
+ * a stripped node just falls back to JavaFX's default Modena styling
+ * (light-ish), which looks like "nothing changed". Covers both the custom
+ * classes from styles.css and the plain JavaFX control types used
+ * throughout the panels (table/list views, menus, dialogs, tabs) that
+ * styles.css never explicitly styled.
+ */
+
+/* ============================= Root ============================= */
+
+.root {
+    /* ===== Design tokens (dark theme) =====
+       Named once here; every rule below references these instead of
+       repeating literal hex values. Change a color in one place instead
+       of hunting every rule that happens to use it — this is what the
+       "no design-token layer" weakness was pointing at. */
+    -color-bg-root:          #1e1e1e;
+    -color-bg-surface:       #2b2d30;
+    -color-bg-surface-alt:   #252526;
+    -color-border:           #55585c;
+    -color-border-hover:     #6a6d70;
+    -color-text-primary:     #d4d4d4;
+    -color-text-on-accent:   #e8e8e8;
+    -color-accent-focus:     #4a9eff;
+    -color-accent-success:   #4CAF50;
+    -color-accent-warning:   #fdd663;
+
+    -fx-background-color: -color-bg-root;
+    -fx-font-family: "Segoe UI", Arial, sans-serif;
+    -fx-font-size: 14px;
+    -fx-text-fill: -color-text-primary;
+}
+
+.section-title {
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-text-on-accent;
+    -fx-padding: 0 0 5 0;
+}
+
+.label, .text {
+    -fx-text-fill: -color-text-primary;
+}
+
+.status-label {
+    -fx-text-fill: #9aa0a6;
+    -fx-font-style: italic;
+}
+
+/* ============================= Buttons ============================= */
+
+.button {
+    -fx-background-color: #3a3d41;
+    -fx-text-fill: -color-text-on-accent;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-cursor: hand;
+    -fx-border-color: -color-border;
+    -fx-border-width: 1;
+}
+
+.button:hover {
+    -fx-background-color: #45484c;
+    -fx-border-color: -color-border-hover;
+}
+
+.button:pressed {
+    -fx-background-color: -color-bg-surface;
+}
+
+.button:disabled {
+    -fx-background-color: -color-bg-surface;
+    -fx-text-fill: -color-border-hover;
+    -fx-opacity: 0.7;
+}
+
+.primary-button {
+    -fx-background-color: linear-gradient(to bottom, #2e7d32, #1b5e20);
+    -fx-text-fill: white;
+    -fx-background-radius: 8;
+    -fx-font-weight: bold;
+    -fx-cursor: hand;
+}
+
+.primary-button:hover {
+    -fx-background-color: linear-gradient(to bottom, #388e3c, #2e7d32);
+}
+
+.primary-button:pressed {
+    -fx-background-color: #1b5e20;
+}
+
+.primary-button:disabled {
+    -fx-background-color: #3a3d41;
+    -fx-text-fill: -color-border-hover;
+    -fx-cursor: default;
+}
+
+.warning-button {
+    -fx-background-color: linear-gradient(to bottom, #e68900, #c26900);
+    -fx-text-fill: white;
+    -fx-background-radius: 8;
+}
+
+.danger-button {
+    -fx-background-color: linear-gradient(to bottom, #d32f2f, #b71c1c);
+    -fx-text-fill: white;
+    -fx-background-radius: 8;
+}
+
+.info-button {
+    -fx-background-color: linear-gradient(to bottom, #1976d2, #0d47a1);
+    -fx-text-fill: white;
+    -fx-background-radius: 8;
+}
+
+/* ============================= Text inputs ============================= */
+
+.text-field, .text-area, .password-field {
+    -fx-background-color: -color-bg-surface;
+    -fx-text-fill: -color-text-on-accent;
+    -fx-prompt-text-fill: #7a7d80;
+    -fx-border-color: -color-border;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-padding: 8 12 8 12;
+}
+
+.text-field:focused, .text-area:focused {
+    -fx-border-color: -color-accent-focus;
+    -fx-effect: dropshadow(three-pass-box, rgba(74, 158, 255, 0.35), 3, 0, 0, 0);
+}
+
+.text-area .content {
+    -fx-background-color: -color-bg-surface;
+}
+
+/* ============================= Combo box / Spinner ============================= */
+
+.combo-box, .spinner {
+    -fx-background-color: -color-bg-surface;
+    -fx-text-fill: -color-text-on-accent;
+    -fx-border-color: -color-border;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+}
+
+.combo-box .list-cell, .combo-box .text {
+    -fx-text-fill: -color-text-on-accent;
+    -fx-background-color: transparent;
+    -fx-padding: 6 10 6 10;
+}
+
+.combo-box:focused, .spinner:focused {
+    -fx-border-color: -color-accent-focus;
+}
+
+.combo-box:hover {
+    -fx-border-color: -color-border-hover;
+}
+
+.combo-box-popup .list-view {
+    -fx-background-color: -color-bg-surface;
+    -fx-border-color: -color-border;
+}
+
+.spinner .increment-arrow-button, .spinner .decrement-arrow-button {
+    -fx-background-color: #3a3d41;
+}
+
+/* ============================= Slider ============================= */
+
+.slider {
+    -fx-color: -color-accent-focus;
+}
+
+.slider .track {
+    -fx-background-color: #3a3d41;
+    -fx-background-radius: 2;
+}
+
+.slider .thumb {
+    -fx-background-color: -color-accent-focus;
+    -fx-background-radius: 8;
+}
+
+.slider .thumb:hover {
+    -fx-background-color: #6ab0ff;
+}
+
+.slider .thumb:pressed {
+    -fx-background-color: #2f7fd6;
+}
+
+/* ============================= Checkbox / Radio ============================= */
+
+.check-box, .radio-button {
+    -fx-text-fill: -color-text-primary;
+}
+
+.check-box .box, .radio-button .radio {
+    -fx-background-color: -color-bg-surface;
+    -fx-border-color: -color-border;
+    -fx-border-radius: 3;
+    -fx-background-radius: 3;
+}
+
+.check-box:selected .box {
+    -fx-background-color: -color-accent-focus;
+    -fx-border-color: -color-accent-focus;
+}
+
+.check-box:selected .mark {
+    -fx-background-color: white;
+}
+
+.radio-button:selected .dot {
+    -fx-background-color: white;
+}
+
+.radio-button:selected .radio {
+    -fx-background-color: -color-accent-focus;
+    -fx-border-color: -color-accent-focus;
+}
+
+.check-box:hover .box, .radio-button:hover .radio {
+    -fx-border-color: -color-border-hover;
+}
+
+/* ============================= Progress bar ============================= */
+
+.progress-bar {
+    -fx-accent: -color-accent-focus;
+}
+
+.progress-bar .track {
+    -fx-background-color: #3a3d41;
+    -fx-background-radius: 4;
+}
+
+.progress-bar .bar {
+    -fx-background-color: -color-accent-focus;
+    -fx-background-radius: 4;
+    -fx-background-insets: 1;
+}
+
+/* ============================= Menus ============================= */
+
+.menu-bar {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.menu-bar .label {
+    -fx-text-fill: -color-text-primary;
+}
+
+.menu, .menu-item, .context-menu {
+    -fx-background-color: -color-bg-surface;
+    -fx-text-fill: -color-text-primary;
+}
+
+.menu-item:focused, .menu-item:hover {
+    -fx-background-color: #3a3d41;
+}
+
+.menu:hover, .menu:showing {
+    -fx-background-color: #3a3d41;
+}
+
+.menu-item .label, .menu > .label {
+    -fx-text-fill: -color-text-primary;
+}
+
+.separator-menu-item .line {
+    -fx-border-color: -color-border;
+}
+
+/* ============================= Tables / Lists ============================= */
+
+.table-view, .list-view, .tree-view {
+    -fx-background-color: -color-bg-surface;
+    -fx-border-color: -color-border;
+}
+
+.table-view .column-header-background {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.table-view .column-header, .table-view .filler {
+    -fx-background-color: -color-bg-surface-alt;
+    -fx-border-color: #3a3d41;
+}
+
+.table-view .column-header .label {
+    -fx-text-fill: -color-text-primary;
+    -fx-font-weight: bold;
+}
+
+.table-row-cell, .list-cell {
+    -fx-background-color: -color-bg-surface;
+    -fx-text-fill: -color-text-primary;
+    -fx-border-color: transparent transparent #35373a transparent;
+}
+
+.table-row-cell:odd {
+    -fx-background-color: #262729;
+}
+
+.table-row-cell:selected, .list-cell:selected {
+    -fx-background-color: #2f5d8a;
+    -fx-text-fill: white;
+}
+
+.table-row-cell:hover, .list-cell:hover {
+    -fx-background-color: #35373a;
+}
+
+.table-cell {
+    -fx-text-fill: -color-text-primary;
+}
+
+/* ============================= Tabs ============================= */
+
+.tab-pane .tab-header-background {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.tab {
+    -fx-background-color: -color-bg-surface;
+}
+
+.tab:selected {
+    -fx-background-color: #3a3d41;
+}
+
+.tab .tab-label {
+    -fx-text-fill: -color-text-primary;
+}
+
+/* ============================= Titled pane / Split pane ============================= */
+
+.titled-pane > .title {
+    -fx-background-color: -color-bg-surface-alt;
+    -fx-text-fill: -color-text-primary;
+}
+
+.titled-pane > .content {
+    -fx-background-color: -color-bg-surface;
+    -fx-border-color: -color-border;
+}
+
+.split-pane {
+    -fx-background-color: -color-bg-root;
+}
+
+.split-pane-divider {
+    -fx-background-color: #3a3d41;
+}
+
+.separator .line {
+    -fx-border-color: #3a3d41;
+}
+
+/* ============================= Dialogs ============================= */
+
+.dialog-pane {
+    -fx-background-color: -color-bg-surface;
+}
+
+.dialog-pane .header-panel {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.dialog-pane .header-panel .label {
+    -fx-text-fill: -color-text-on-accent;
+}
+
+.dialog-pane .content.label {
+    -fx-text-fill: -color-text-primary;
+}
+
+.alert .header-panel .label {
+    -fx-text-fill: -color-text-on-accent;
+}
+
+/* ============================= Log area ============================= */
+/* Already dark in the light theme (a terminal-style panel), kept
+   consistent rather than re-darkened further, but the border/accent
+   colors are toned to match the rest of the dark theme. */
+
+.log-area {
+    -fx-background-color: -color-bg-root;
+    -fx-text-fill: -color-text-primary;
+    -fx-font-family: "Consolas", "Monaco", "Courier New", monospace;
+    -fx-font-size: 12px;
+    -fx-background-radius: 4;
+    -fx-border-color: #3a3d41;
+    -fx-border-radius: 4;
+    -fx-border-width: 1;
+}
+
+.log-area .content {
+    -fx-background-color: -color-bg-root;
+}
+
+.error-log { -fx-text-fill: #f28b82; -fx-font-weight: bold; }
+.success-log { -fx-text-fill: #81c995; -fx-font-weight: bold; }
+.warning-log { -fx-text-fill: -color-accent-warning; -fx-font-weight: bold; }
+.processing-log { -fx-text-fill: #8ab4f8; -fx-font-weight: bold; }
+.info-log { -fx-text-fill: #6ee0d6; }
+.normal-log { -fx-text-fill: -color-text-primary; }
+
+/* ============================= Tooltip ============================= */
+
+.tooltip {
+    -fx-background-color: #3a3d41;
+    -fx-text-fill: #f0f0f0;
+    -fx-background-radius: 4;
+    -fx-font-size: 12px;
+    -fx-padding: 6 8 6 8;
+}
+
+/* ============================= Scroll bars / panes ============================= */
+
+.scroll-pane {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+
+.scroll-pane .viewport {
+    -fx-background-color: transparent;
+}
+
+.scroll-bar {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.scroll-bar .track {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+.scroll-bar .thumb {
+    -fx-background-color: #4a4d51;
+    -fx-background-radius: 4;
+}
+
+.scroll-bar .thumb:hover {
+    -fx-background-color: #5a5d61;
+}
+
+.scroll-bar .increment-button, .scroll-bar .decrement-button {
+    -fx-background-color: -color-bg-surface-alt;
+}
+
+/* ============================= Safety-net + semantic classes =============================
+   Added across several rounds of fixing containers/text that stayed
+   light-mode-colored in practice. !important here is deliberate: these
+   guarantee correct color regardless of whether ThemeManager's inline
+   strip actually reaches a given node (it now should, after the
+   stripForDarkMode/restoreForLightMode crash fix — see ThemeManager.java —
+   but these stay as a safety net either way). */
+
+.theme-fix-surface {
+    -fx-background-color: -color-bg-surface !important;
+}
+
+.theme-fix-surface-alt {
+    -fx-background-color: -color-bg-surface-alt !important;
+}
+
+.panel-heading {
+    -fx-text-fill: -color-accent-success !important;
+}
+
+.panel-heading-pane .title {
+    -fx-text-fill: -color-accent-success !important;
+}
+
+.panel-heading-pane .title .text {
+    -fx-fill: -color-accent-success !important;
+}
+
+.status-negative {
+    -fx-text-fill: -color-accent-warning !important;   /* yellow, matches Clear Queue button */
+}
+
+.status-accent {
+    -fx-text-fill: -color-accent-success !important;   /* green, matches Ready to Process */
+}
+
+.status-success {
+    -fx-text-fill: -color-accent-success !important;
+}
+
+.tool-subheading {
+    -fx-text-fill: #b8c4cc !important;
+}
+
+.tool-muted-text {
+    -fx-text-fill: #8a97a0 !important;
+}
+
+.tool-preview-surface {
+    -fx-background-color: #24313d !important;
+}
+
+.tool-button-blue    { -fx-background-color: #3498db !important; }
+.tool-button-purple  { -fx-background-color: #9b59b6 !important; }
+.tool-button-red     { -fx-background-color: #e74c3c !important; }
+.tool-button-green   { -fx-background-color: #27ae60 !important; }
+.tool-button-orange  { -fx-background-color: #e67e22 !important; }
+
+/* ============================= Branded action buttons =============================
+   These lost their color the moment ThemeManager's sweep started actually
+   completing (post crash-fix) — the generic .button rule above now
+   legitimately reaches them. Their color is intentional and
+   theme-independent, so it lives here as classes instead of inline style,
+   immune to stripping either way. */
+
+.action-btn-browse {
+    -fx-background-color: #3498db !important;
+    -fx-text-fill: white !important;
+    -fx-font-weight: bold;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-output-dir {
+    -fx-background-color: #9b59b6 !important;
+    -fx-text-fill: white !important;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-clear-queue-active {
+    -fx-background-color: #e67e22 !important;
+    -fx-text-fill: white !important;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-clear-queue-disabled {
+    -fx-background-color: #bdc3c7 !important;
+    -fx-text-fill: #7f8c8d !important;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-add-to-queue-active {
+    -fx-background-color: #27ae60 !important;
+    -fx-text-fill: white !important;
+    -fx-font-weight: bold;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-add-to-queue-disabled {
+    -fx-background-color: #bdc3c7 !important;
+    -fx-text-fill: #7f8c8d !important;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14;
+}
+
+.action-btn-start {
+    -fx-background-color: linear-gradient(to bottom, #27ae60, #219a52) !important;
+    -fx-text-fill: white !important;
+    -fx-font-weight: bold;
+    -fx-padding: 12 30;
+    -fx-font-size: 14px;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow(three-pass-box, rgba(39,174,96,0.3), 5, 0, 0, 2);
+}
+
+.action-btn-cancel {
+    -fx-background-color: linear-gradient(to bottom, #F44336, #D32F2F) !important;
+    -fx-text-fill: white !important;
+    -fx-font-weight: bold;
+    -fx-padding: 10 25;
+    -fx-font-size: 14px;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.3), 5, 0, 0, 2);
+}
+
+.action-btn-clear-log {
+    -fx-background-color: linear-gradient(to bottom, #95a5a6, #7f8c8d) !important;
+    -fx-text-fill: white !important;
+    -fx-padding: 12 30;
+    -fx-background-radius: 8;
+}
+
+.action-btn-exit {
+    -fx-background-color: linear-gradient(to bottom, #e74c3c, #c0392b) !important;
+    -fx-text-fill: white !important;
+    -fx-padding: 12 30;
+    -fx-background-radius: 8;
+}
+
+.table-cell-completed {
+    -fx-text-fill: #66bb6a !important;
+    -fx-font-weight: bold;
+}
+
+.table-cell-processing {
+    -fx-text-fill: #42a5f5 !important;
+    -fx-font-weight: bold;
+}
+
+.table-cell-failed {
+    -fx-text-fill: #ef5350 !important;
+    -fx-font-weight: bold;
+}
+
+.progress-bar-completed {
+    -fx-accent: #4CAF50 !important;
+}
+
+.progress-bar-processing {
+    -fx-accent: #42a5f5 !important;
+}
+
+.progress-bar-failed {
+    -fx-accent: #ef5350 !important;
+}
+
+.progress-bar-pending {
+    -fx-accent: #666 !important;
+}

@@ -25,7 +25,7 @@ public class AutoUpdater {
     
     private static final Logger LOGGER = LoggerFactory.getLogger(AutoUpdater.class);
     private static final String UPDATE_MANIFEST_URL = 
-        "https://api.audiomanager.app/updates/latest.json";
+    "https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/updates/latest.json";
     private static final String DOWNLOAD_BASE_URL = 
         "https://downloads.audiomanager.app/";
     
