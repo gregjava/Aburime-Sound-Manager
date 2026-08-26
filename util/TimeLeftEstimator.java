@@ -34,17 +34,6 @@ public class TimeLeftEstimator {
     // Current batch tracking
     private final AtomicLong batchStartTime;
     private final List<FileProcessingRecord> currentBatchFiles; // queued files (with actual names)
-    // FIX: was a single `private FileProcessingRecord currentFile;` slot.
-    // Under parallel processing, more than one file can be actively
-    // transcribing at once — a single mutable slot meant whichever file
-    // called startFileProcessing() last silently overwrote (and discarded
-    // all live tracking for) whatever file was already in progress. That's
-    // how Total Time Left could undercount: the "bumped" file wasn't
-    // counted as active OR as queued, its remaining time just vanished
-    // from the calculation. Every file actively being processed now gets
-    // its own entry here for as long as it's in flight; see getDisplayFile()
-    // for how the single "File Time Left" UI label is chosen from among
-    // however many are in this map at once.
     private final Map<String, FileProcessingRecord> activeFiles = new ConcurrentHashMap<>();
     private BatchStatistics currentBatchStats;
     
@@ -56,8 +45,7 @@ public class TimeLeftEstimator {
     private static final int MAX_HISTORY_SIZE = 1000;
     private static final double INITIAL_SPEED_FACTOR = 1.0;
 
-    // Persistence — learned estimates survive app restarts, stored alongside
-    // BatchProcessor's existing ~/.audiomanager/batch_state.json
+    // Persistence
     private static final String ESTIMATOR_DATA_FILE = "time_estimates.json";
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final Path dataFilePath;
@@ -75,12 +63,6 @@ public class TimeLeftEstimator {
         currentSpeedMultiplier = INITIAL_SPEED_FACTOR * cpuFactor;
         LOGGER.info("CPU performance factor: {}, initial speed multiplier: {}", cpuFactor, currentSpeedMultiplier);
 
-        // FIX: persistence. Resolve the same ~/.audiomanager app-data
-        // directory BatchProcessor already uses for batch_state.json, then
-        // load any previously-learned timing data on top of the hardcoded
-        // defaults set above. Without this, every JVM restart discarded all
-        // learned estimates and started cold every single time — this is
-        // what made the estimator seem to have no persistence at all.
         Path resolvedPath = null;
         try {
             Path dir = Paths.get(System.getProperty("user.home"), ".audiomanager");
@@ -150,18 +132,7 @@ public class TimeLeftEstimator {
         FileProcessingRecord record = new FileProcessingRecord(fileName, fileSizeMB, model, processes);
         record.setStartTime(System.currentTimeMillis());
 
-        // FIX: always compute a FRESH estimate here, using whatever is
-        // currently the latest currentSpeedMultiplier and per-process
-        // learned timings — instead of reusing a cached estimate from
-        // whenever this file was originally queued. Previously, if the
-        // queued record already had a non-zero estimatedTotalTime (set the
-        // last time calculateBatchTotalTime() happened to run), that stale
-        // number was reused verbatim here, which meant a speed factor just
-        // learned from the file that finished immediately beforehand would
-        // NOT reach the next file's estimate — exactly the "doesn't apply
-        // its estimates immediately" symptom. Recalculating here guarantees
-        // every new file benefits from everything learned so far the moment
-        // it starts.
+        // Compute a fresh estimate
         calculateFileTimeEstimates(record);
 
         activeFiles.put(fileName, record);
@@ -191,35 +162,7 @@ public class TimeLeftEstimator {
     }
     
     /**
-     * FIX (root cause of "Total Time Left much higher than File Time Left
-     * near the end of a batch"): {@link #completeFileProcessing} only ever
-     * removes from {@code activeFiles} — correct for its purpose (recording
-     * real learned timing data once a file has genuinely finished
-     * transcribing), but it silently no-ops (just a debug warning) for a
-     * file that was never promoted out of {@code currentBatchFiles} in the
-     * first place. That happens for any file whose failure occurs BEFORE
-     * {@code startFileProcessing()} is reached — e.g. during audio
-     * preprocessing/enhancement, a dependency/model resolution failure, or
-     * simply because transcription is disabled for this batch entirely
-     * (audio-only mode never calls startFileProcessing/completeFileProcessing
-     * at all, since those only exist inside
-     * WhisperXTranscriptionService.transcribe()). Such a file's queued
-     * record then sits in {@code currentBatchFiles} permanently — nothing
-     * else ever removes it — and gets counted as still-pending "other" work
-     * in every subsequent {@link #getBatchTimeEstimate()} call for the rest
-     * of the batch, inflating Total Time Left right up to (and especially
-     * visible at) the true last file, while File Time Left — which only
-     * looks at the single displayed file — stays accurate throughout.
-     *
-     * <p>Call this unconditionally, for every file, in the per-file
-     * pipeline's own {@code finally} block (i.e. regardless of which stage
-     * the file reached or whether it succeeded) — see
-     * {@code ParallelProcessingManager}'s per-file processing method. Purely
-     * a tracking safety net: unlike {@link #completeFileProcessing}, this
-     * does NOT update learned timing statistics or completedFiles counts —
-     * calling it after a real {@link #completeFileProcessing} already ran
-     * for the same file is a safe, cheap no-op (both collections simply
-     * won't contain the file anymore).</p>
+     * Ensure file tracking is cleared for a file that may not have been promoted.
      */
     public void ensureFileTrackingCleared(String fileName) {
         currentBatchFiles.removeIf(rec -> rec.getFileName().equals(fileName));
@@ -239,6 +182,9 @@ public class TimeLeftEstimator {
         record.setEndTime(System.currentTimeMillis());
         long actualTotalTime = record.getActualTotalTime();
         
+        // ===== FIX: Set remaining time to 0 immediately =====
+        record.setEstimatedTimeLeft(0);
+        
         currentBatchStats.completedFiles++;
         currentBatchStats.totalProcessingTime += actualTotalTime;
         
@@ -247,37 +193,30 @@ public class TimeLeftEstimator {
         LOGGER.debug("File processing completed: {} in {}ms (estimated: {}ms), {} file(s) still active",
                     fileName, actualTotalTime, record.getEstimatedTotalTime(), activeFiles.size());
 
-        // FIX: persist immediately whenever a file finishes, rather than
-        // relying solely on the caller (BatchProcessor) to separately
-        // remember to call saveSessionData()/saveData() afterward. One
-        // observed caller path (cleanupTempFile) returns early — and skips
-        // its save call — whenever there's no temp file left to remove,
-        // meaning learned data from that file could be silently lost. Doing
-        // it here instead makes the save guaranteed and intrinsic to
-        // "finishing a file", not dependent on any particular caller.
+        // Persist immediately
         persistData();
     }
     
     /**
      * Chooses which actively-processing file "File Time Left" / "File Time
-     * Spent" / current-file progress refer to, when more than one file is
-     * being processed at once (i.e. under parallel processing). Picks
-     * whichever active file has the least estimated time remaining — the
-     * most useful "what happens next" signal for someone watching the
-     * queue. With zero or one active file this is simply that file (or
-     * null), identical to the old single-slot behaviour.
+     * Spent" / current-file progress refer to.
+     * 
+     * FIX: Returns the file with the MOST remaining time (the one that
+     * will finish last), not the least. The "File Time Left" should show the
+     * time remaining for the CURRENTLY DISPLAYED file, and "Total Time Left"
+     * should be the sum of all remaining files.
      */
     private FileProcessingRecord getDisplayFile() {
-        FileProcessingRecord soonest = null;
-        long soonestLeftMs = Long.MAX_VALUE;
+        FileProcessingRecord longest = null;
+        long longestLeftMs = Long.MIN_VALUE;
         for (FileProcessingRecord record : activeFiles.values()) {
             long left = Math.max(0, record.getEstimatedTotalTime() - record.getTimeSpent());
-            if (soonest == null || left < soonestLeftMs) {
-                soonest = record;
-                soonestLeftMs = left;
+            if (longest == null || left > longestLeftMs) {
+                longest = record;
+                longestLeftMs = left;
             }
         }
-        return soonest;
+        return longest;
     }
 
     /**
@@ -304,6 +243,9 @@ public class TimeLeftEstimator {
     
     /**
      * Get batch-level time estimates
+     * 
+     * FIX: Total Time Left should be the sum of all remaining file processing times,
+     * not just the current file's remaining time.
      */
     public BatchTimeEstimate getBatchTimeEstimate() {
         if (currentBatchFiles.isEmpty() && activeFiles.isEmpty()) {
@@ -312,65 +254,25 @@ public class TimeLeftEstimator {
         
         long elapsedTime = System.currentTimeMillis() - batchStartTime.get();
 
-        // FIX: estimatedTimeLeft used to be derived as
-        // calculateBatchTotalTime() - elapsedTime, which implicitly assumes
-        // "sum of every file's processing time" equals "wall-clock time
-        // elapsed since the batch started" — true for strictly sequential
-        // processing, but false the moment more than one file is being
-        // transcribed in parallel (two files each taking 10 minutes
-        // concurrently is 10 minutes of wall-clock time, not 20). That
-        // mismatch fed straight into "Total Time Left", making
-        // Total - File Time Left silently drift away from the sum of the
-        // other files' own estimates.
-        //
-        // estimatedTimeLeft is now built directly as (the displayed file's
-        // live remaining time) + (sum of every OTHER active file's own live
-        // remaining time) + (sum of each queued file's fresh estimate) —
-        // nothing here depends on wall-clock elapsed time at all, so
-        // Total - File Time Left equals exactly the sum of every other
-        // pending file's own estimate by construction, regardless of how
-        // many files are actually running concurrently. This also closes
-        // the gap the previous version of this fix still had: every file
-        // this estimator knows about — active or queued — is now counted
-        // exactly once, instead of a second/third concurrently-active file
-        // silently losing its own tracking the moment it stopped being the
-        // single tracked "current" file.
+        // Calculate total remaining time for ALL active files
+        long totalRemainingTime = 0;
+        long fileTimeLeft = 0;
+        
         FileProcessingRecord display = getDisplayFile();
-        long fileTimeLeft = display != null
-                ? Math.max(0, display.getEstimatedTotalTime() - display.getTimeSpent())
-                : 0;
-
-        // FIX: queued files' estimates were coming from
-        // calculateFileTimeEstimates(), which sums the static per-process
-        // default constants in ProcessTimingData.initializeDefaultTiming()
-        // for any process type without enough real learned samples yet.
-        // Those constants are generic placeholder guesses, and badly
-        // under-shoot the true cost of this app's actual workload —
-        // segmented, model-fallback-capable transcription that can run
-        // tens of minutes per file — versus the currently-processing
-        // file's estimate, which is continuously self-corrected from real,
-        // observed segment progress. The result: every not-yet-started
-        // file contributed only a few seconds to "Total Time Left" instead
-        // of anything close to what the display file's own remaining time
-        // suggested a similar file should take — Total Time Left barely
-        // exceeded File Time Left even with 20+ files still queued.
-        //
-        // Now: derive a live rate (ms of estimated total time per MB) from
-        // the file actually being processed right now, and apply it to
-        // each queued file's own size, rather than trusting the cold
-        // static defaults. Falls back to the old static-estimate path only
-        // when there's no display file yet to derive a live rate from
-        // (e.g. the very first tick of a fresh batch, before anything has
-        // started processing).
+        
+        for (FileProcessingRecord active : activeFiles.values()) {
+            long remaining = Math.max(0, active.getEstimatedTotalTime() - active.getTimeSpent());
+            totalRemainingTime += remaining;
+            if (active == display) {
+                fileTimeLeft = remaining;
+            }
+        }
+        
+        // Add estimates for queued files
         Double liveMsPerMB = (display != null && display.getFileSizeMB() > 0.01)
                 ? display.getEstimatedTotalTime() / display.getFileSizeMB()
                 : null;
-
-        long othersTimeLeft = 0;
-        for (FileProcessingRecord active : activeFiles.values()) {
-            if (active == display) continue;
-            othersTimeLeft += Math.max(0, active.getEstimatedTotalTime() - active.getTimeSpent());
-        }
+        
         for (FileProcessingRecord queuedFile : currentBatchFiles) {
             long queuedEstimate;
             if (liveMsPerMB != null) {
@@ -379,12 +281,10 @@ public class TimeLeftEstimator {
                 calculateFileTimeEstimates(queuedFile);
                 queuedEstimate = queuedFile.getEstimatedTotalTime();
             }
-            othersTimeLeft += queuedEstimate;
+            totalRemainingTime += queuedEstimate;
         }
-
-        long estimatedTimeLeft = fileTimeLeft + othersTimeLeft;
-        long estimatedTotalTime = elapsedTime + estimatedTimeLeft;
         
+        long estimatedTotalTime = elapsedTime + totalRemainingTime;
         int remainingFiles = currentBatchFiles.size() + activeFiles.size();
         double progress = currentBatchStats.getProgress();
         
@@ -395,7 +295,7 @@ public class TimeLeftEstimator {
             remainingFiles
         );
         
-        return new BatchTimeEstimate(elapsedTime, estimatedTimeLeft, estimatedTotalTime, context);
+        return new BatchTimeEstimate(elapsedTime, totalRemainingTime, estimatedTotalTime, context);
     }
     
     /**
@@ -506,11 +406,8 @@ public class TimeLeftEstimator {
         remainingTime = (long)(remainingTime / currentSpeedMultiplier);
         file.setEstimatedTimeLeft(remainingTime);
 
-        // FIX: same live-decay anchor as recordSegmentCompletion() — refresh
-        // estimatedTotalTime using actual elapsed time so far (always live)
-        // plus the freshly-recalculated remaining estimate, so
-        // getLiveCurrentFileTimeLeftMs() ticks down smoothly for
-        // non-segmented files too, not just segmented ("large" model) ones.
+        // Refresh estimatedTotalTime using actual elapsed time so far
+        // plus the freshly-recalculated remaining estimate
         file.setEstimatedTotalTime(file.getTimeSpent() + remainingTime);
     }
     
@@ -542,14 +439,7 @@ public class TimeLeftEstimator {
 
     /**
      * Feed the persistent, per-process learned-timing model directly,
-     * without requiring an active (in-progress) file record. Use this for
-     * phases that happen outside the window a file is registered via
-     * startFileProcessing()/startSegmentedFileProcessing() — e.g. audio
-     * preprocessing (runs before transcription starts tracking) or
-     * output-saving (runs after completeFileProcessing() has already
-     * removed the file from active tracking). recordProcessCompletion()
-     * requires an active record and would silently warn-and-drop this data
-     * for phases like these.
+     * without requiring an active (in-progress) file record.
      */
     public void recordGlobalProcessTiming(String processName, long durationMs, double fileSizeMB) {
         updateProcessTimingData(processName, durationMs, fileSizeMB);
@@ -588,7 +478,7 @@ public class TimeLeftEstimator {
         return totalTime;
     }
     
-    // Data classes (unchanged except where noted)
+    // Data classes
     
     private static class FileProcessingRecord {
         private final String fileName;
@@ -688,17 +578,13 @@ public class TimeLeftEstimator {
             return 0.0;
         }
     }
+    
     /**
      * Start tracking a file that will be processed in segments.
-     * @param fileName file name
-     * @param fileSizeMB file size in MB
-     * @param model model name
-     * @param processes list of processes (e.g., ["transcription_segment"])
-     * @param totalSegments number of segments
      */
     public void startSegmentedFileProcessing(String fileName, double fileSizeMB, String model,
                                             List<String> processes, int totalSegments) {
-        // Remove any queued record (should not happen)
+        // Remove any queued record
         FileProcessingRecord queued = null;
         for (FileProcessingRecord rec : currentBatchFiles) {
             if (rec.getFileName().equals(fileName)) {
@@ -715,8 +601,11 @@ public class TimeLeftEstimator {
         record.setStartTime(System.currentTimeMillis());
 
         // Estimate segment time using "transcription_segment" process
-        long baseSegmentTime = estimateProcessTime("transcription_segment", fileSizeMB / totalSegments, model);
+        double segmentSizeMB = fileSizeMB / totalSegments;
+        long baseSegmentTime = estimateProcessTime("transcription_segment", segmentSizeMB, model);
         record.setAvgSegmentTime(baseSegmentTime);
+        
+        // ===== FIX: Calculate TOTAL file time (all segments) =====
         long estimatedTotal = totalSegments * baseSegmentTime;
         record.setEstimatedTotalTime(estimatedTotal);
         record.setEstimatedTimeLeft(estimatedTotal);
@@ -738,47 +627,28 @@ public class TimeLeftEstimator {
         }
         record.recordSegmentCompletion(durationMs);
 
-        // FIX: feed this segment's actual duration into the persistent
-        // "transcription_segment" timing model, same as updateProcessTimingData()
-        // does for ordinary (non-segmented) processes via recordProcessCompletion().
-        // Previously only the current file's transient avgSegmentTime was updated
-        // here, so a segmented ("large" model) file's per-segment timings never
-        // reached processTimingData — meaning they were never learned from or
-        // persisted to disk, regardless of how many segmented files were processed.
+        // Feed this segment's actual duration into the persistent timing model
         double segmentSizeMB = record.getTotalSegments() > 0
                 ? record.getFileSizeMB() / record.getTotalSegments()
                 : record.getFileSizeMB();
         updateProcessTimingData("transcription_segment", durationMs, segmentSizeMB);
 
-        // Update remaining time
+        // Update remaining time for the ENTIRE file
         int remainingSegments = record.getTotalSegments() - record.getCompletedSegments();
         long estimatedRemaining = remainingSegments * record.getAvgSegmentTime();
         record.setEstimatedTimeLeft(estimatedRemaining);
 
-        // FIX ("count down in between" / "apply estimates immediately"): also
-        // refresh estimatedTotalTime, anchored to actual elapsed time so far
-        // (getTimeSpent(), which is always live) plus the freshly-recalculated
-        // remaining estimate. Previously estimatedTotalTime was set once at
-        // startSegmentedFileProcessing() and never touched again, so it went
-        // stale immediately. With this anchor, getLiveCurrentFileTimeLeftMs()
-        // below can compute (estimatedTotalTime - getTimeSpent()) at ANY
-        // moment — not just at segment boundaries — and get a number that
-        // ticks down continuously between segments, then snaps to the newly
-        // learned estimate the instant each segment completes.
+        // Refresh estimatedTotalTime anchored to actual elapsed time so far
+        // plus the freshly-recalculated remaining estimate
         record.setEstimatedTotalTime(record.getTimeSpent() + estimatedRemaining);
 
-        LOGGER.debug("Segment completed for {} in {}ms, avg now {}ms, remaining {} segments => {}ms left",
+        LOGGER.debug("Segment completed for {} in {}ms, avg now {}ms, remaining {} segments => {}ms left for entire file",
                      fileName, durationMs, record.getAvgSegmentTime(), remainingSegments, estimatedRemaining);
     }
 
     /**
-     * Live, continuously-decaying estimate of time left for the displayed
-     * file (see getDisplayFile()). Unlike getCurrentFileTimeEstimate()
-     * (which returns a snapshot only refreshed at segment/process
-     * boundaries), this combines the always-live getTimeSpent() with the
-     * latest known total estimate, so callers polling this every second
-     * (e.g. a UI Timeline tick) see a smooth countdown between segments,
-     * not a value that only changes in steps.
+     * Live, continuously-decaying estimate of time left for the displayed file.
+     * Returns the total remaining time for the ENTIRE file, not just the current segment.
      */
     public long getLiveCurrentFileTimeLeftMs() {
         FileProcessingRecord display = getDisplayFile();
@@ -790,13 +660,39 @@ public class TimeLeftEstimator {
 
     /**
      * Live, continuously-decaying estimate of time left for the WHOLE batch.
-     * getBatchTimeEstimate() already computes this correctly (it anchors off
-     * batchStartTime, which is always live), but is exposed here directly —
-     * as a plain long, matching getLiveCurrentFileTimeLeftMs() — for callers
-     * that just want the number to display each tick.
+     * Returns the sum of all remaining file processing times.
      */
     public long getLiveTotalTimeLeftMs() {
-        return getBatchTimeEstimate().timeLeftMs;
+        if (currentBatchFiles.isEmpty() && activeFiles.isEmpty()) {
+            return 0;
+        }
+        
+        long totalRemaining = 0;
+        
+        // Sum remaining time for all active files
+        for (FileProcessingRecord active : activeFiles.values()) {
+            long remaining = Math.max(0, active.getEstimatedTotalTime() - active.getTimeSpent());
+            totalRemaining += remaining;
+        }
+        
+        // Sum estimates for queued files
+        FileProcessingRecord display = getDisplayFile();
+        Double liveMsPerMB = (display != null && display.getFileSizeMB() > 0.01)
+                ? display.getEstimatedTotalTime() / display.getFileSizeMB()
+                : null;
+        
+        for (FileProcessingRecord queuedFile : currentBatchFiles) {
+            long queuedEstimate;
+            if (liveMsPerMB != null) {
+                queuedEstimate = (long) (liveMsPerMB * queuedFile.getFileSizeMB());
+            } else {
+                calculateFileTimeEstimates(queuedFile);
+                queuedEstimate = queuedFile.getEstimatedTotalTime();
+            }
+            totalRemaining += queuedEstimate;
+        }
+        
+        return totalRemaining;
     }
     
     private static class ProcessTimingData {
@@ -882,41 +778,19 @@ public class TimeLeftEstimator {
                 baseTimeMsPerMB = baseTimeMsPerMB * 0.7 + newBaseTime * 0.3;
             }
         }
-        /**
-         * Get sample count for this process
-         */
+        
         public int getSampleCount() {
             return historicalSamples.size();
         }
 
-        /**
-         * Get base time per MB
-         */
         public double getBaseTimePerMB() {
             return baseTimeMsPerMB;
         }
 
-        /**
-         * Get the fixed (per-invocation overhead) time component.
-         */
         public double getFixedTimeMs() {
             return fixedTimeMs;
         }
 
-        /**
-         * Overwrite this process's learned timing model with values loaded
-         * from disk, so learning from earlier app sessions carries forward
-         * instead of being lost on restart. The original historical samples
-         * themselves aren't persisted (only their aggregate effect on
-         * baseTimeMsPerMB/fixedTimeMs is) — placeholder entries with
-         * fileSizeMB=0 are added purely so getSampleCount() still reports
-         * how much history informed this model, and so the "size >= 5
-         * triggers relearning" gate in recordTiming() doesn't need to see 5
-         * more real samples post-restart before adapting further. The
-         * fileSizeMB=0 placeholders are automatically ignored by
-         * learnFromSamples()'s own "> 0.1 MB" filter, so they can't skew the
-         * learned average.
-         */
         public void applyPersisted(double baseTimeMsPerMB, double fixedTimeMs, int sampleCount) {
             this.baseTimeMsPerMB = baseTimeMsPerMB;
             this.fixedTimeMs = fixedTimeMs;
@@ -1019,21 +893,20 @@ public class TimeLeftEstimator {
             return totalFiles - completedFiles - failedFiles;
         }
     
-        // Add these missing getter methods
         public int getCompletedFiles() { return completedFiles; }
         public int getFailedFiles() { return failedFiles; }
         public int getTotalFiles() { return totalFiles; }
         public long getTotalProcessingTime() { return totalProcessingTime; }
         public long getBatchStartTime() { return batchStartTime; }
 
-        // Add method for average file time
         public double getAverageFileTime() {
             return completedFiles > 0 ? (double) totalProcessingTime / completedFiles : 0;
         }
     }
+    
     /**
-    * Reset the time estimator (for new batch)
-    */
+     * Reset the time estimator (for new batch)
+     */
     public void reset() {
         this.batchStartTime.set(System.currentTimeMillis());
         this.currentBatchFiles.clear();
@@ -1112,6 +985,7 @@ public class TimeLeftEstimator {
     public BatchStatistics getBatchStatistics() {
         return new BatchStatistics(currentBatchStats);
     }
+    
     /**
      * Save session data (called from BatchProcessor)
      */
@@ -1122,27 +996,23 @@ public class TimeLeftEstimator {
     }
 
     /**
-    * Get learned pattern count - returns the number of processes with real learned data.
-    * Excludes placeholder samples (fileSizeMB=0) used for persistence.
-    */
-   public int getLearnedPatternCount() {
-       return (int) processTimingData.values().stream()
-               .filter(data -> {
-                   // Check if there are any real samples (fileSizeMB > 0.1)
-                   return data.historicalSamples.stream()
-                           .anyMatch(sample -> sample.fileSizeMB > 0.1);
-               })
-               .count();
-   }
-   
-   /**
-    * Get the current speed multiplier.
-    * Values > 1.0 mean the system is faster than expected,
-    * Values < 1.0 mean the system is slower than expected.
-    */
-   public double getSpeedMultiplier() {
-       return currentSpeedMultiplier;
-   }
+     * Get learned pattern count - returns the number of processes with real learned data.
+     */
+    public int getLearnedPatternCount() {
+        return (int) processTimingData.values().stream()
+                .filter(data -> {
+                    return data.historicalSamples.stream()
+                            .anyMatch(sample -> sample.fileSizeMB > 0.1);
+                })
+                .count();
+    }
+    
+    /**
+     * Get the current speed multiplier.
+     */
+    public double getSpeedMultiplier() {
+        return currentSpeedMultiplier;
+    }
 
     /**
      * Clear learned data (called from BatchProcessor)
@@ -1176,11 +1046,9 @@ public class TimeLeftEstimator {
      */
     public void recordProcessTime(String processName, String fileName, long durationMillis, 
                                  double fileSizeMB, String model) {
-        // Find or create the file record
         if (activeFiles.containsKey(fileName)) {
             recordProcessCompletion(fileName, processName, durationMillis);
         }
-        // Also update the process timing data directly
         updateProcessTimingData(processName, durationMillis, fileSizeMB);
     }
     
@@ -1227,10 +1095,7 @@ public class TimeLeftEstimator {
     // -------------------------------------------------------------------------
 
     /**
-     * Load previously-learned timing data from disk, overlaying it on top of
-     * the hardcoded defaults already set by initializeDefaultProfiles(). If
-     * no file exists yet (first-ever run) or it can't be read, we simply
-     * keep the defaults — this must never throw or block startup.
+     * Load previously-learned timing data from disk.
      */
     private void loadPersistedData() {
         if (dataFilePath == null || !Files.exists(dataFilePath)) {
@@ -1268,10 +1133,7 @@ public class TimeLeftEstimator {
     }
 
     /**
-     * Write current learned timing data to disk. Called immediately after
-     * every file completes (see completeFileProcessing()), and also exposed
-     * via saveData()/saveSessionData() for any other caller — so estimates
-     * are never lost, per requirement, regardless of how/when the app exits.
+     * Write current learned timing data to disk.
      */
     private synchronized void persistData() {
         if (dataFilePath == null) {
@@ -1285,7 +1147,7 @@ public class TimeLeftEstimator {
             for (Map.Entry<String, ProcessTimingData> entry : processTimingData.entrySet()) {
                 ProcessTimingData timingData = entry.getValue();
                 if (timingData.getSampleCount() == 0) {
-                    continue; // nothing learned yet for this process — skip, defaults are fine
+                    continue;
                 }
                 PersistedProcessTiming saved = new PersistedProcessTiming();
                 saved.baseTimeMsPerMB = timingData.getBaseTimePerMB();

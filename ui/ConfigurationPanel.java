@@ -32,6 +32,10 @@ import java.util.function.Consumer;
  * 
  * <p>Includes GPU acceleration configuration in the Performance section.</p>
  * <p>Includes Translation configuration for post-transcription translation.</p>
+ * <p>Includes quick access to Setup Wizard for dependency management.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
  */
 public class ConfigurationPanel {
 
@@ -86,13 +90,17 @@ public class ConfigurationPanel {
     private Label gpuStatusLabel;
     private Label gpuInfoLabel;
 
-    // ===== NEW: Translation Section Components =====
+    // ===== Translation Section Components =====
     private TitledPane translationSection;
     private CheckBox translationEnabledCheckBox;
     private ComboBox<String> translationLanguageComboBox;
     private TextField translationEndpointField;
     private PasswordField translationApiKeyField;
     private Label translationStatusLabel;
+
+    // ===== NEW: Setup Wizard Quick Access =====
+    private Button setupWizardButton;
+    private Label dependencyStatusLabel;
 
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
@@ -105,6 +113,7 @@ public class ConfigurationPanel {
         loadPreferences();
         bindToAppState();
         updateGpuStatus();
+        updateDependencyStatus();
     }
     
     public ScrollPane getRoot() {
@@ -118,11 +127,12 @@ public class ConfigurationPanel {
         // Add all sections to the main content
         mainContent.getChildren().addAll(
             createUISection(),
+            createDependencySection(),  // NEW: Setup Wizard section
             createBatchSection(),
             createWhisperSection(),
-            createTranslationSection(),  // NEW: Translation section
+            createTranslationSection(),
             createAudioSection(),
-            createPerformanceSection()  // GPU section
+            createPerformanceSection()
         );
         
         ScrollPane scrollPane = new ScrollPane(mainContent);
@@ -140,7 +150,7 @@ public class ConfigurationPanel {
             });
         }
 
-        // ===== NEW: Translation enable/disable listener =====
+        // Translation enable/disable listener
         if (translationEnabledCheckBox != null) {
             translationEnabledCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
                 boolean enabled = newVal;
@@ -251,7 +261,7 @@ public class ConfigurationPanel {
                 prefManager.putBoolean("gpu.enabled", enableGpuCheckBox.isSelected());
             }
 
-            // ===== NEW: Translation settings =====
+            // Translation settings
             prefManager.setTranslationEnabled(translationEnabledCheckBox.isSelected());
             prefManager.setTranslationTargetLanguage(translationLanguageComboBox.getValue());
             prefManager.setTranslationEndpoint(translationEndpointField.getText());
@@ -427,18 +437,101 @@ public class ConfigurationPanel {
         gpuStatusLabel = new Label();
         gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-padding: 4 0 4 0;");
 
-        // GPU Info Label (shows detailed GPU info)
+        // GPU Info Label
         gpuInfoLabel = new Label();
         gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #718096; -fx-padding: 0 0 4 0;");
 
-        // ===== NEW: Translation Components =====
+        // ===== Translation Components =====
         initializeTranslationComponents();
+
+        // ===== NEW: Setup Wizard Components =====
+        initializeDependencyComponents();
 
         // Set tooltips
         setTooltips();
     }
 
-    // ===== NEW: Translation Components Initialization =====
+    // ===== NEW: Dependency/Setup Wizard Components =====
+
+    /**
+     * Initializes the dependency check and Setup Wizard components.
+     */
+    private void initializeDependencyComponents() {
+        Label title = new Label("🔧 System Dependencies");
+        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        title.getStyleClass().add("panel-heading");
+
+        dependencyStatusLabel = new Label("Click 'Check Dependencies' to verify your setup");
+        dependencyStatusLabel.setStyle("-fx-font-size: 12px; -fx-padding: 4 0 4 0;");
+
+        HBox buttonBox = new HBox(10);
+        buttonBox.setAlignment(Pos.CENTER_LEFT);
+
+        Button checkDepsButton = new Button("🔄 Check Dependencies");
+        checkDepsButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-padding: 6 16; -fx-background-radius: 4;");
+        checkDepsButton.setOnAction(e -> {
+            // This will be handled by MainWindow via the callback
+            if (onCheckDependencies != null) {
+                onCheckDependencies.run();
+            }
+        });
+
+        setupWizardButton = new Button("🚀 Run Setup Wizard");
+        setupWizardButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-padding: 6 16; -fx-font-weight: bold; -fx-background-radius: 4;");
+        setupWizardButton.setTooltip(new Tooltip(
+            "Launch the Setup Wizard to check Python version, WhisperX installation,\n" +
+            "TorchCodec, and other dependencies. Recommended for first-time users."
+        ));
+        setupWizardButton.setOnAction(e -> {
+            if (onRunSetupWizard != null) {
+                onRunSetupWizard.run();
+            }
+        });
+
+        Label quickTip = new Label("💡 Tip: Press Ctrl+Shift+S to launch Setup Wizard anytime");
+        quickTip.setStyle("-fx-font-size: 10px; -fx-text-fill: #666; -fx-padding: 4 0 0 0;");
+
+        buttonBox.getChildren().addAll(checkDepsButton, setupWizardButton);
+
+        VBox section = new VBox(8);
+        section.setPadding(new Insets(10));
+        section.getChildren().addAll(title, dependencyStatusLabel, buttonBox, quickTip);
+    }
+
+    /**
+     * Updates the dependency status label.
+     */
+    private void updateDependencyStatus() {
+        if (dependencyStatusLabel == null) return;
+        // This will be updated by MainWindow when dependencies are checked
+        // For now, show a default message
+        dependencyStatusLabel.setText("🔍 Click 'Check Dependencies' to verify your system setup");
+        dependencyStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #666; -fx-padding: 4 0 4 0;");
+    }
+
+    // ===== Callbacks for dependency actions =====
+    private Runnable onCheckDependencies;
+    private Runnable onRunSetupWizard;
+
+    /**
+     * Sets the callback for checking dependencies.
+     *
+     * @param callback the callback to invoke
+     */
+    public void setOnCheckDependencies(Runnable callback) {
+        this.onCheckDependencies = callback;
+    }
+
+    /**
+     * Sets the callback for running the Setup Wizard.
+     *
+     * @param callback the callback to invoke
+     */
+    public void setOnRunSetupWizard(Runnable callback) {
+        this.onRunSetupWizard = callback;
+    }
+
+    // ===== Translation Components =====
 
     /**
      * Initializes the translation UI components.
@@ -568,6 +661,8 @@ public class ConfigurationPanel {
             "Requires CUDA-compatible GPU and NVIDIA drivers.\n" +
             "If enabled, transcription will be 2-3x faster on compatible hardware."
         ));
+        
+        // ===== NEW: Setup Wizard tooltip already set in initialization =====
     }
 
     // ========================================================================
@@ -684,6 +779,51 @@ public class ConfigurationPanel {
         return section;
     }
 
+    // ===== NEW: Dependency Section =====
+
+    public VBox createDependencySection() {
+        VBox section = new VBox(8);
+        section.setPadding(new Insets(10));
+        
+        Label title = new Label("🔧 System Dependencies");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
+        title.getStyleClass().add("panel-heading");
+
+        dependencyStatusLabel = new Label("Click 'Check Dependencies' to verify your system setup");
+        dependencyStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #666; -fx-padding: 4 0 4 0;");
+
+        HBox buttonBox = new HBox(10);
+        buttonBox.setAlignment(Pos.CENTER_LEFT);
+
+        Button checkDepsButton = new Button("🔄 Check Dependencies");
+        checkDepsButton.setStyle("-fx-background-color: #3498db; -fx-text-fill: white; -fx-padding: 6 16; -fx-background-radius: 4;");
+        checkDepsButton.setOnAction(e -> {
+            if (onCheckDependencies != null) {
+                onCheckDependencies.run();
+            }
+        });
+
+        setupWizardButton = new Button("🚀 Run Setup Wizard");
+        setupWizardButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-padding: 6 16; -fx-font-weight: bold; -fx-background-radius: 4;");
+        setupWizardButton.setTooltip(new Tooltip(
+            "Launch the Setup Wizard to check Python version, WhisperX installation,\n" +
+            "TorchCodec, and other dependencies. Recommended for first-time users."
+        ));
+        setupWizardButton.setOnAction(e -> {
+            if (onRunSetupWizard != null) {
+                onRunSetupWizard.run();
+            }
+        });
+
+        Label quickTip = new Label("💡 Tip: Press Ctrl+Shift+S to launch Setup Wizard anytime");
+        quickTip.setStyle("-fx-font-size: 10px; -fx-text-fill: #666; -fx-padding: 4 0 0 0;");
+
+        buttonBox.getChildren().addAll(checkDepsButton, setupWizardButton);
+
+        section.getChildren().addAll(title, dependencyStatusLabel, buttonBox, quickTip);
+        return section;
+    }
+
     public VBox createBatchSection() {
         VBox section = new VBox(10);
         section.setPadding(new Insets(10));
@@ -787,13 +927,8 @@ public class ConfigurationPanel {
         return section;
     }
 
-    // ===== NEW: Translation Section =====
+    // ===== Translation Section =====
 
-    /**
-     * Creates the translation configuration section.
-     *
-     * @return the translation section VBox
-     */
     public VBox createTranslationSection() {
         VBox section = new VBox(10);
         section.setPadding(new Insets(10));
@@ -1021,7 +1156,7 @@ public class ConfigurationPanel {
             return;
         }
 
-        // Load font size from AppState (not PreferenceManager)
+        // Load font size from AppState
         double fontSize = appState.getFontSize();
         if (fontSize <= 0) {
             fontSize = AppConstants.DEFAULT_FONT_SIZE;
@@ -1084,7 +1219,7 @@ public class ConfigurationPanel {
             enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
         }
 
-        // ===== NEW: Load Translation preferences =====
+        // Load Translation preferences
         translationEnabledCheckBox.setSelected(prefManager.isTranslationEnabled());
         translationLanguageComboBox.setValue(prefManager.getTranslationTargetLanguage());
         translationEndpointField.setText(prefManager.getTranslationEndpoint());
@@ -1098,6 +1233,9 @@ public class ConfigurationPanel {
         translationEndpointField.setDisable(!prefManager.isTranslationEnabled());
         translationApiKeyField.setDisable(!prefManager.isTranslationEnabled());
         updateTranslationStatus();
+
+        // Update dependency status
+        updateDependencyStatus();
 
         LOGGER.debug("Preferences loaded successfully - font size from AppState: {}", appState.getFontSize());
     }
@@ -1142,7 +1280,7 @@ public class ConfigurationPanel {
             .maxSegmentDuration(maxSegmentDurationSpinner.getValue().floatValue())
             .enabled(enableTranscriptionCheckBox.isSelected())
             .skipSegmentation(skipSegmentationCheckBox.isSelected())
-            // ===== NEW: Translation settings =====
+            // Translation settings
             .translationEnabled(translationEnabledCheckBox.isSelected())
             .translationTargetLanguage(translationLanguageComboBox.getValue())
             .translationEndpoint(translationEndpointField.getText())
@@ -1190,8 +1328,7 @@ public class ConfigurationPanel {
         return enableGpuCheckBox != null && enableGpuCheckBox.isSelected();
     }
 
-    // ===== NEW: Translation Getters =====
-
+    // Translation Getters
     public boolean isTranslationEnabled() {
         return translationEnabledCheckBox != null && translationEnabledCheckBox.isSelected();
     }
@@ -1236,7 +1373,7 @@ public class ConfigurationPanel {
         id3TaggingCheckBox.setDisable(!enabled);
         enableGpuCheckBox.setDisable(!enabled);
         
-        // ===== NEW: Translation controls =====
+        // Translation controls
         translationEnabledCheckBox.setDisable(!enabled);
         boolean translationEnabled = enabled && translationEnabledCheckBox.isSelected();
         translationLanguageComboBox.setDisable(!translationEnabled);
@@ -1261,6 +1398,7 @@ public class ConfigurationPanel {
         loadPreferences();
         updateGpuStatus();
         updateTranslationStatus();
+        updateDependencyStatus();
     }
 
     // ========================================================================
@@ -1431,31 +1569,31 @@ public class ConfigurationPanel {
     }
     
     /**
-    * Gets a user-friendly GPU status message.
-    */
-   private String getGpuStatusMessage() {
-       gpuConfig.detectGpu();
-       if (gpuConfig.isGpuAvailable()) {
-           return "🟢 GPU Detected: " + gpuConfig.getGpuName();
-       } else {
-           return "ℹ️ CPU Mode - No compatible GPU detected";
-       }
-   }
+     * Gets a user-friendly GPU status message.
+     */
+    private String getGpuStatusMessage() {
+        gpuConfig.detectGpu();
+        if (gpuConfig.isGpuAvailable()) {
+            return "🟢 GPU Detected: " + gpuConfig.getGpuName();
+        } else {
+            return "ℹ️ CPU Mode - No compatible GPU detected";
+        }
+    }
 
-   /**
-    * Gets a user-friendly GPU status tooltip.
-    */
-   private String getGpuStatusTooltip() {
-       gpuConfig.detectGpu();
-       if (gpuConfig.isGpuAvailable()) {
-           return null; // No tooltip needed when GPU is available
-       } else {
-           return "The application is running on CPU for transcription.\n\n" +
-                  "For faster performance, you can:\n" +
-                  "• Use a smaller model (tiny, base, small)\n" +
-                  "• Reduce parallel file processing\n" +
-                  "• Install an NVIDIA GPU with CUDA support\n\n" +
-                  "Note: CPU mode still works for all features.";
-       }
-   }
+    /**
+     * Gets a user-friendly GPU status tooltip.
+     */
+    private String getGpuStatusTooltip() {
+        gpuConfig.detectGpu();
+        if (gpuConfig.isGpuAvailable()) {
+            return null; // No tooltip needed when GPU is available
+        } else {
+            return "The application is running on CPU for transcription.\n\n" +
+                   "For faster performance, you can:\n" +
+                   "• Use a smaller model (tiny, base, small)\n" +
+                   "• Reduce parallel file processing\n" +
+                   "• Install an NVIDIA GPU with CUDA support\n\n" +
+                   "Note: CPU mode still works for all features.";
+        }
+    }
 }

@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>Timing and resource reporting:</b> Captures per-stage timing and resource usage</li>
  *   <li><b>Retry with model fallback:</b> Tries smaller models on OOM errors</li>
  *   <li><b>Segmentation:</b> Splits long files into segments for processing</li>
+ *   <li><b>User-friendly error messages:</b> Detects and provides actionable error guidance</li>
  * </ul>
  *
  * <p><b>Token security:</b> The HuggingFace token is <b>never</b> embedded in source code.
@@ -309,6 +310,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
      *   <li>Large models (large-v2, large-v3) via segmentation</li>
      *   <li>Diarisation via alignment model download</li>
      *   <li>Retry with model fallback on OOM errors</li>
+     *   <li>User-friendly error detection and messages</li>
      * </ul>
      *
      * @param audioFilePath the path to the audio file
@@ -1098,7 +1100,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     }
 
     /**
-     * Executes WhisperX on a file.
+     * ===== ENHANCED: Executes WhisperX on a file with user-friendly error detection =====
      */
     private TranscriptionResult executeWhisperX(String audioFilePath,
                                                 TranscriptionConfig config,
@@ -1164,12 +1166,17 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             if (cancelled.get()) {
                 throw new Exception("Cancelled by user");
             }
+            
+            // ===== ENHANCED: User-friendly error handling for failed execution =====
             if (exitCode != 0) {
-                String tail = combinedLog.length() > 500
-                        ? combinedLog.substring(combinedLog.length() - 500)
-                        : combinedLog.toString();
+                String output = combinedLog.toString();
+                String userMessage = getUserFriendlyErrorMessage(output, exitCode);
+                String tail = output.length() > 500 ? output.substring(output.length() - 500) : output;
+                
                 LOGGER.error("WhisperX failed (exit {}). Output tail:\n{}", exitCode, tail);
-                throw new Exception("WhisperX exited with code " + exitCode + ". Output: " + tail);
+                
+                // Throw with user-friendly message
+                throw new Exception(userMessage + "\n\nTechnical details: WhisperX exited with code " + exitCode);
             }
 
             listOutputFiles(outputDir);
@@ -1178,6 +1185,152 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         } finally {
             cleanupTempDir(outputDir);
         }
+    }
+
+    /**
+     * ===== NEW: Generates user-friendly error messages based on process output =====
+     *
+     * <p>This method analyzes the process output and error logs to provide
+     * actionable, non-technical error messages for common failure scenarios.</p>
+     *
+     * @param output the process output
+     * @param exitCode the exit code
+     * @return a user-friendly error message with fix instructions
+     */
+    private String getUserFriendlyErrorMessage(String output, int exitCode) {
+        String lowerOutput = output != null ? output.toLowerCase() : "";
+        
+        // ===== Python version errors =====
+        if (lowerOutput.contains("python") && 
+            (lowerOutput.contains("3.13") || lowerOutput.contains("3.14") || lowerOutput.contains("3.15"))) {
+            return "Python 3.13 or newer is not supported by WhisperX.\n\n" +
+                   "FIX: Install Python 3.10, 3.11, or 3.12 from python.org\n" +
+                   "Create a new virtual environment with the correct version:\n" +
+                   "  C:\\Python312\\python.exe -m venv whisperx_env\n" +
+                   "Then reinstall WhisperX: pip install whisperx";
+        }
+        
+        // ===== TorchCodec errors =====
+        if (lowerOutput.contains("torchcodec") || lowerOutput.contains("libtorchcodec")) {
+            return "TorchCodec is missing required DLL files.\n\n" +
+                   "FIX: Install torchcodec==0.7.0 in your WhisperX environment:\n" +
+                   "  pip uninstall torchcodec -y\n" +
+                   "  pip install torchcodec==0.7.0\n\n" +
+                   "If you still see errors, copy FFmpeg DLLs:\n" +
+                   "  copy C:\\AI\\ffmpeg\\bin\\*.dll to the torchcodec folder\n" +
+                   "See the Troubleshooting Guide (F1) for details.";
+        }
+        
+        // ===== FFmpeg not found =====
+        if (lowerOutput.contains("ffmpeg") && 
+            (lowerOutput.contains("not found") || lowerOutput.contains("no such file"))) {
+            return "FFmpeg was not found by the transcription engine.\n\n" +
+                   "FIX: Install FFmpeg from ffmpeg.org\n" +
+                   "Place ffmpeg.exe and ffprobe.exe in: C:\\AI\\ffmpeg\\bin\\\n" +
+                   "Or add FFmpeg to your system PATH\n" +
+                   "Restart AudioManager after installing.";
+        }
+        
+        // ===== Out of memory =====
+        if (lowerOutput.contains("memory") || lowerOutput.contains("out of memory") ||
+            lowerOutput.contains("cuda out of memory")) {
+            return "Your computer ran out of memory while processing this file.\n\n" +
+                   "FIX:\n" +
+                   "• Use a smaller model (try 'small' or 'medium' instead of 'large')\n" +
+                   "• Reduce parallel files (set to 1)\n" +
+                   "• Close other applications to free up memory\n" +
+                   "• Enable GPU acceleration if available\n" +
+                   "• Split the file into smaller chunks using the Audio Splitter";
+        }
+        
+        // ===== Model not found =====
+        if (lowerOutput.contains("model") && 
+            (lowerOutput.contains("not found") || lowerOutput.contains("not installed") || 
+             lowerOutput.contains("missing") || lowerOutput.contains("no such"))) {
+            String modelName = extractModelNameFromOutput(output);
+            return "The '" + modelName + "' model was not found in your cache.\n\n" +
+                   "FIX: Download the model manually:\n" +
+                   "  pip install huggingface_hub[cli]\n" +
+                   "  huggingface-cli download Systran/faster-whisper-" + modelName + "\n\n" +
+                   "Or select a different model in Transcription Settings.";
+        }
+        
+        // ===== Alignment model missing =====
+        if (lowerOutput.contains("alignment") && lowerOutput.contains("not found")) {
+            return "The alignment model is missing.\n\n" +
+                   "FIX: The alignment model is downloaded automatically on first use.\n" +
+                   "Ensure you have:\n" +
+                   "• An active internet connection\n" +
+                   "• Enough disk space (at least 500MB free)\n" +
+                   "• Retry the transcription - the model will be downloaded automatically.";
+        }
+        
+        // ===== HF Token issues =====
+        if (lowerOutput.contains("hf_token") || lowerOutput.contains("huggingface") ||
+            lowerOutput.contains("token") && lowerOutput.contains("authentication")) {
+            return "HuggingFace authentication failed.\n\n" +
+                   "FIX: Set your HuggingFace token:\n" +
+                   "• Set HF_TOKEN environment variable: set HF_TOKEN=your_token_here\n" +
+                   "• Or create a file: C:\\Users\\YourName\\.audiomanager\\hf_token\n\n" +
+                   "Get a token at: https://huggingface.co/settings/tokens";
+        }
+        
+        // ===== Permission errors =====
+        if (lowerOutput.contains("permission") || lowerOutput.contains("access denied")) {
+            return "Permission denied while accessing a file or directory.\n\n" +
+                   "FIX: \n" +
+                   "• Make sure you have write permission to the output directory\n" +
+                   "• Run AudioManager as Administrator (right-click → Run as administrator)\n" +
+                   "• Check that no other process is using the file";
+        }
+        
+        // ===== Disk space errors =====
+        if (lowerOutput.contains("disk") && lowerOutput.contains("space") ||
+            lowerOutput.contains("no space") || lowerOutput.contains("full")) {
+            return "Not enough disk space to complete processing.\n\n" +
+                   "FIX: Free up disk space or choose a different output location.\n" +
+                   "You need at least 500MB of free space for temporary files.";
+        }
+        
+        // ===== Generic timeout =====
+        if (lowerOutput.contains("timeout") || lowerOutput.contains("timed out") ||
+            lowerOutput.contains("time limit")) {
+            return "The transcription took too long and timed out.\n\n" +
+                   "FIX:\n" +
+                   "• Use a smaller model (try 'small' instead of 'large')\n" +
+                   "• Enable GPU acceleration (up to 3x faster)\n" +
+                   "• Split the file into smaller chunks\n" +
+                   "• Process during off-hours when your computer is idle";
+        }
+        
+        // ===== Default: Generic error with exit code =====
+        return "The transcription process encountered an error (exit code: " + exitCode + ").\n\n" +
+               "Possible causes:\n" +
+               "• The audio file may be corrupt or unsupported\n" +
+               "• A required dependency may be missing or misconfigured\n" +
+               "• Your system may have insufficient resources\n\n" +
+               "Try:\n" +
+               "1. Run the Setup Wizard (Help → Run Setup Wizard)\n" +
+               "2. Check the Troubleshooting Guide (F1)\n" +
+               "3. Try a different audio file or model";
+    }
+
+    /**
+     * ===== NEW: Extracts model name from process output =====
+     *
+     * @param output the process output
+     * @return the extracted model name, or "base" if not found
+     */
+    private String extractModelNameFromOutput(String output) {
+        if (output == null) return "base";
+        String lowerOutput = output.toLowerCase();
+        String[] models = {"large-v3", "large-v2", "large", "medium", "small", "base", "tiny"};
+        for (String model : models) {
+            if (lowerOutput.contains(model)) {
+                return model;
+            }
+        }
+        return "base";
     }
 
     /**

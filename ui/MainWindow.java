@@ -7,7 +7,7 @@ package audiomanager.ui;
 import audiomanager.Studio;
 import audiomanager.constants.AppConstants;
 import audiomanager.core.*;
-import audiomanager.exceptions.FfmpegException;
+import audiomanager.exceptions.*;
 import audiomanager.model.*;
 import audiomanager.plugins.AudioSplitterTool;
 import audiomanager.plugins.FileCombinerTool;
@@ -161,14 +161,14 @@ public class MainWindow {
         LicenseManager license = LicenseManager.getInstance();
         license.loadLicense();
         
-        // ✅ Preload sound effects
+        // Preload sound effects
         SoundManager.preload();
 
         configureStage();
 
         Scene scene = uiCreator.createScene();
         
-        // ===== APPLY CSS =====
+        // Apply CSS
         applyCSSIfAvailable(scene);
         
         stage.setScene(scene);
@@ -189,7 +189,7 @@ public class MainWindow {
         restoreBatchQueueState();
         setupEventHandlers();
         
-        // ===== SETUP KEYBOARD SHORTCUTS =====
+        // Setup keyboard shortcuts
         setupKeyboardShortcuts(scene);
 
         if (fileSelectionPanel != null && batchProcessor != null) {
@@ -221,7 +221,7 @@ public class MainWindow {
         // Ctrl+Shift+D - Toggle Dark Mode
         scene.setOnKeyPressed(event -> {
             if (event.getCode() == KeyCode.D && event.isShortcutDown() && event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 toggleTheme(!"Dark".equals(prefManager.getTheme()));
                 event.consume();
                 log("🌙 Theme toggled via keyboard shortcut");
@@ -231,7 +231,7 @@ public class MainWindow {
             // F5 - Check Dependencies
             if (event.getCode() == KeyCode.F5 && !event.isShortcutDown()) {
                 if (controller != null) {
-                    SoundManager.playClick();  // ✅ ADDED
+                    SoundManager.playClick();
                     controller.checkDependencies();
                     event.consume();
                     log("🔍 Dependency check triggered via keyboard shortcut");
@@ -241,7 +241,7 @@ public class MainWindow {
             
             // Ctrl+Shift+W - Toggle Folder Watch
             if (event.getCode() == KeyCode.W && event.isShortcutDown() && event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 toggleFolderWatch();
                 event.consume();
                 return;
@@ -249,15 +249,23 @@ public class MainWindow {
             
             // Ctrl+Shift+P - Performance Report
             if (event.getCode() == KeyCode.P && event.isShortcutDown() && event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 showPerformanceReportDialog();
+                event.consume();
+                return;
+            }
+            
+            // Ctrl+Shift+S - Run Setup Wizard
+            if (event.getCode() == KeyCode.S && event.isShortcutDown() && event.isShiftDown()) {
+                SoundManager.playClick();
+                runSetupWizard();
                 event.consume();
                 return;
             }
             
             // Ctrl+B - Batch Settings
             if (event.getCode() == KeyCode.B && event.isShortcutDown() && !event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 showBatchSettingsDialog();
                 event.consume();
                 return;
@@ -265,7 +273,7 @@ public class MainWindow {
             
             // Ctrl+Q - Exit
             if (event.getCode() == KeyCode.Q && event.isShortcutDown() && !event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 handleExitButtonClick();
                 event.consume();
                 return;
@@ -273,7 +281,7 @@ public class MainWindow {
             
             // Ctrl+Comma - Preferences
             if (event.getCode() == KeyCode.COMMA && event.isShortcutDown() && !event.isShiftDown()) {
-                SoundManager.playClick();  // ✅ ADDED
+                SoundManager.playClick();
                 showPreferencesDialog();
                 event.consume();
                 return;
@@ -282,7 +290,7 @@ public class MainWindow {
             // Ctrl+Z - Undo (handled by FileSelectionPanel)
             if (event.getCode() == KeyCode.Z && event.isShortcutDown() && !event.isShiftDown()) {
                 if (fileSelectionPanel != null && fileSelectionPanel.undo()) {
-                    SoundManager.playClick();  // ✅ ADDED
+                    SoundManager.playClick();
                     log("↩️ Undo performed via keyboard shortcut");
                     event.consume();
                 }
@@ -293,7 +301,7 @@ public class MainWindow {
             if ((event.getCode() == KeyCode.Z && event.isShortcutDown() && event.isShiftDown()) ||
                 (event.getCode() == KeyCode.Y && event.isShortcutDown() && !event.isShiftDown())) {
                 if (fileSelectionPanel != null && fileSelectionPanel.redo()) {
-                    SoundManager.playClick();  // ✅ ADDED
+                    SoundManager.playClick();
                     log("↪️ Redo performed via keyboard shortcut");
                     event.consume();
                 }
@@ -359,7 +367,7 @@ public class MainWindow {
      */
     private void applyCSSIfAvailable(Scene scene) {
         try {
-            String cssPath = getClass().getResource("/styles/styles.css").toExternalForm();
+            String cssPath = getClass().getResource(AppConstants.CSS_PATH).toExternalForm();
             if (cssPath != null && !scene.getStylesheets().contains(cssPath)) {
                 scene.getStylesheets().add(cssPath);
                 LOGGER.info("✅ Applied light theme CSS: {}", cssPath);
@@ -419,6 +427,9 @@ public class MainWindow {
         uiCreator.setOnClearTimeData(this::clearTimeEstimationData);
         uiCreator.setOnRestApiToggle(this::toggleRestApi);
         uiCreator.setOnClearSessionData(this::clearSessionData);
+        
+        // Setup Wizard callback
+        uiCreator.setOnRunSetupWizard(this::runSetupWizard);
     }
 
     // ========================================================================
@@ -437,7 +448,7 @@ public class MainWindow {
     // ========================================================================
 
     private void handleProcessButtonClick() {
-        SoundManager.playClick();  // ✅ ADDED - Always play click for process button
+        SoundManager.playClick();
         if (controller.isProcessing()) {
             showCancelConfirmation();
             controller.cancelBatch();
@@ -539,7 +550,7 @@ public class MainWindow {
     // ========================================================================
 
     private void toggleTheme(boolean dark) {
-        SoundManager.playClick();  // ✅ Click sound when toggling theme
+        SoundManager.playClick();
         Scene scene = stage.getScene();
         if (scene == null) return;
 
@@ -723,7 +734,7 @@ public class MainWindow {
     }
 
     private void handleExitButtonClick() {
-        SoundManager.playClick();  // ✅ Click sound for exit
+        SoundManager.playClick();
         if (controller.isProcessing()) {
             Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
             alert.setTitle("Exit Confirmation");
@@ -753,14 +764,14 @@ public class MainWindow {
         ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
-            SoundManager.playClick();  // ✅ ADDED - Click sound for cancel confirmation
+            SoundManager.playClick();
             log("⏹️ Cancelling batch processing...");
             controller.cancelBatch();
         }
     }
 
     private void showScheduleDialog() {
-        SoundManager.playClick();  // ✅ ADDED - Click sound for schedule dialog
+        SoundManager.playClick();
         // Check if batch queue is empty
         if (batchFiles.isEmpty()) {
             log("❌ Cannot schedule: batch queue is empty");
@@ -922,7 +933,7 @@ public class MainWindow {
                 handleScheduleConfirmation(hourCombo, minuteCombo, amPmCombo, scheduler);
             } else if (response == clearBtn) {
                 scheduler.cancelScheduledBatch();
-                SoundManager.playClick();  // ✅ ADDED - Click sound for clearing schedule
+                SoundManager.playClick();
                 log("📅 Scheduled batch cancelled");
                 showInfo("Schedule Cancelled", "The scheduled batch has been cancelled.");
             }
@@ -930,37 +941,37 @@ public class MainWindow {
     }
 
     /**
-    * Updates the estimated completion time label.
-    */
-   private void updateCompletionLabel(ComboBox<String> hourCombo, ComboBox<String> minuteCombo,
+     * Updates the estimated completion time label.
+     */
+    private void updateCompletionLabel(ComboBox<String> hourCombo, ComboBox<String> minuteCombo,
                                       ComboBox<String> amPmCombo, Label completionLabel) {
-       try {
-           int hour = Integer.parseInt(hourCombo.getValue());
-           int minute = Integer.parseInt(minuteCombo.getValue());
-           boolean isPM = "PM".equals(amPmCombo.getValue());
+        try {
+            int hour = Integer.parseInt(hourCombo.getValue());
+            int minute = Integer.parseInt(minuteCombo.getValue());
+            boolean isPM = "PM".equals(amPmCombo.getValue());
 
-           if (isPM && hour != 12) hour += 12;
-           if (!isPM && hour == 12) hour = 0;
+            if (isPM && hour != 12) hour += 12;
+            if (!isPM && hour == 12) hour = 0;
 
-           LocalTime time = LocalTime.of(hour, minute);
-           LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
+            LocalTime time = LocalTime.of(hour, minute);
+            LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
 
-           if (scheduledTime.isBefore(LocalDateTime.now())) {
-               scheduledTime = scheduledTime.plusDays(1);
-           }
+            if (scheduledTime.isBefore(LocalDateTime.now())) {
+                scheduledTime = scheduledTime.plusDays(1);
+            }
 
-           long estimatedProcessingMs = estimateBatchProcessingTime();
-           LocalDateTime estimatedCompletion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedProcessingMs));
+            long estimatedProcessingMs = estimateBatchProcessingTime();
+            LocalDateTime estimatedCompletion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedProcessingMs));
 
-           completionLabel.setText("Estimated completion: " + 
-               estimatedCompletion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
-           completionLabel.setVisible(true);
-           completionLabel.setManaged(true);
-       } catch (Exception e) {
-           completionLabel.setVisible(false);
-           completionLabel.setManaged(false);
-       }
-   }
+            completionLabel.setText("Estimated completion: " + 
+                estimatedCompletion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
+            completionLabel.setVisible(true);
+            completionLabel.setManaged(true);
+        } catch (Exception e) {
+            completionLabel.setVisible(false);
+            completionLabel.setManaged(false);
+        }
+    }
 
     /**
      * Estimates total batch processing time in milliseconds.
@@ -1033,16 +1044,16 @@ public class MainWindow {
     }
 
     /**
-    * Estimates completion time for a scheduled batch.
-    */
-   private String estimateCompletionTime(LocalDateTime scheduledTime) {
-       long estimatedMs = estimateBatchProcessingTime();
-       LocalDateTime completion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedMs));
-       return completion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a"));
-   }
+     * Estimates completion time for a scheduled batch.
+     */
+    private String estimateCompletionTime(LocalDateTime scheduledTime) {
+        long estimatedMs = estimateBatchProcessingTime();
+        LocalDateTime completion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedMs));
+        return completion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a"));
+    }
 
     private void showPerformanceReportDialog() {
-        SoundManager.playClick();  // ✅ ADDED - Click sound for performance report
+        SoundManager.playClick();
         new PerformanceReportDialog().show(batchProcessor.getRecentTimingReports());
     }
 
@@ -1055,7 +1066,7 @@ public class MainWindow {
         
         confirm.showAndWait().ifPresent(response -> {
             if (response == ButtonType.OK && timeEstimator != null) {
-                SoundManager.playClick();  // ✅ ADDED - Click sound for clearing time data
+                SoundManager.playClick();
                 timeEstimator.clearSavedData();
                 log("🗑️ Time estimation data cleared");
                 if (controlPanel != null) {
@@ -1066,7 +1077,7 @@ public class MainWindow {
     }
 
     private void toggleRestApi() {
-        SoundManager.playClick();  // ✅ ADDED - Click sound for REST API toggle
+        SoundManager.playClick();
         if (restApiServer != null && restApiServer.isRunning()) {
             restApiServer.stop();
             restApiServer = null;
@@ -1283,42 +1294,157 @@ public class MainWindow {
         alert.showAndWait();
     }
 
-    private void showFfmpegAwareErrorAlert(String title, String header, Throwable ex) {
-        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-        Alert alert = new Alert(Alert.AlertType.ERROR);
-        alert.setTitle(title);
-        alert.setHeaderText(header);
+    // ========================================================================
+    //  User-Friendly Error Handling with Typed Exceptions
+    // ========================================================================
 
-        if (cause instanceof FfmpegException fe) {
-            String hint = fe.getExitCodeHint();
-            String message = fe.getUserMessage() + (hint != null ? "\n\n" + hint : "");
-            alert.setContentText(message);
+    /**
+     * Shows a user-friendly error dialog based on the exception type.
+     * This replaces the generic catch blocks with typed exception handling.
+     *
+     * @param throwable the exception to handle
+     * @param context the context where the error occurred
+     */
+    private void showUserFriendlyError(Throwable throwable, String context) {
+        Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
+        String message = cause.getMessage() != null ? cause.getMessage() : throwable.getMessage();
+        
+        Platform.runLater(() -> {
+            UserFriendlyErrorDialog dialog = createUserFriendlyErrorDialog(cause, message);
+            dialog.showAndWait();
+        });
+    }
 
-            if (fe.getStderrTail() != null && !fe.getStderrTail().isBlank()) {
-                TextArea detailsArea = new TextArea(fe.getStderrTail());
-                detailsArea.setEditable(false);
-                detailsArea.setWrapText(true);
-                detailsArea.setPrefSize(500, 200);
-                Label detailsLabel = new Label("FFmpeg output (exit code "
-                        + (fe.getExitCode() >= 0 ? fe.getExitCode() : "unknown") + "):");
-                VBox expandableContent = new VBox(5, detailsLabel, detailsArea);
-                alert.getDialogPane().setExpandableContent(expandableContent);
-            }
-        } else if (cause instanceof audiomanager.exceptions.AudioManagerException ame) {
-            String message = ame.getUserMessage();
-            if (!ame.isRecoverable()) {
-                message += "\n\nThis batch/file cannot be retried automatically — please check the "
-                        + "issue above before trying again.";
-            }
-            alert.setContentText(message);
-        } else if (cause instanceof audiomanager.exceptions.ModelDownloadException mde) {
-            alert.setContentText(mde.getUserFriendlyMessage());
-        } else {
-            alert.setContentText(cause.getMessage() != null ? cause.getMessage() : ex.getMessage());
+    /**
+     * Creates a user-friendly error dialog based on the exception type.
+     * This method branches on specific exception types to provide tailored error messages.
+     *
+     * @param cause the root cause exception
+     * @param message the error message
+     * @return a UserFriendlyErrorDialog appropriate for the error type
+     */
+    private UserFriendlyErrorDialog createUserFriendlyErrorDialog(Throwable cause, String message) {
+        String lowerMsg = message != null ? message.toLowerCase() : "";
+        
+        // ===== FFmpeg Errors =====
+        if (lowerMsg.contains("ffmpeg") || lowerMsg.contains("ffprobe") || 
+            cause instanceof FfmpegException) {
+            return UserFriendlyErrorDialog.forFFmpegMissing();
         }
+        
+        // ===== Python/WhisperX/Dependency Errors =====
+        if (lowerMsg.contains("python") || lowerMsg.contains("whisperx") || 
+            lowerMsg.contains("no module named") || 
+            cause instanceof audiomanager.exceptions.DependencyException) {
+            return UserFriendlyErrorDialog.forWhisperXMissing();
+        }
+        
+        // ===== Python Version Errors =====
+        if (lowerMsg.contains("python") && (lowerMsg.contains("3.13") || lowerMsg.contains("3.14") || 
+            lowerMsg.contains("3.15"))) {
+            return UserFriendlyErrorDialog.forPythonVersionError("3.13+");
+        }
+        
+        // ===== TorchCodec Errors =====
+        if (lowerMsg.contains("torchcodec") || lowerMsg.contains("libtorchcodec") ||
+            lowerMsg.contains("dll") || lowerMsg.contains("could not find module")) {
+            return UserFriendlyErrorDialog.forTorchCodecError();
+        }
+        
+        // ===== Model Errors =====
+        if ((lowerMsg.contains("model") && (lowerMsg.contains("not found") || 
+            lowerMsg.contains("not installed") || lowerMsg.contains("missing"))) ||
+            cause instanceof audiomanager.exceptions.ModelNotFoundException) {
+            String modelName = extractModelName(message);
+            return UserFriendlyErrorDialog.forModelNotFound(modelName);
+        }
+        
+        // ===== Memory Errors =====
+        if (lowerMsg.contains("memory") || lowerMsg.contains("out of memory") ||
+            lowerMsg.contains("heap space") || lowerMsg.contains("oom") ||
+            lowerMsg.contains("allocation")) {
+            return UserFriendlyErrorDialog.forOutOfMemory("the current file");
+        }
+        
+        // ===== Timeout Errors =====
+        if (lowerMsg.contains("timeout") || lowerMsg.contains("timed out") ||
+            lowerMsg.contains("time limit")) {
+            return UserFriendlyErrorDialog.forTimeout("the current file");
+        }
+        
+        // ===== Output Integrity Errors =====
+        if (cause instanceof audiomanager.exceptions.OutputIntegrityException) {
+            return UserFriendlyErrorDialog.forTranscriptionFailure("file", cause);
+        }
+        
+        // ===== Transcription Errors =====
+        if (cause instanceof audiomanager.exceptions.TranscriptionException) {
+            return UserFriendlyErrorDialog.forTranscriptionFailure("file", cause);
+        }
+        
+        // ===== Model Download Errors =====
+        if (cause instanceof audiomanager.exceptions.ModelDownloadException) {
+            return new UserFriendlyErrorDialog.Builder()
+                .title("Model Download Failed")
+                .header("📥 Could not download the required model")
+                .userMessage(
+                    "AudioManager encountered an issue while downloading a required model.\n\n" +
+                    "This could be due to network connectivity issues or insufficient disk space."
+                )
+                .fixInstructions(
+                    "1. Check your internet connection\n" +
+                    "2. Ensure you have enough disk space (at least 2GB free)\n" +
+                    "3. Try again later\n" +
+                    "4. If the problem persists, download the model manually using:\n" +
+                    "   huggingface-cli download Systran/faster-whisper-large-v2"
+                )
+                .technicalDetails(cause.getMessage())
+                .troubleshootingLink("TROUBLESHOOTING.md#err-008")
+                .build();
+        }
+        
+        // ===== Default: General Error =====
+        return new UserFriendlyErrorDialog.Builder()
+            .title("Unexpected Error")
+            .header("Something went wrong")
+            .userMessage(
+                "An unexpected error occurred while processing your request.\n\n" +
+                "Please try again. If the problem persists, check the Troubleshooting Guide."
+            )
+            .technicalDetails(cause.toString())
+            .troubleshootingLink("TROUBLESHOOTING.md")
+            .build();
+    }
 
-        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
-        alert.showAndWait();
+    /**
+     * Extracts the model name from an error message.
+     *
+     * @param message the error message
+     * @return the extracted model name, or "base" if not found
+     */
+    private String extractModelName(String message) {
+        if (message == null) return "base";
+        String lowerMsg = message.toLowerCase();
+        String[] models = {"large-v3", "large-v2", "large", "medium", "small", "base", "tiny"};
+        for (String model : models) {
+            if (lowerMsg.contains(model)) {
+                return model;
+            }
+        }
+        return "base";
+    }
+
+    /**
+     * Shows a typed exception alert with user-friendly messaging.
+     * This is the main entry point for error handling from batch processing.
+     *
+     * @param title the alert title
+     * @param header the alert header
+     * @param ex the exception
+     */
+    private void showFfmpegAwareErrorAlert(String title, String header, Throwable ex) {
+        // Use the new user-friendly error dialog
+        showUserFriendlyError(ex, header);
     }
 
     private void applyFontSizeToDialog(Dialog<?> dialog, double size) {
@@ -1381,7 +1507,7 @@ public class MainWindow {
     // ========================================================================
 
     private void toggleFolderWatch() {
-        SoundManager.playClick();  // ✅ ADDED - Click sound for folder watch toggle
+        SoundManager.playClick();
         if (folderWatcher != null) {
             stopFolderWatch();
             return;
@@ -1430,6 +1556,61 @@ public class MainWindow {
             watchFolderMenuItem.setText("📁 Watch Folder...");
         }
         log("📁 Stopped watching folder");
+    }
+
+    // ========================================================================
+    //  Setup Wizard
+    // ========================================================================
+
+    /**
+     * Launches the Setup Wizard to help users configure dependencies.
+     * 
+     * <p>This method checks if batch processing is running before launching
+     * the wizard, and refreshes dependencies after completion.</p>
+     */
+    private void runSetupWizard() {
+        if (controller.isProcessing()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Cannot Run Setup");
+            alert.setHeaderText("Batch processing is active");
+            alert.setContentText("Please wait for batch processing to complete before running the setup wizard.");
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.showAndWait();
+            return;
+        }
+        
+        SoundManager.playClick();
+        log("🔄 Launching Setup Wizard...");
+        
+        try {
+            // Create and show the wizard
+            OnboardingWizard wizard = new OnboardingWizard();
+            wizard.showAndWait();
+            log("✅ Setup Wizard completed");
+            
+            // Refresh dependency status after wizard
+            // This ensures any newly installed dependencies are detected
+            controller.checkDependencies();
+            
+            // Show success message
+            Alert success = new Alert(Alert.AlertType.INFORMATION);
+            success.setTitle("Setup Complete");
+            success.setHeaderText("✅ Setup Wizard Completed");
+            success.setContentText(
+                "The setup wizard has finished.\n\n" +
+                "If you installed any new dependencies, they have been detected.\n" +
+                "You can now start processing audio files."
+            );
+            ThemeManager.applyCurrentThemeToDialog(success.getDialogPane(), null);
+            success.showAndWait();
+            
+        } catch (Exception e) {
+            LOGGER.error("Setup Wizard failed", e);
+            log("❌ Setup Wizard failed: " + e.getMessage());
+            showError("Setup Wizard Error", 
+                "The setup wizard encountered an error:\n" + e.getMessage() + 
+                "\n\nPlease try again or run 'Help → Check Dependencies' manually.");
+        }
     }
 
     // ========================================================================
@@ -1496,8 +1677,8 @@ public class MainWindow {
     }
     
     /**
-    * Clears all session data with confirmation.
-    */
+     * Clears all session data with confirmation.
+     */
     private void clearSessionData() {
         // First, check if processing is active
         if (controller.isProcessing()) {
@@ -1565,7 +1746,7 @@ public class MainWindow {
 
         // Perform the clearing
         try {
-            SoundManager.playClick();  // ✅ ADDED - Click sound for session clear
+            SoundManager.playClick();
 
             // 1. Clear batch queue
             int clearedFiles = batchFiles.size();

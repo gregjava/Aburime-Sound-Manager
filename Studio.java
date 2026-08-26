@@ -12,6 +12,7 @@ import audiomanager.core.TranslationService;
 import audiomanager.ui.EulaDialog;
 import audiomanager.ui.MainWindow;
 import audiomanager.ui.OnboardingWizard;
+import audiomanager.ui.ThemeManager;
 import audiomanager.util.PreferenceManager;
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -73,8 +74,6 @@ public class Studio extends Application {
     private AutoUpdater autoUpdater;
     private ErrorReporter errorReporter;
     private BatchScheduler batchScheduler;
-    
-    // ===== NEW: Translation Service =====
     private TranslationService translationService;
 
     private PreferenceManager prefManager;
@@ -190,7 +189,7 @@ public class Studio extends Application {
         // Initialize batch scheduler
         initializeBatchScheduler();
 
-        // ===== NEW: Initialize translation service =====
+        // Initialize translation service
         initializeTranslationService();
 
         // Verify WhisperX installation during app startup
@@ -266,7 +265,8 @@ public class Studio extends Application {
             // Check if we just installed an update
             checkRestartAfterUpdate();
 
-            // Run first-run onboarding if needed
+            // ===== UPDATED: Run first-run onboarding if needed =====
+            // This will show the enhanced OnboardingWizard on first run
             runFirstRunOnboardingIfNeeded();
 
             // Check for updates in background
@@ -276,7 +276,7 @@ public class Studio extends Application {
             mainWindow = new MainWindow(primaryStage, prefManager);
             mainWindow.initialize();
 
-            // ===== NEW: Wire translation service to batch processor =====
+            // Wire translation service to batch processor
             wireTranslationServiceToBatchProcessor();
 
             LOGGER.info("Application started successfully");
@@ -620,8 +620,6 @@ public class Studio extends Application {
         }
     }
 
-    // ===== NEW: Translation Service Getters =====
-
     /**
      * Returns the translation service.
      *
@@ -722,22 +720,13 @@ public class Studio extends Application {
         LOGGER.info("Batch scheduler initialized");
     }
 
-    // ===== NEW: Translation Service Initialization =====
-
     /**
-     * Initialises the translation service from preferences.
-     *
-     * <p>This method reads the translation endpoint, API key, and default
-     * target language from preferences. If a valid endpoint is configured,
-     * a {@link TranslationService} instance is created.</p>
+     * Initialises the translation service.
      */
     private void initializeTranslationService() {
-        // Note: prefManager may not be initialized yet during init()
-        // We'll use default values and let start() reconfigure if needed
         String endpoint = "https://libretranslate.com/translate";
         String apiKey = null;
 
-        // Try to read from system properties first (for testing)
         String propEndpoint = System.getProperty("translation.endpoint");
         if (propEndpoint != null && !propEndpoint.isBlank()) {
             endpoint = propEndpoint;
@@ -748,7 +737,6 @@ public class Studio extends Application {
             apiKey = propApiKey;
         }
 
-        // Only create if a valid endpoint is configured
         if (endpoint != null && !endpoint.isBlank() && !endpoint.equals("none")) {
             translationService = new TranslationService(endpoint, apiKey);
             LOGGER.info("🌐 Translation service initialized with endpoint: {}", endpoint);
@@ -763,10 +751,6 @@ public class Studio extends Application {
 
     /**
      * Wires the translation service to the batch processor.
-     *
-     * <p>This method is called during application startup after the
-     * main window and batch processor are initialized. It checks if
-     * translation is available and wires it to the batch processor.</p>
      */
     private void wireTranslationServiceToBatchProcessor() {
         if (mainWindow == null) {
@@ -784,7 +768,6 @@ public class Studio extends Application {
             batchProcessor.setTranslationService(translationService);
             LOGGER.info("🌐 Translation service wired to BatchProcessor");
             
-            // Log translation status
             String targetLang = prefManager != null 
                 ? prefManager.getString("translation.target_language", "es") 
                 : "es";
@@ -796,13 +779,10 @@ public class Studio extends Application {
 
     /**
      * Reloads the translation service configuration.
-     *
-     * <p>Call this method when translation settings change in preferences.</p>
      */
     public void reloadTranslationService() {
         LOGGER.info("🌐 Reloading translation service...");
         
-        // Re-initialize from preferences
         if (prefManager != null) {
             String endpoint = prefManager.getString("translation.endpoint", 
                 "https://libretranslate.com/translate");
@@ -817,7 +797,6 @@ public class Studio extends Application {
             }
         }
         
-        // Re-wire to batch processor
         wireTranslationServiceToBatchProcessor();
     }
 
@@ -1059,39 +1038,101 @@ public class Studio extends Application {
     // ========== ONBOARDING ==========
 
     /**
-     * Runs the first-run onboarding wizard if needed.
+     * ===== UPDATED: Runs the first-run onboarding wizard if needed =====
+     * 
+     * <p>This method now uses the enhanced OnboardingWizard which includes:
+     * <ul>
+     *   <li>Python version validation (3.10-3.12 only, warns about 3.13+)</li>
+     *   <li>TorchCodec installation check</li>
+     *   <li>Comprehensive installation instructions</li>
+     *   <li>Model detection and status</li>
+     * </ul>
      */
     private void runFirstRunOnboardingIfNeeded() {
+        // Check if onboarding has been completed before
         Path configDir = Paths.get(System.getProperty("user.home"), ".audiomanager");
         Path configFile = configDir.resolve("config.properties");
 
         if (!Files.exists(configFile)) {
-            LOGGER.info("First run detected - launching onboarding wizard");
+            LOGGER.info("🎯 First run detected - launching enhanced onboarding wizard");
+
+            // Store the reference to the wizard for potential later use
+            final OnboardingWizard[] wizardRef = new OnboardingWizard[1];
 
             Platform.runLater(() -> {
                 OnboardingWizard wizard = new OnboardingWizard();
+                wizardRef[0] = wizard;
                 wizard.showAndWait();
 
+                // Save that onboarding was completed
                 try {
                     Files.createDirectories(configDir);
                     Properties props = new Properties();
                     props.setProperty("onboarding.completed", "true");
                     props.setProperty("onboarding.date", LocalDateTime.now().toString());
+                    props.setProperty("onboarding.version", getAppVersion());
                     try (java.io.OutputStream out = Files.newOutputStream(configFile)) {
                         props.store(out, "AudioManager Configuration");
                     }
-                    LOGGER.info("Onboarding completed and saved");
+                    LOGGER.info("✅ Onboarding completed and saved");
                 } catch (IOException e) {
-                    LOGGER.warn("Could not save onboarding state: {}", e.getMessage());
+                    LOGGER.warn("⚠️ Could not save onboarding state: {}", e.getMessage());
                 }
             });
         } else {
+            // Check if onboarding was completed but we should re-run for version update
             try (java.io.InputStream in = Files.newInputStream(configFile)) {
                 Properties props = new Properties();
                 props.load(in);
+                String previousVersion = props.getProperty("onboarding.version", "0.0.0");
+                String currentVersion = getAppVersion();
+                
+                // If version changed significantly, offer to show onboarding again
+                if (!previousVersion.equals(currentVersion) && !"0.0.0".equals(previousVersion)) {
+                    LOGGER.info("🔄 Version update detected: {} → {}, offering onboarding refresh", 
+                               previousVersion, currentVersion);
+                    
+                    Platform.runLater(() -> {
+                        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+                        alert.setTitle("Welcome to AudioManager " + currentVersion);
+                        alert.setHeaderText("New version, new features!");
+                        alert.setContentText(
+                            "AudioManager has been updated to version " + currentVersion + ".\n\n" +
+                            "Would you like to see the onboarding wizard again to learn about new features?\n\n" +
+                            "(You can always access it later from the Help menu.)"
+                        );
+                        alert.getButtonTypes().setAll(
+                            new ButtonType("Yes, show me", ButtonBar.ButtonData.YES),
+                            new ButtonType("No thanks", ButtonBar.ButtonData.NO)
+                        );
+                        ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+                        
+                        alert.showAndWait().ifPresent(response -> {
+                            if (response.getButtonData() == ButtonBar.ButtonData.YES) {
+                                OnboardingWizard wizard = new OnboardingWizard();
+                                wizard.showAndWait();
+                                
+                                // Update version in config
+                                try {
+                                    Properties updatedProps = new Properties();
+                                    try (java.io.InputStream is = Files.newInputStream(configFile)) {
+                                        updatedProps.load(is);
+                                    }
+                                    updatedProps.setProperty("onboarding.version", currentVersion);
+                                    try (java.io.OutputStream out = Files.newOutputStream(configFile)) {
+                                        updatedProps.store(out, "AudioManager Configuration");
+                                    }
+                                } catch (IOException e) {
+                                    LOGGER.warn("⚠️ Could not update onboarding version: {}", e.getMessage());
+                                }
+                            }
+                        });
+                    });
+                }
+                
                 LOGGER.debug("Loaded existing preferences from: {}", configFile);
             } catch (IOException e) {
-                LOGGER.warn("Could not load preferences: {}", e.getMessage());
+                LOGGER.warn("⚠️ Could not load preferences: {}", e.getMessage());
             }
         }
     }

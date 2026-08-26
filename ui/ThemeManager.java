@@ -68,6 +68,9 @@ public final class ThemeManager {
             // Force CSS to apply
             scene.getRoot().applyCss();
         }
+        
+        // Force a full refresh
+        forceRefresh(scene);
     }
 
     /**
@@ -146,11 +149,54 @@ public final class ThemeManager {
     }
 
     /**
-     * Strip inline color rules from a single node.
-     * No longer strips styles - CSS !important overrides them.
+     * Strip ALL inline color rules from a node.
+     * This is called during theme switching to allow CSS to take over.
+     * Only strips color-related properties, not structural ones.
      */
     public static void stripForCurrentTheme(Node node) {
-        // Do nothing - CSS !important handles everything
+        if (node == null) return;
+        
+        String style = node.getStyle();
+        if (style == null || style.isBlank()) return;
+        
+        // Remove color-related inline styles so CSS can take over
+        // Keep structural styles like padding, margins, etc.
+        String cleaned = style
+            .replaceAll("-fx-background-color:[^;]*;?", "")
+            .replaceAll("-fx-text-fill:[^;]*;?", "")
+            .replaceAll("-fx-border-color:[^;]*;?", "")
+            .replaceAll("-fx-border-width:[^;]*;?", "")
+            .replaceAll("-fx-border-radius:[^;]*;?", "")
+            .replaceAll("-fx-background-radius:[^;]*;?", "")
+            .replaceAll("-fx-effect:[^;]*;?", "")
+            .replaceAll("-fx-accent:[^;]*;?", "")
+            .replaceAll("-fx-color:[^;]*;?", "")
+            .trim();
+        
+        // If only whitespace or empty, remove the style entirely
+        if (cleaned.isEmpty() || cleaned.equals(";")) {
+            node.setStyle(null);
+        } else {
+            // Ensure it ends with semicolon if not empty
+            if (!cleaned.endsWith(";")) {
+                cleaned = cleaned + ";";
+            }
+            node.setStyle(cleaned);
+        }
+    }
+
+    /**
+     * Strip inline styles from an entire node tree.
+     * Used during theme switching to ensure CSS takes over.
+     */
+    public static void stripTreeForTheme(Node node) {
+        if (node == null) return;
+        stripForCurrentTheme(node);
+        if (node instanceof Parent parent) {
+            for (Node child : parent.getChildrenUnmodifiable()) {
+                stripTreeForTheme(child);
+            }
+        }
     }
 
     /**

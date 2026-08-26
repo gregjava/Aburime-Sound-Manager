@@ -12,24 +12,26 @@ import audiomanager.plugins.AudioSplitterTool;
 import audiomanager.plugins.FileCombinerTool;
 import audiomanager.util.PreferenceManager;
 import audiomanager.util.TimeLeftEstimator;
+import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
-
-import java.util.function.Consumer;
-import javafx.collections.FXCollections;
-import javafx.scene.input.KeyCombination;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.function.Consumer;
+import javafx.scene.input.KeyCombination;
 
 /**
  * Creates the UI for the main window.
  * Separated from MainWindow to keep UI construction separate from business logic.
  */
 public class MainWindowUICreator {
+
     private static final Logger LOGGER = LoggerFactory.getLogger(MainWindowUICreator.class);
 
     private final Stage stage;
@@ -61,6 +63,10 @@ public class MainWindowUICreator {
     private Runnable onClearTimeData;
     private Runnable onRestApiToggle;
     private Runnable onClearSessionData;
+    
+    // ===== NEW: Setup Wizard callback =====
+    private Runnable onRunSetupWizard;
+    
     private MenuItem restApiMenuItem;
 
     // Theme state
@@ -99,6 +105,9 @@ public class MainWindowUICreator {
     public void setOnClearTimeData(Runnable callback) { this.onClearTimeData = callback; }
     public void setOnRestApiToggle(Runnable callback) { this.onRestApiToggle = callback; }
     public void setOnClearSessionData(Runnable callback) { this.onClearSessionData = callback; }
+    
+    // ===== NEW: Setup Wizard callback setter =====
+    public void setOnRunSetupWizard(Runnable callback) { this.onRunSetupWizard = callback; }
 
     // ========================================================================
     //  Theme Update
@@ -523,7 +532,6 @@ public class MainWindowUICreator {
         Menu toolsMenu = new Menu("Tools");
         toolsMenu.setStyle(isDarkMode ? "-fx-text-fill: #e0e0e0;" : "-fx-text-fill: #2c3e50;");
 
-        // ===== FIX: Open the actual configuration panel sections =====
         MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
         batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
         batchSettingsItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+B"));
@@ -571,6 +579,10 @@ public class MainWindowUICreator {
         return viewMenu;
     }
 
+    // ========================================================================
+    //  Help Menu - UPDATED with Setup Wizard
+    // ========================================================================
+
     private Menu createHelpMenu() {
         Menu helpMenu = new Menu("Help");
         helpMenu.setStyle(isDarkMode ? "-fx-text-fill: #e0e0e0;" : "-fx-text-fill: #2c3e50;");
@@ -582,8 +594,17 @@ public class MainWindowUICreator {
         dependenciesItem.setOnAction(e -> { if (onCheckDependencies != null) onCheckDependencies.run(); });
         dependenciesItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("F5"));
 
-        MenuItem setupAssistantItem = new MenuItem("Setup Assistant...");
-        setupAssistantItem.setOnAction(e -> {});
+        // ===== NEW: Setup Wizard Menu Item =====
+        MenuItem setupWizardItem = new MenuItem("🔄 Run Setup Wizard...");
+        setupWizardItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+Shift+S"));
+        setupWizardItem.setOnAction(e -> {
+            if (onRunSetupWizard != null) {
+                onRunSetupWizard.run();
+            } else {
+                logger.accept("⚠️ Setup Wizard is not available. Please restart the application.");
+            }
+        });
+        // Tooltip removed - MenuItem doesn't support setTooltip()
 
         MenuItem userManualItem = new MenuItem("User Manual...");
         userManualItem.setOnAction(e -> new DocumentationLauncher().open("USER_MANUAL.md"));
@@ -598,15 +619,24 @@ public class MainWindowUICreator {
         MenuItem activateItem = new MenuItem("Activate Pro License...");
         activateItem.setOnAction(e -> showActivationDialog());
 
-        helpMenu.getItems().addAll(aboutItem, dependenciesItem, setupAssistantItem,
-            new SeparatorMenuItem(), licenseItem, activateItem, new SeparatorMenuItem(),
-            userManualItem, troubleshootingItem);
+        helpMenu.getItems().addAll(
+            aboutItem,
+            dependenciesItem,
+            new SeparatorMenuItem(),
+            setupWizardItem,  // ← NEW
+            new SeparatorMenuItem(),
+            userManualItem,
+            troubleshootingItem,
+            new SeparatorMenuItem(),
+            licenseItem,
+            activateItem
+        );
 
         return helpMenu;
     }
 
     // ========================================================================
-    //  Dialog Methods - FIXED to open the actual Configuration Panel
+    //  Dialog Methods
     // ========================================================================
 
     private void showPreferencesDialog() {
@@ -671,8 +701,6 @@ public class MainWindowUICreator {
 
     /**
      * Shows the Batch Processing Settings dialog.
-     * 
-     * ===== FIX: Now opens a dialog with the batch settings from ConfigurationPanel =====
      */
     private void showBatchSettingsDialog() {
         if (configurationPanel == null) {
@@ -754,8 +782,6 @@ public class MainWindowUICreator {
 
     /**
      * Shows the Transcription Settings dialog.
-     * 
-     * ===== FIX: Now opens a dialog with the transcription settings from ConfigurationPanel =====
      */
     private void showWhisperSettingsDialog() {
         if (configurationPanel == null) {
@@ -880,8 +906,6 @@ public class MainWindowUICreator {
 
     /**
      * Shows the Audio Processing Settings dialog.
-     * 
-     * ===== FIX: Now opens a dialog with the audio settings from ConfigurationPanel =====
      */
     private void showAudioSettingsDialog() {
         if (configurationPanel == null) {

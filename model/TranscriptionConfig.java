@@ -64,7 +64,7 @@ public final class TranscriptionConfig {
     private final String  hfToken;       // resolved externally; never hard-coded
     private final float   maxSegmentDuration; // seconds — used by SegmentProcessor
 
-    // ===== NEW: Translation Settings =====
+    // ===== Translation Settings =====
     private final boolean translationEnabled;
     private final String translationTargetLanguage;
     private final String translationEndpoint;
@@ -103,7 +103,7 @@ public final class TranscriptionConfig {
         this.enabled            = b.enabled;
         this.streamingEnabled   = b.streamingEnabled;
         
-        // ===== NEW: Translation fields =====
+        // ===== Translation fields =====
         this.translationEnabled       = b.translationEnabled;
         this.translationTargetLanguage = b.translationTargetLanguage;
         this.translationEndpoint      = b.translationEndpoint;
@@ -240,7 +240,7 @@ public final class TranscriptionConfig {
      */
     public boolean isStreamingEnabled() { return streamingEnabled; }
 
-    // ===== NEW: Translation Getters =====
+    // ===== Translation Getters =====
 
     /**
      * Returns whether translation is enabled for transcripts.
@@ -388,6 +388,28 @@ public final class TranscriptionConfig {
     }
 
     /**
+     * Returns a configuration with user-friendly defaults for first-time users.
+     *
+     * @return a user-friendly configuration
+     */
+    public static TranscriptionConfig userFriendly() {
+        return builder()
+                .model("small")
+                .language("auto")
+                .timestampsEnabled(true)
+                .confidenceEnabled(true)
+                .outputFormat(OutputFormat.BOTH)
+                .volumeBoost(1.5f)
+                .noiseReduction(true)
+                .srtMaxChars(80)
+                .srtMaxLines(3)
+                .maxSegmentDuration(30.0f)
+                .streamingEnabled(true)
+                .translationEnabled(false)
+                .build();
+    }
+
+    /**
      * Returns a new Builder instance.
      *
      * @return a new Builder
@@ -418,7 +440,7 @@ public final class TranscriptionConfig {
                 .skipSegmentation(skipSegmentation)
                 .enabled(enabled)
                 .streamingEnabled(streamingEnabled)
-                // ===== NEW: Translation fields =====
+                // ===== Translation fields =====
                 .translationEnabled(translationEnabled)
                 .translationTargetLanguage(translationTargetLanguage)
                 .translationEndpoint(translationEndpoint)
@@ -453,11 +475,13 @@ public final class TranscriptionConfig {
         private boolean      enabled           = true;
         private boolean      streamingEnabled  = true;
         
-        // ===== NEW: Translation fields =====
+        // ===== Translation fields =====
         private boolean      translationEnabled = false;
         private String       translationTargetLanguage = "es";
         private String       translationEndpoint = "https://libretranslate.com/translate";
         private String       translationApiKey = null;
+
+        // ===== Model setters =====
 
         /**
          * Sets the Whisper model.
@@ -505,6 +529,8 @@ public final class TranscriptionConfig {
          */
         public Builder outputFormat(OutputFormat f) { this.outputFormat = f != null ? f : OutputFormat.BOTH; return this; }
 
+        // ===== Audio preprocessing setters =====
+
         /**
          * Sets the volume boost in decibels.
          *
@@ -543,6 +569,8 @@ public final class TranscriptionConfig {
          */
         public Builder noiseReduction(boolean v) { this.noiseReduction = v; return this; }
 
+        // ===== SRT formatting setters =====
+
         /**
          * Sets the maximum characters per SRT line.
          *
@@ -562,6 +590,8 @@ public final class TranscriptionConfig {
          * @return this builder
          */
         public Builder srtMaxLines(int v) { this.srtMaxLines = Math.max(v, 1); return this; }
+
+        // ===== Advanced features setters =====
 
         /**
          * Sets whether speaker diarisation is enabled.
@@ -590,6 +620,8 @@ public final class TranscriptionConfig {
          */
         public Builder maxSegmentDuration(float v) { this.maxSegmentDuration = v > 0 ? v : 30.0f; return this; }
 
+        // ===== Pipeline control setters =====
+
         /**
          * Sets whether segmentation should be skipped.
          *
@@ -617,7 +649,7 @@ public final class TranscriptionConfig {
          */
         public Builder streamingEnabled(boolean v) { this.streamingEnabled = v; return this; }
 
-        // ===== NEW: Translation Builder Methods =====
+        // ===== Translation Builder Methods =====
 
         /**
          * Enables or disables translation of transcripts.
@@ -784,7 +816,7 @@ public final class TranscriptionConfig {
         sb.append(", srt=").append(srtMaxChars).append("ch/").append(srtMaxLines).append("ln");
         sb.append(", segmentDuration=").append(maxSegmentDuration).append("s");
         sb.append(", streaming=").append(streamingEnabled);
-        // ===== NEW: Translation in toString =====
+        // ===== Translation in toString =====
         sb.append(", translation=").append(translationEnabled);
         if (translationEnabled) {
             sb.append(", targetLang='").append(translationTargetLanguage).append('\'');

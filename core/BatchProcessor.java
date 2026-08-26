@@ -4,9 +4,11 @@
  */
 package audiomanager.core;
 
+import audiomanager.exceptions.FfmpegException;
 import audiomanager.model.*;
 import audiomanager.ui.AppState;
 import audiomanager.ui.ConfigurationPanel;
+import audiomanager.ui.UserFriendlyErrorDialog;
 import audiomanager.util.PreferenceManager;
 import audiomanager.util.SoundManager;
 import audiomanager.util.TimeLeftEstimator;
@@ -43,6 +45,7 @@ import com.google.gson.GsonBuilder;
  *   <li>State persistence for crash recovery</li>
  *   <li>GPU acceleration support</li>
  *   <li><b>Post-transcription translation</b> with configurable target language</li>
+ *   <li><b>User-friendly error handling</b> with actionable guidance</li>
  * </ul>
  *
  * <p>The batch processor uses a {@link ParallelProcessingManager} to handle
@@ -77,7 +80,7 @@ public class BatchProcessor implements SegmentProgressListener {
     private final AppState appState = AppState.getInstance();
     private ErrorReporter errorReporter;
 
-    // ===== NEW: Translation Service =====
+    // ===== Translation Service =====
     private TranslationService translationService;
 
     // ===== Performance Tracking =====
@@ -300,13 +303,8 @@ public class BatchProcessor implements SegmentProgressListener {
         this.fileCompletedCallback = callback;
     }
 
-    // ===== NEW: Translation Service Configuration =====
-
     /**
      * Sets the translation service for post-transcription translation.
-     *
-     * <p>When configured, transcripts will be translated to the target language
-     * specified in {@link TranscriptionConfig} after transcription completes.</p>
      *
      * @param translationService the translation service to use, or {@code null} to disable
      */
@@ -342,6 +340,7 @@ public class BatchProcessor implements SegmentProgressListener {
      *   <li>Calculates optimal parallelism based on system resources</li>
      *   <li>Delegates processing to the parallel manager</li>
      *   <li>Records performance metrics</li>
+     *   <li>Handles errors with user-friendly dialogs</li>
      * </ol>
      *
      * @param items the list of files to process
@@ -430,11 +429,26 @@ public class BatchProcessor implements SegmentProgressListener {
                     return result;
                 })
                 .exceptionally(throwable -> {
+                    // ===== ENHANCED: User-friendly error handling =====
                     LOGGER.error("Batch processing failed", throwable);
-                    logger.accept("❌ Batch processing failed: " + throwable.getMessage());
+                    
+                    // Extract the underlying cause
+                    Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
+                    String message = cause.getMessage() != null ? cause.getMessage() : throwable.getMessage();
+                    
+                    // Log the error
+                    logger.accept("❌ Batch processing failed: " + message);
+                    
+                    // Show user-friendly error dialog
+                    Platform.runLater(() -> {
+                        UserFriendlyErrorDialog dialog = createUserFriendlyError(cause, message);
+                        dialog.showAndWait();
+                    });
+                    
                     if (errorReporter != null) {
                         errorReporter.reportError(throwable, "Batch processing failed");
                     }
+                    
                     int completed = completedFilesCount.get();
                     return new BatchResult(totalFilesInBatch, completed,
                             totalFilesInBatch - completed, 0, cancelled);
@@ -460,6 +474,125 @@ public class BatchProcessor implements SegmentProgressListener {
                         removeCompletedFiles();
                     }
                 });
+    }
+
+    // ========================================================================
+    //  User-Friendly Error Handling
+    // ========================================================================
+
+    /**
+     * Creates a user-friendly error dialog based on the exception type.
+     *
+     * @param cause the root cause exception
+     * @param message the error message
+     * @return a UserFriendlyErrorDialog appropriate for the error type
+     */
+    private UserFriendlyErrorDialog createUserFriendlyError(Throwable cause, String message) {
+        String lowerMsg = message != null ? message.toLowerCase() : "";
+        
+        // FFmpeg errors
+        if (lowerMsg.contains("ffmpeg") || lowerMsg.contains("ffprobe") || 
+            cause instanceof FfmpegException) {
+            return UserFriendlyErrorDialog.forFFmpegMissing();
+        }
+        
+        // Python/WhisperX/Dependency errors
+        if (lowerMsg.contains("python") || lowerMsg.contains("whisperx") || 
+            lowerMsg.contains("no module named") || 
+            cause instanceof audiomanager.exceptions.DependencyException) {
+            return UserFriendlyErrorDialog.forWhisperXMissing();
+        }
+        
+        // Python version errors
+        if (lowerMsg.contains("python") && (lowerMsg.contains("3.13") || lowerMsg.contains("3.14") || 
+            lowerMsg.contains("3.15"))) {
+            return UserFriendlyErrorDialog.forPythonVersionError("3.13+");
+        }
+        
+        // TorchCodec errors
+        if (lowerMsg.contains("torchcodec") || lowerMsg.contains("libtorchcodec") ||
+            lowerMsg.contains("dll") || lowerMsg.contains("could not find module")) {
+            return UserFriendlyErrorDialog.forTorchCodecError();
+        }
+        
+        // Model errors
+        if ((lowerMsg.contains("model") && (lowerMsg.contains("not found") || 
+            lowerMsg.contains("not installed") || lowerMsg.contains("missing"))) ||
+            cause instanceof audiomanager.exceptions.ModelNotFoundException) {
+            String modelName = extractModelName(message);
+            return UserFriendlyErrorDialog.forModelNotFound(modelName);
+        }
+        
+        // Memory errors
+        if (lowerMsg.contains("memory") || lowerMsg.contains("out of memory") ||
+            lowerMsg.contains("heap space") || lowerMsg.contains("oom") ||
+            lowerMsg.contains("allocation")) {
+            return UserFriendlyErrorDialog.forOutOfMemory("the current file");
+        }
+        
+        // Timeout errors
+        if (lowerMsg.contains("timeout") || lowerMsg.contains("timed out") ||
+            lowerMsg.contains("time limit")) {
+            return UserFriendlyErrorDialog.forTimeout("the current file");
+        }
+        
+        // Output integrity errors
+        if (cause instanceof audiomanager.exceptions.OutputIntegrityException) {
+            return UserFriendlyErrorDialog.forTranscriptionFailure("file", cause);
+        }
+        
+        // Transcription errors
+        if (cause instanceof audiomanager.exceptions.TranscriptionException) {
+            return UserFriendlyErrorDialog.forTranscriptionFailure("file", cause);
+        }
+        
+        // Model download errors
+        if (cause instanceof audiomanager.exceptions.ModelDownloadException) {
+            return new UserFriendlyErrorDialog.Builder()
+                .title("Model Download Failed")
+                .header("📥 Could not download the required model")
+                .userMessage(
+                    "AudioManager encountered an issue while downloading a required model.\n\n" +
+                    "This could be due to network connectivity issues or insufficient disk space."
+                )
+                .fixInstructions(
+                    "1. Check your internet connection\n" +
+                    "2. Ensure you have enough disk space (at least 2GB free)\n" +
+                    "3. Try again later\n" +
+                    "4. If the problem persists, download the model manually using:\n" +
+                    "   huggingface-cli download Systran/faster-whisper-large-v2"
+                )
+                .technicalDetails(cause.getMessage())
+                .troubleshootingLink("TROUBLESHOOTING.md#err-008")
+                .build();
+        }
+        
+        // Generic error
+        return UserFriendlyErrorDialog.forGenericError(
+            "Unexpected Error",
+            "Something went wrong during batch processing",
+            "An unexpected error occurred while processing your batch.\n\n" +
+            "Please try again. If the problem persists, check the Troubleshooting Guide.",
+            cause != null ? cause.toString() : message
+        );
+    }
+
+    /**
+     * Extracts the model name from an error message.
+     *
+     * @param message the error message
+     * @return the extracted model name, or "base" if not found
+     */
+    private String extractModelName(String message) {
+        if (message == null) return "base";
+        String lowerMsg = message.toLowerCase();
+        String[] models = {"large-v3", "large-v2", "large", "medium", "small", "base", "tiny"};
+        for (String model : models) {
+            if (lowerMsg.contains(model)) {
+                return model;
+            }
+        }
+        return "base";
     }
 
     // ========================================================================

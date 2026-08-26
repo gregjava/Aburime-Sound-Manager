@@ -220,7 +220,7 @@ public class ControlPanel {
         setStyled(processButton, "");
         processButton.getStyleClass().add("action-btn-start");
         processButton.setOnAction(e -> {
-            SoundManager.playClick();  // ✅ ADDED: Click sound for process button
+            SoundManager.playClick();
             onProcessClick.run();
         });
         processButton.setMinWidth(180);
@@ -229,7 +229,7 @@ public class ControlPanel {
         setStyled(clearLogButton, "");
         clearLogButton.getStyleClass().add("action-btn-clear-log");
         clearLogButton.setOnAction(e -> {
-            SoundManager.playClick();  // ✅ ADDED: Click sound for clear log
+            SoundManager.playClick();
         });
 
         // ===== SCHEDULE BUTTON =====
@@ -238,14 +238,14 @@ public class ControlPanel {
         scheduleButton.setMinWidth(120);
         scheduleButton.setTooltip(new Tooltip("Schedule batch to run later"));
         scheduleButton.setOnAction(e -> {
-            SoundManager.playClick();  // ✅ ADDED: Click sound for schedule button
+            SoundManager.playClick();
         });
 
         // ===== EXIT BUTTON =====
         setStyled(exitButton, "");
         exitButton.getStyleClass().add("action-btn-exit");
         exitButton.setOnAction(e -> {
-            SoundManager.playClick();  // ✅ ADDED: Click sound for exit button
+            SoundManager.playClick();
             onExitClick.run();
         });
 
@@ -265,7 +265,7 @@ public class ControlPanel {
     }
 
     // ========================================================================
-    //  AppState Binding
+    //  AppState Binding - FIXED with time label bindings
     // ========================================================================
 
     private void bindToState() {
@@ -280,7 +280,6 @@ public class ControlPanel {
             appState.overallProgressProperty().multiply(100).asString("%.0f%%")
         );
 
-        // FIX: Combine isCancelling and dependencyCheckInProgress for the disable binding
         processButton.disableProperty().bind(
             appState.isCancellingProperty().or(appState.dependencyCheckInProgressProperty())
         );
@@ -293,6 +292,62 @@ public class ControlPanel {
 
         individualProgressSection.visibleProperty().bind(appState.isProcessingProperty());
         individualProgressSection.managedProperty().bind(appState.isProcessingProperty());
+
+        // ===== FIX: Bind time labels to AppState with proper type conversion =====
+        fileTimeSpentLabel.textProperty().bind(
+            appState.fileTimeSpentMsProperty().asString().map(s -> {
+                try {
+                    return formatDuration(Long.parseLong(s));
+                } catch (NumberFormatException e) {
+                    return "0s";
+                }
+            })
+        );
+
+        fileTimeLeftLabel.textProperty().bind(
+            appState.fileTimeLeftMsProperty().asString().map(s -> {
+                try {
+                    long ms = Long.parseLong(s);
+                    return ms > 0 ? formatDuration(ms) : "N/A";
+                } catch (NumberFormatException e) {
+                    return "N/A";
+                }
+            })
+        );
+
+        totalTimeSpentLabel.textProperty().bind(
+            appState.totalTimeSpentMsProperty().asString().map(s -> {
+                try {
+                    return formatDuration(Long.parseLong(s));
+                } catch (NumberFormatException e) {
+                    return "0s";
+                }
+            })
+        );
+
+        totalTimeLeftLabel.textProperty().bind(
+            appState.totalTimeLeftMsProperty().asString().map(s -> {
+                try {
+                    long ms = Long.parseLong(s);
+                    return ms > 0 ? formatDuration(ms) : "N/A";
+                } catch (NumberFormatException e) {
+                    return "N/A";
+                }
+            })
+        );
+    }
+
+    // ===== NEW: Helper method to format duration =====
+    private String formatDuration(long millis) {
+        if (millis <= 0) return "0s";
+        long seconds = millis / 1000;
+        if (seconds < 60) return seconds + "s";
+        long minutes = seconds / 60;
+        seconds = seconds % 60;
+        if (minutes < 60) return minutes + "m " + seconds + "s";
+        long hours = minutes / 60;
+        minutes = minutes % 60;
+        return hours + "h " + minutes + "m " + seconds + "s";
     }
 
     // ========================================================================
@@ -301,7 +356,7 @@ public class ControlPanel {
 
     public void setScheduleAction(Runnable action) {
         scheduleButton.setOnAction(e -> {
-            SoundManager.playClick();  // ✅ ADDED: Click sound for schedule action
+            SoundManager.playClick();
             action.run();
         });
     }
@@ -323,21 +378,15 @@ public class ControlPanel {
         if (!processing) {
             individualProgressRows.getChildren().clear();
         }
-        // ✅ Sound for processing start/stop
         if (processing) {
             SoundManager.playStart();
         }
     }
 
     public void setProcessingEnabled(boolean enabled) {
-        // Use AppState instead of direct button manipulation
         appState.setCancelling(!enabled);
     }
 
-    /**
-     * Sets the dependency check in progress state.
-     * Uses AppState to avoid the "A bound value cannot be set" error.
-     */
     public void setDependencyCheckInProgress(boolean inProgress) {
         appState.setDependencyCheckInProgress(inProgress);
     }
@@ -381,22 +430,16 @@ public class ControlPanel {
         int learnedProcesses = timeEstimator.getLearnedPatternCount();
         double speedMultiplier = timeEstimator.getSpeedMultiplier();
 
-        // A system has learned data if:
-        // 1. It has learned process patterns, OR
-        // 2. The speed multiplier has adjusted from the default (1.0)
         boolean hasLearnedData = learnedProcesses > 0 || Math.abs(speedMultiplier - 1.0) > 0.05;
 
         if (hasLearnedData) {
-            // Build a detailed, informative status message
             StringBuilder status = new StringBuilder("Using learned estimates");
 
-            // Add process count if available
             if (learnedProcesses > 0) {
                 status.append(" (").append(learnedProcesses)
                       .append(" process type").append(learnedProcesses == 1 ? "" : "s").append(" learned");
             }
 
-            // Add speed multiplier if it has adjusted
             if (Math.abs(speedMultiplier - 1.0) > 0.05) {
                 if (learnedProcesses > 0) {
                     status.append(", ");
@@ -406,7 +449,6 @@ public class ControlPanel {
                 status.append("speed: ").append(String.format("%.2fx", speedMultiplier));
             }
 
-            // Close the parenthesis if we opened one
             if (learnedProcesses > 0 || Math.abs(speedMultiplier - 1.0) > 0.05) {
                 status.append(")");
             }

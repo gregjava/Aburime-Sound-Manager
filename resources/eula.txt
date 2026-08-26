@@ -1,6 +1,6 @@
 END USER LICENSE AGREEMENT
 
-Version 1.0
+Version 2.0
 
 1. GRANT OF LICENSE
 ------------------------
@@ -40,18 +40,28 @@ This software uses the following third-party components:
 | JavaFX         | GPL with Classpath Exception         |
 | SLF4J          | MIT                                  |
 | Gson           | Apache 2.0                           |
+| PyTorch        | BSD-style                            |
+| HuggingFace Hub| Apache 2.0                           |
 
 6. DATA COLLECTION
 ------------------------
-By default, no data is collected. Optional error reporting can be enabled
-in Preferences and is subject to your consent.
+By default, no data is collected. Optional features that may send data:
+- Speaker Diarization: Requires a HuggingFace token; sends requests to HuggingFace
+- Error Reporting: Optional, anonymized, requires explicit consent
+- Translation: User-configured endpoint; no data sent unless configured
 
-7. GOVERNING LAW
+7. PRIVACY DISCLOSURE
+------------------------
+Audio processing and transcription run entirely on this computer.
+Your audio files and transcripts are never sent anywhere for these steps.
+Any optional network features are clearly labeled and require explicit user action.
+
+8. GOVERNING LAW
 ------------------------
 This agreement shall be governed by the laws of the jurisdiction
 where the user resides, without regard to its conflict of law provisions.
 
-8. CONTACT
+9. CONTACT
 ------------------------
 For questions, contact: support@audiomanager.app
 

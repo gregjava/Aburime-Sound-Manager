@@ -36,6 +36,12 @@ public final class AppConstants {
     /** Application title. */
     public static final String APP_TITLE = "Aburime Sound Manager";
 
+    /** Application release name. */
+    public static final String APP_RELEASE_NAME = "Phoenix";
+
+    /** Full application name with version and release. */
+    public static final String APP_FULL_NAME = APP_TITLE + " v" + APP_VERSION + " — " + APP_RELEASE_NAME;
+
     // ========================================================================
     //  Audio Formats - Supported Input
     // ========================================================================
@@ -215,6 +221,9 @@ public final class AppConstants {
     /** Number of audio channels for Whisper (mono). */
     public static final int WHISPER_CHANNELS = 1;
 
+    /** Default segment duration for Whisper (30 seconds). */
+    public static final int WHISPER_SEGMENT_DURATION = 30;
+
     // ========================================================================
     //  FFmpeg Timeout
     // ========================================================================
@@ -295,13 +304,22 @@ public final class AppConstants {
     public static final double MIN_WINDOW_HEIGHT = 600;
 
     /** CSS path for light theme. */
-    public static final String CSS_PATH = "/styles/styles.css";
+    public static final String CSS_PATH = "/audiomanager/styles.css";
 
     /** CSS path for dark theme. */
-    public static final String DARK_CSS_PATH = "/styles/dark.css";
+    public static final String DARK_CSS_PATH = "/audiomanager/styles/dark.css";
 
     /** Application icon path. */
-    public static final String ICON_PATH = "/icons/app_icon.png";
+    public static final String ICON_PATH = "/audiomanager/sound_manager_logo.jpg";
+
+    /** Path to the bundled transcription script. */
+    public static final String TRANSCRIPTION_SCRIPT_PATH = "/scripts/transcribe.py";
+
+    /** Path to the user manual. */
+    public static final String USER_MANUAL_PATH = "/docs/USER_MANUAL.md";
+
+    /** Path to the troubleshooting guide. */
+    public static final String TROUBLESHOOTING_PATH = "/docs/TROUBLESHOOTING.md";
 
     // ========================================================================
     //  File Size Limits
@@ -323,48 +341,74 @@ public final class AppConstants {
     public static final int MAX_FILE_SIZE_PRO_MB = 750;
 
     // ========================================================================
+    //  Batch State & Persistence
+    // ========================================================================
+
+    /** Batch state file name. */
+    public static final String BATCH_STATE_FILE = "batch_state.json";
+
+    /** Time estimation data file name. */
+    public static final String TIME_ESTIMATES_FILE = "time_estimates.json";
+
+    // ========================================================================
     //  Keyboard Shortcuts
     // ========================================================================
 
-    /** Toggle dark mode. */
+    /** Toggle dark mode: Ctrl+Shift+D. */
     public static final KeyCombination KEY_TOGGLE_DARK_MODE =
         KeyCombination.keyCombination("Shortcut+Shift+D");
 
-    /** Check dependencies. */
+    /** Check dependencies: F5. */
     public static final KeyCombination KEY_CHECK_DEPENDENCIES =
         KeyCombination.keyCombination("F5");
 
-    /** Toggle folder watch. */
+    /** Toggle folder watch: Ctrl+Shift+W. */
     public static final KeyCombination KEY_TOGGLE_FOLDER_WATCH =
         KeyCombination.keyCombination("Shortcut+Shift+W");
 
-    /** Performance report. */
+    /** Performance report: Ctrl+Shift+P. */
     public static final KeyCombination KEY_PERFORMANCE_REPORT =
         KeyCombination.keyCombination("Shortcut+Shift+P");
 
-    /** Batch settings. */
+    /** ===== NEW: Run Setup Wizard: Ctrl+Shift+S ===== */
+    public static final KeyCombination KEY_SETUP_WIZARD =
+        KeyCombination.keyCombination("Shortcut+Shift+S");
+
+    /** Batch settings: Ctrl+B. */
     public static final KeyCombination KEY_BATCH_SETTINGS =
         KeyCombination.keyCombination("Shortcut+B");
 
-    /** Exit application. */
+    /** Exit application: Ctrl+Q. */
     public static final KeyCombination KEY_EXIT =
         KeyCombination.keyCombination("Shortcut+Q");
 
-    /** Preferences. */
+    /** Preferences: Ctrl+Comma. */
     public static final KeyCombination KEY_PREFERENCES =
         KeyCombination.keyCombination("Shortcut+Comma");
 
-    /** Clear session data. */
+    /** Clear session data: Ctrl+Shift+C. */
     public static final KeyCombination KEY_CLEAR_SESSION =
         KeyCombination.keyCombination("Shortcut+Shift+C");
 
-    /** Troubleshooting guide. */
+    /** Troubleshooting guide: F1. */
     public static final KeyCombination KEY_TROUBLESHOOTING =
         KeyCombination.keyCombination("F1");
 
-    /** Browse for files. */
+    /** Browse for files: Ctrl+O. */
     public static final KeyCombination KEY_BROWSE_FILES =
         KeyCombination.keyCombination("Shortcut+O");
+
+    /** Undo: Ctrl+Z. */
+    public static final KeyCombination KEY_UNDO =
+        KeyCombination.keyCombination("Shortcut+Z");
+
+    /** Redo: Ctrl+Y or Ctrl+Shift+Z. */
+    public static final KeyCombination KEY_REDO =
+        KeyCombination.keyCombination("Shortcut+Y");
+
+    /** Redo alternative: Ctrl+Shift+Z. */
+    public static final KeyCombination KEY_REDO_ALT =
+        KeyCombination.keyCombination("Shortcut+Shift+Z");
 
     // ========================================================================
     //  Processing Constants

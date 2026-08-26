@@ -6,6 +6,7 @@ package audiomanager.util;
 
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
+import java.util.List;
 import java.util.prefs.BackingStoreException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,22 +15,119 @@ import java.util.prefs.Preferences;
 
 /**
  * Manages application preferences with type-safe access
+ * 
+ * <p>This class provides a centralized, type-safe way to store and retrieve
+ * application preferences using the Java Preferences API.</p>
+ * 
+ * <p><b>Key Preferences:</b></p>
+ * <ul>
+ *   <li><b>Audio Processing:</b> Volume boost, noise reduction, normalization</li>
+ *   <li><b>Transcription:</b> Model, language, timestamps, confidence</li>
+ *   <li><b>Batch Processing:</b> Max parallel files, auto-remove completed</li>
+ *   <li><b>Translation:</b> Enabled, target language, endpoint, API key</li>
+ *   <li><b>UI:</b> Theme, font size, window state</li>
+ *   <li><b>EULA:</b> Accepted version</li>
+ * </ul>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
  */
 public class PreferenceManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(PreferenceManager.class);
     private final Preferences prefs;
     
-    // Add these constants
+    // ===== Audio Processing Keys =====
     private static final String AUTO_VOLUME_OPTIMIZATION_KEY = "autoVolumeOptimization";
     private static final String TARGET_VOLUME_DB_KEY = "targetVolumeDb";
 
-    // ===== NEW: Translation Preference Keys =====
+    // ===== Translation Preference Keys =====
     private static final String TRANSLATION_ENABLED_KEY = "translation.enabled";
     private static final String TRANSLATION_TARGET_LANGUAGE_KEY = "translation.target_language";
     private static final String TRANSLATION_ENDPOINT_KEY = "translation.endpoint";
     private static final String TRANSLATION_API_KEY_KEY = "translation.api_key";
 
-    // Add getters/setters
+    // ===== Batch Processing Keys =====
+    private static final String BATCH_QUEUE_FILES_KEY = "batch_queue_files";
+    private static final String BATCH_QUEUE_LAST_SAVED_KEY = "batch_queue_last_saved";
+
+    // ===== Error Reporting Keys =====
+    private static final String ERROR_REPORTING_ENABLED_KEY = "error.reporting.enabled";
+    private static final String ERROR_REPORTING_LAST_SENT_KEY = "error.reporting.last_sent";
+
+    // ===== Auto-Update Keys =====
+    private static final String AUTO_UPDATE_ENABLED_KEY = "auto.update.enabled";
+    private static final String UPDATE_SKIPPED_VERSION_KEY = "update.skipped.version";
+
+    // ===== Dependency Check Keys =====
+    private static final String LAST_DEPENDENCY_CHECK_KEY = "last.dependency.check";
+    private static final String DEPENDENCIES_OK_KEY = "dependencies.ok";
+
+    // =========================================================================
+    //  Constructors
+    // =========================================================================
+
+    public PreferenceManager(Class<?> clazz) {
+        this.prefs = Preferences.userNodeForPackage(clazz);
+    }
+
+    // =========================================================================
+    //  Generic Preference Methods
+    // =========================================================================
+
+    // String preferences
+    public String getString(String key, String defaultValue) {
+        return prefs.get(key, defaultValue);
+    }
+
+    public void putString(String key, String value) {
+        prefs.put(key, value);
+    }
+
+    // Integer preferences
+    public int getInt(String key, int defaultValue) {
+        return prefs.getInt(key, defaultValue);
+    }
+
+    public void putInt(String key, int value) {
+        prefs.putInt(key, value);
+    }
+
+    // Double preferences
+    public double getDouble(String key, double defaultValue) {
+        return prefs.getDouble(key, defaultValue);
+    }
+
+    public void putDouble(String key, double value) {
+        prefs.putDouble(key, value);
+    }
+
+    // Boolean preferences
+    public boolean getBoolean(String key, boolean defaultValue) {
+        return prefs.getBoolean(key, defaultValue);
+    }
+
+    public void putBoolean(String key, boolean value) {
+        prefs.putBoolean(key, value);
+    }
+
+    // Long preferences
+    public long getLong(String key, long defaultValue) {
+        return prefs.getLong(key, defaultValue);
+    }
+
+    public void putLong(String key, long value) {
+        prefs.putLong(key, value);
+    }
+
+    // Remove a preference
+    public void remove(String key) {
+        prefs.remove(key);
+    }
+
+    // =========================================================================
+    //  Volume Optimization Preferences
+    // =========================================================================
+
     public boolean isAutoVolumeOptimizationEnabled() {
         return getBoolean(AUTO_VOLUME_OPTIMIZATION_KEY, true);
     }
@@ -46,7 +144,9 @@ public class PreferenceManager {
         putDouble(TARGET_VOLUME_DB_KEY, targetDb);
     }
 
-    // ===== NEW: Translation Getters/Setters =====
+    // =========================================================================
+    //  Translation Preferences
+    // =========================================================================
 
     /**
      * Returns whether translation is enabled.
@@ -124,58 +224,93 @@ public class PreferenceManager {
         }
     }
 
-    public PreferenceManager(Class<?> clazz) {
-        this.prefs = Preferences.userNodeForPackage(clazz);
+    // =========================================================================
+    //  Error Reporting Preferences
+    // =========================================================================
+
+    /**
+     * Returns whether error reporting is enabled.
+     *
+     * @return {@code true} if error reporting is enabled
+     */
+    public boolean isErrorReportingEnabled() {
+        return getBoolean(ERROR_REPORTING_ENABLED_KEY, false);
     }
 
-    // String preferences
-    public String getString(String key, String defaultValue) {
-        return prefs.get(key, defaultValue);
+    /**
+     * Sets whether error reporting is enabled.
+     *
+     * @param enabled {@code true} to enable error reporting
+     */
+    public void setErrorReportingEnabled(boolean enabled) {
+        putBoolean(ERROR_REPORTING_ENABLED_KEY, enabled);
     }
 
-    public void putString(String key, String value) {
-        prefs.put(key, value);
+    /**
+     * Returns the timestamp of the last error report sent.
+     *
+     * @return the timestamp in milliseconds, or 0 if never sent
+     */
+    public long getLastErrorReportSent() {
+        return getLong(ERROR_REPORTING_LAST_SENT_KEY, 0);
     }
 
-    // Integer preferences
-    public int getInt(String key, int defaultValue) {
-        return prefs.getInt(key, defaultValue);
+    /**
+     * Sets the timestamp of the last error report sent.
+     *
+     * @param timestamp the timestamp in milliseconds
+     */
+    public void setLastErrorReportSent(long timestamp) {
+        putLong(ERROR_REPORTING_LAST_SENT_KEY, timestamp);
     }
 
-    public void putInt(String key, int value) {
-        prefs.putInt(key, value);
+    // =========================================================================
+    //  Auto-Update Preferences
+    // =========================================================================
+
+    /**
+     * Returns whether auto-update checking is enabled.
+     *
+     * @return {@code true} if auto-update is enabled
+     */
+    public boolean isAutoUpdateEnabled() {
+        return getBoolean(AUTO_UPDATE_ENABLED_KEY, true);
     }
 
-    // Double preferences
-    public double getDouble(String key, double defaultValue) {
-        return prefs.getDouble(key, defaultValue);
+    /**
+     * Sets whether auto-update checking is enabled.
+     *
+     * @param enabled {@code true} to enable auto-update
+     */
+    public void setAutoUpdateEnabled(boolean enabled) {
+        putBoolean(AUTO_UPDATE_ENABLED_KEY, enabled);
     }
 
-    public void putDouble(String key, double value) {
-        prefs.putDouble(key, value);
+    /**
+     * Returns the version that the user chose to skip.
+     *
+     * @return the skipped version, or {@code null} if none
+     */
+    public String getSkippedUpdateVersion() {
+        return getString(UPDATE_SKIPPED_VERSION_KEY, null);
     }
 
-    // Boolean preferences
-    public boolean getBoolean(String key, boolean defaultValue) {
-        return prefs.getBoolean(key, defaultValue);
+    /**
+     * Sets the version that the user chose to skip.
+     *
+     * @param version the version to skip, or {@code null} to clear
+     */
+    public void setSkippedUpdateVersion(String version) {
+        if (version != null && !version.isBlank()) {
+            putString(UPDATE_SKIPPED_VERSION_KEY, version);
+        } else {
+            remove(UPDATE_SKIPPED_VERSION_KEY);
+        }
     }
 
-    public void putBoolean(String key, boolean value) {
-        prefs.putBoolean(key, value);
-    }
-
-    // Long preferences (NEW)
-    public long getLong(String key, long defaultValue) {
-        return prefs.getLong(key, defaultValue);
-    }
-
-    public void putLong(String key, long value) {
-        prefs.putLong(key, value);
-    }
-
-    // =============================================
-    // EULA Methods (NEW)
-    // =============================================
+    // =========================================================================
+    //  EULA Preferences
+    // =========================================================================
     
     /**
      * Gets the version of the EULA that the user has accepted.
@@ -193,9 +328,9 @@ public class PreferenceManager {
         putInt(PreferenceKeys.EULA_ACCEPTED_VERSION, version);
     }
 
-    // =============================================
-    // ID3 Tagging Methods (NEW)
-    // =============================================
+    // =========================================================================
+    //  ID3 Tagging Preferences
+    // =========================================================================
     
     /**
      * Checks if ID3 tagging is enabled.
@@ -213,9 +348,9 @@ public class PreferenceManager {
         putBoolean(PreferenceKeys.ID3_TAGGING_ENABLED, enabled);
     }
 
-    // =============================================
-    // Code Signing Methods (NEW)
-    // =============================================
+    // =========================================================================
+    //  Code Signing Preferences
+    // =========================================================================
     
     /**
      * Checks if the current application instance is code-signed.
@@ -234,9 +369,92 @@ public class PreferenceManager {
         putBoolean(PreferenceKeys.CODE_SIGNED, signed);
     }
 
-    // =============================================
-    // Convenience methods for common preferences
-    // =============================================
+    // =========================================================================
+    //  Batch Queue Preferences
+    // =========================================================================
+
+    /**
+     * Saves the batch queue file list.
+     *
+     * @param filePaths the list of file paths, or null to clear
+     */
+    public void saveBatchQueueFiles(List<String> filePaths) {
+        if (filePaths == null || filePaths.isEmpty()) {
+            remove(BATCH_QUEUE_FILES_KEY);
+            remove(BATCH_QUEUE_LAST_SAVED_KEY);
+            return;
+        }
+        String joined = String.join(";", filePaths);
+        putString(BATCH_QUEUE_FILES_KEY, joined);
+        putLong(BATCH_QUEUE_LAST_SAVED_KEY, System.currentTimeMillis());
+    }
+
+    /**
+     * Loads the saved batch queue file list.
+     *
+     * @return the list of file paths, or an empty list if none
+     */
+    public List<String> loadBatchQueueFiles() {
+        String saved = getString(BATCH_QUEUE_FILES_KEY, "");
+        if (saved == null || saved.isBlank()) {
+            return new java.util.ArrayList<>();
+        }
+        return java.util.Arrays.asList(saved.split(";"));
+    }
+
+    /**
+     * Checks if there is a recent batch queue saved.
+     *
+     * @return {@code true} if a recent batch queue exists
+     */
+    public boolean hasRecentBatchQueue() {
+        long lastSaved = getLong(BATCH_QUEUE_LAST_SAVED_KEY, 0);
+        return lastSaved > 0 && (System.currentTimeMillis() - lastSaved) < 7 * 24 * 60 * 60 * 1000L; // 7 days
+    }
+
+    // =========================================================================
+    //  Dependency Check Preferences
+    // =========================================================================
+
+    /**
+     * Returns the timestamp of the last dependency check.
+     *
+     * @return the timestamp in milliseconds, or 0 if never checked
+     */
+    public long getLastDependencyCheck() {
+        return getLong(LAST_DEPENDENCY_CHECK_KEY, 0);
+    }
+
+    /**
+     * Sets the timestamp of the last dependency check.
+     *
+     * @param timestamp the timestamp in milliseconds
+     */
+    public void setLastDependencyCheck(long timestamp) {
+        putLong(LAST_DEPENDENCY_CHECK_KEY, timestamp);
+    }
+
+    /**
+     * Returns whether all dependencies were OK on the last check.
+     *
+     * @return {@code true} if dependencies were OK
+     */
+    public boolean areDependenciesOk() {
+        return getBoolean(DEPENDENCIES_OK_KEY, false);
+    }
+
+    /**
+     * Sets whether all dependencies were OK on the last check.
+     *
+     * @param ok {@code true} if dependencies were OK
+     */
+    public void setDependenciesOk(boolean ok) {
+        putBoolean(DEPENDENCIES_OK_KEY, ok);
+    }
+
+    // =========================================================================
+    //  Convenience methods for common preferences
+    // =========================================================================
 
     public String getOutputDirectory() {
         return getString(PreferenceKeys.OUTPUT_DIR, System.getProperty("user.home"));
@@ -293,81 +511,75 @@ public class PreferenceManager {
      * Get last file add location
      */
     public String getLastFileAddLocation() {
-        return prefs.get(PreferenceKeys.LAST_FILE_ADD_LOCATION, System.getProperty("user.home"));
+        return getString(PreferenceKeys.LAST_FILE_ADD_LOCATION, System.getProperty("user.home"));
     }
     
     /**
      * Set last file add location
      */
     public void setLastFileAddLocation(String path) {
-        prefs.put(PreferenceKeys.LAST_FILE_ADD_LOCATION, path);
+        putString(PreferenceKeys.LAST_FILE_ADD_LOCATION, path);
     }
     
     /**
      * Get last audio splitter location
      */
     public String getLastAudioSplitterLocation() {
-        return prefs.get(PreferenceKeys.LAST_AUDIO_SPLITTER_LOCATION, System.getProperty("user.home"));
+        return getString(PreferenceKeys.LAST_AUDIO_SPLITTER_LOCATION, System.getProperty("user.home"));
     }
     
     /**
      * Set last audio splitter location
      */
     public void setLastAudioSplitterLocation(String path) {
-        prefs.put(PreferenceKeys.LAST_AUDIO_SPLITTER_LOCATION, path);
+        putString(PreferenceKeys.LAST_AUDIO_SPLITTER_LOCATION, path);
     }
     
     /**
      * Get last text combiner location
      */
     public String getLastTextCombinerLocation() {
-        return prefs.get(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, System.getProperty("user.home"));
+        return getString(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, System.getProperty("user.home"));
     }
     
     /**
      * Set last text combiner location
      */
     public void setLastTextCombinerLocation(String path) {
-        prefs.put(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, path);
+        putString(PreferenceKeys.LAST_TEXT_COMBINER_LOCATION, path);
     }
 
     /**
-     * Get last Audio Splitter OUTPUT directory (distinct from the input-file
-     * location above). Falls back to the app's general output directory,
-     * then the user's home, so a first-time user still gets something
-     * sensible.
+     * Get last Audio Splitter OUTPUT directory
      */
     public String getLastAudioSplitterOutputLocation() {
-        return prefs.get("last_audio_splitter_output_location", getOutputDirectory());
+        return getString("last_audio_splitter_output_location", getOutputDirectory());
     }
 
     public void setLastAudioSplitterOutputLocation(String path) {
-        prefs.put("last_audio_splitter_output_location", path);
+        putString("last_audio_splitter_output_location", path);
     }
 
     /**
-     * Get last Text File Combiner OUTPUT location (the folder the save
-     * dialog opens into — the combined filename itself isn't remembered,
-     * only the directory).
+     * Get last Text File Combiner OUTPUT location
      */
     public String getLastTextCombinerOutputLocation() {
-        return prefs.get("last_text_combiner_output_location", getOutputDirectory());
+        return getString("last_text_combiner_output_location", getOutputDirectory());
     }
 
     public void setLastTextCombinerOutputLocation(String path) {
-        prefs.put("last_text_combiner_output_location", path);
+        putString("last_text_combiner_output_location", path);
     }
 
     /**
-     * Get last Sound Recorder Panel save location — same pattern as the
-     * AudioSplitter/TextCombiner output locations above.
+     * Get last Sound Recorder Panel save location
      */
     public String getLastSoundRecorderLocation() {
-        return prefs.get("last_sound_recorder_location", getOutputDirectory());
+        return getString("last_sound_recorder_location", getOutputDirectory());
     }
 
     public void setLastSoundRecorderLocation(String path) {
-        prefs.put("last_sound_recorder_location", path);
+        putString("last_sound_recorder_location", path);
     }
     
     // Audio Processing Settings
@@ -461,11 +673,12 @@ public class PreferenceManager {
     public void clearSessionData() {
         try {
             // Remove batch queue state
-            prefs.remove("batch_queue_files");
+            remove(BATCH_QUEUE_FILES_KEY);
+            remove(BATCH_QUEUE_LAST_SAVED_KEY);
 
             // Remove any temporary processing state
-            prefs.remove("last_processing_state");
-            prefs.remove("processing_start_time");
+            remove("last_processing_state");
+            remove("processing_start_time");
 
             flush();
             LOGGER.info("Session data cleared");
@@ -509,16 +722,13 @@ public class PreferenceManager {
             LOGGER.error("Failed to save preferences", e);
         }
     }
-    
+
+    // =========================================================================
+    //  Inner Class: WindowState
+    // =========================================================================
+
     /**
-     * Remove a preference key
-     */
-    public void remove(String key) {
-        prefs.remove(key);
-    }
-    
-    /**
-     * Window state holder
+     * Window state holder for storing window position and size.
      */
     public static class WindowState {
         private final double x;

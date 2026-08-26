@@ -351,7 +351,6 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         removeSelectedButton.setOnAction(e -> removeSelectedFilesFromTableView(fileTableView));
 
         Button clearAllButton = new Button("Clear All");
-        setStyled(clearAllButton, "");
         clearAllButton.getStyleClass().add("action-btn-danger");
         clearAllButton.setOnAction(e -> clearBatchFiles());
 
@@ -373,7 +372,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     }
 
     // ========================================================================
-    //  Table View
+    //  Table View - UPDATED with proper binding
     // ========================================================================
 
     private TableView<BatchFileItem> createFileTableView() {
@@ -389,7 +388,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         nameColumn.setCellValueFactory(cellData -> cellData.getValue().displayNameProperty());
         nameColumn.setPrefWidth(250);
 
-        // Status column
+        // ===== Status column using CSS classes =====
         TableColumn<BatchFileItem, String> statusColumn = new TableColumn<>("Status");
         statusColumn.setCellValueFactory(cellData -> {
             String status = cellData.getValue().getStatus();
@@ -402,14 +401,15 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 super.updateItem(item, empty);
                 if (empty || item == null) {
                     setText(null);
-                    setStyle("");
+                    getStyleClass().removeAll("status-completed", "status-processing", "status-failed", "status-pending");
                 } else {
                     setText(item);
+                    getStyleClass().removeAll("status-completed", "status-processing", "status-failed", "status-pending");
                     switch (item) {
-                        case "COMPLETED" -> setStyle("-fx-text-fill: #4CAF50; -fx-font-weight: bold;");
-                        case "PROCESSING" -> setStyle("-fx-text-fill: #2196F3; -fx-font-weight: bold;");
-                        case "FAILED" -> setStyle("-fx-text-fill: #F44336; -fx-font-weight: bold;");
-                        default -> setStyle("-fx-text-fill: #666;");
+                        case "COMPLETED" -> getStyleClass().add("status-completed");
+                        case "PROCESSING" -> getStyleClass().add("status-processing");
+                        case "FAILED" -> getStyleClass().add("status-failed");
+                        default -> getStyleClass().add("status-pending");
                     }
                 }
             }
@@ -427,10 +427,11 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             new SimpleStringProperty(formatDuration((long) cellData.getValue().getTotalAudioDurationSeconds())));
         durationColumn.setPrefWidth(90);
 
-        // Progress column
+        // ===== FIX: Progress column using SimpleObjectProperty =====
         TableColumn<BatchFileItem, Double> progressColumn = new TableColumn<>("Progress");
         progressColumn.setCellValueFactory(cellData -> 
-            new SimpleObjectProperty<>(cellData.getValue().getProgress()));
+            new SimpleObjectProperty<>(cellData.getValue().getProgress())
+        );
         progressColumn.setPrefWidth(120);
         progressColumn.setCellFactory(col -> new TableCell<>() {
             private final ProgressBar progressBar = new ProgressBar();
@@ -579,6 +580,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             log.accept("➕ Added " + added + " file(s) to queue" + (skipped > 0 ? " (" + skipped + " skipped)" : ""));
             updateBatchStatus(batchFiles);
             updateBatchQueueTotals();
+            saveBatchQueueState();
         }
 
         pendingFiles.clear();
@@ -614,6 +616,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         batchFiles.add(item);
         probeAndSetDuration(item);
         updateBatchStatus(batchFiles);
+        saveBatchQueueState();
         log.accept("📄 Added file: " + file.getName());
     }
 
@@ -650,6 +653,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             if (response == ButtonType.OK) {
                 SoundManager.playClick();
                 batchFiles.clear();
+                saveBatchQueueState();
                 log.accept("🗑️ Batch queue cleared");
                 updateBatchStatus(batchFiles);
                 updateBatchQueueTotals();
@@ -669,6 +673,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         }
         if (removed > 0) {
             SoundManager.playClick();
+            saveBatchQueueState();
             log.accept("🧹 Removed " + removed + " completed files from queue");
             updateBatchQueueTotals();
         }
@@ -682,6 +687,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 boolean removed = batchFiles.remove(item);
                 if (removed) {
                     LOGGER.debug("Removed completed file from UI queue: {}", item.getFileName());
+                    saveBatchQueueState();
                 }
             }
             updateBatchQueueTotals();
@@ -689,7 +695,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     }
 
     // ========================================================================
-    //  Batch Status Updates
+    //  Batch Status Updates - UPDATED with forced refresh
     // ========================================================================
 
     public void updateBatchQueueTotals() {
@@ -708,6 +714,12 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             // Update AppState - bound labels update automatically
             int pending = Math.max(0, totalFiles - completed - failed);
             appState.updateBatchStats(totalFiles, completed, failed, pending);
+
+            // Force table refresh
+            if (batchQueueTableView != null) {
+                batchQueueTableView.refresh();
+                batchQueueTableView.requestLayout();
+            }
 
             LOGGER.debug("Batch queue totals updated: {} files, duration: {}", 
                 totalFiles, queueDurationLabel.getText());
@@ -735,8 +747,10 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             // Update non-bound label
             batchStatusLabel.setText("📁 Queue: " + totalFiles + " files");
 
+            // Force table refresh
             if (batchQueueTableView != null) {
                 batchQueueTableView.refresh();
+                batchQueueTableView.requestLayout();
             }
         });
     }
@@ -749,6 +763,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
             if (batchQueueTableView != null) {
                 batchQueueTableView.refresh();
+                batchQueueTableView.requestLayout();
             }
         });
     }
@@ -756,10 +771,6 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     public void updateCompletedFailedCounts(int completed, int failed) {
         // Handled by AppState binding - keep for compatibility
     }
-
-    // ===== initializeBatchStatus REMOVED =====
-    // The labels are bound to AppState, so this method is no longer needed.
-    // Use appState.resetForNewBatch() or appState.updateBatchStats() instead.
 
     public void resetBatchStatus() {
         initialTotalDurationSeconds = 0.0;
@@ -869,6 +880,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         if (dir != null) {
             outputDirectory = dir.getAbsolutePath();
             prefManager.setOutputDirectory(outputDirectory);
+            saveBatchQueueState();
             log.accept("📂 Output directory: " + outputDirectory);
         }
     }
@@ -930,6 +942,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         if (command == null) return false;
         log.accept("↩️ Undo: " + command.description());
         updateBatchQueueTotals();
+        saveBatchQueueState();
         return true;
     }
 
@@ -938,6 +951,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         if (command == null) return false;
         log.accept("↪️ Redo: " + command.description());
         updateBatchQueueTotals();
+        saveBatchQueueState();
         return true;
     }
 
@@ -992,10 +1006,6 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         tableView.setContextMenu(contextMenu);
     }
     
-    /**
-    * Returns the observable list of batch files.
-     * @return 
-    */
     public ObservableList<BatchFileItem> getBatchFiles() {
         return batchFiles;
     }
@@ -1032,6 +1042,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                         BatchFileItem item = tableView.getItems().remove(draggedIndex);
                         tableView.getItems().add(dropIndex, item);
                         tableView.getSelectionModel().select(dropIndex);
+                        saveBatchQueueState();
                         log.accept("↕️ Reordered file in queue");
                     }
                     event.setDropCompleted(true);
@@ -1088,6 +1099,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 @Override public void redo() { batchFiles.removeAll(removed); }
                 @Override public String description() { return "remove " + removed.size() + " file(s)"; }
             });
+            saveBatchQueueState();
             log.accept("🗑️ Removed " + selectedItems.size() + " file(s) from queue");
             updateBatchQueueTotals();
         }
@@ -1111,6 +1123,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 }
                 @Override public String description() { return "move " + item.getFileName() + " to top"; }
             });
+            saveBatchQueueState();
             log.accept("⬆️ Moved file to top");
         }
     }
@@ -1133,6 +1146,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 }
                 @Override public String description() { return "move " + item.getFileName() + " to bottom"; }
             });
+            saveBatchQueueState();
             log.accept("⬇️ Moved file to bottom");
         }
     }
@@ -1143,6 +1157,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             item.setPriority(priority);
         }
         if (!selected.isEmpty()) {
+            saveBatchQueueState();
             log.accept("🎯 Set priority to " + priority + " for " + selected.size() + " file(s)");
             tableView.refresh();
         }
@@ -1173,6 +1188,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 @Override public void redo() { item.setDisplayName(trimmed); }
                 @Override public String description() { return "rename \"" + item.getFileName() + "\""; }
             });
+            saveBatchQueueState();
             log.accept("✏️ Renamed \"" + item.getFileName() + "\" to \"" + item.getDisplayName() + "\"");
         });
     }
@@ -1202,6 +1218,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                 @Override public void redo() { item.setNotes(trimmed); }
                 @Override public String description() { return "edit notes for \"" + item.getFileName() + "\""; }
             });
+            saveBatchQueueState();
             log.accept("📝 Updated notes for \"" + item.getDisplayName() + "\"");
         });
     }
@@ -1247,6 +1264,30 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         alert.setContentText(message);
         ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         alert.showAndWait();
+    }
+
+    // ========================================================================
+    //  Batch Queue State Persistence
+    // ========================================================================
+
+    /**
+     * Saves the current batch queue state to preferences.
+     * This ensures the queue is restored correctly on application restart.
+     */
+    private void saveBatchQueueState() {
+        if (prefManager == null) return;
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (BatchFileItem item : batchFiles) {
+                if (sb.length() > 0) sb.append(";");
+                sb.append(item.getFile().getAbsolutePath());
+            }
+            prefManager.putString("batch_queue_files", sb.toString());
+            prefManager.flush();
+            LOGGER.debug("Batch queue state saved: {} files", batchFiles.size());
+        } catch (Exception e) {
+            LOGGER.error("Failed to save batch queue state", e);
+        }
     }
 
     // ========================================================================
@@ -1324,10 +1365,6 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         return createBatchQueueSection();
     }
 
-    /**
-     * Returns the file selection controls without the title label.
-     * Used for embedding in a TitledPane.
-     */
     public VBox getFileSelectionControlsWithoutTitle() {
         VBox controls = getFileSelectionControls();
         if (!controls.getChildren().isEmpty() && controls.getChildren().get(0) instanceof Label) {
@@ -1336,10 +1373,6 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         return controls;
     }
 
-    /**
-     * Returns the batch queue section without the title label.
-     * Used for embedding in a TitledPane.
-     */
     public VBox getBatchQueueSectionWithoutTitle() {
         VBox section = getBatchQueueSection();
         if (!section.getChildren().isEmpty() && section.getChildren().get(0) instanceof Label) {
@@ -1372,6 +1405,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
                     prefManager.setLastFileAddLocation(selectedFile.getParent());
                 }
                 prefManager.putInt("last_batch_file_count", batchFiles.size());
+                saveBatchQueueState();
                 prefManager.flush();
             } catch (Exception e) {
                 LOGGER.error("Failed to save file preferences", e);

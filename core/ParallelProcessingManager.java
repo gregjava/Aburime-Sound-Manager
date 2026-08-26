@@ -63,14 +63,12 @@ public class ParallelProcessingManager {
     private static final int MAX_THREADS = 16;
     private static final long THREAD_KEEP_ALIVE = 60L;
     private static final int QUEUE_SIZE = 100;
-    // Max number of WhisperX model instances (and therefore concurrent
-    // transcriptions) allowed at once, independent of workerPool's thread
-    // count. Each loaded large-v2 CPU instance can use several GB of RAM;
-    // raise this only if your machine has RAM to spare for that many
-    // concurrent instances on top of the base app/JVM footprint. A value
-    // that's too high relative to available RAM can crash the JVM with a
-    // native out-of-memory error rather than fail individual files gracefully.
-    private static final int MODEL_POOL_CAP = 2;
+    // Absolute ceiling on concurrent WhisperX model instances, regardless of
+    // how much RAM is free. The actual pool size is computed at runtime from
+    // free system memory (see calculateSafeModelPoolSize) and capped here -
+    // there's diminishing throughput benefit to more concurrent CPU
+    // transcriptions past a handful, and it only adds risk.
+    private static final int MODEL_POOL_CAP = 4;
     private static final long ADMISSION_STAGGER_MS = 3000;
     private static final double MEMORY_PRESSURE_THRESHOLD = 80.0;
     private static final long MAX_ADMISSION_WAIT_MS = 30000;
@@ -184,13 +182,15 @@ public class ParallelProcessingManager {
         LOGGER.info("Dynamic thread pool initialized: core={}, max={}, queue={}",
                     optimalThreads, optimalThreads, QUEUE_SIZE);
 
-        // Model pool: lazily creates WhisperX instances on demand, up to
-        // min(optimalThreads, MODEL_POOL_CAP). Unlike a plain fixed-size queue,
-        // borrow() blocks callers when the pool is at capacity instead of timing
-        // out and failing the file - this correctly throttles concurrent
+        // Model pool: lazily creates WhisperX instances on demand, up to a
+        // size computed from actual free system RAM (see
+        // calculateSafeModelPoolSize), capped by MODEL_POOL_CAP and by
+        // optimalThreads. Unlike a plain fixed-size queue, borrow() blocks
+        // callers when the pool is at capacity instead of timing out and
+        // failing the file - this correctly throttles concurrent
         // transcriptions to what the model pool can support, even when
         // workerPool's thread concurrency is higher.
-        int modelPoolSize = Math.min(optimalThreads, MODEL_POOL_CAP);
+        int modelPoolSize = Math.min(optimalThreads, calculateSafeModelPoolSize(MODEL_POOL_CAP));
         this.modelInstancePool = new ModelInstancePool(
             "whisperx", modelPoolSize, this::createModelInstance, LOGGER);
 
@@ -325,7 +325,7 @@ public class ParallelProcessingManager {
             if (memoryPressure) {
                 newMax = Math.max(MIN_THREADS, currentMax - 1);
                 newCore = Math.min(newCore, newMax);
-                LOGGER.debug("Memory pressure ({:.1f}%), reducing threads", memoryUsage);
+                LOGGER.debug("Memory pressure ({}%), reducing threads", String.format("%.1f", memoryUsage));
             } else if (queueBacklog && currentMax < MAX_THREADS) {
                 newMax = Math.min(MAX_THREADS, currentMax + 1);
                 newCore = Math.min(newCore + 1, newMax);
@@ -337,11 +337,22 @@ public class ParallelProcessingManager {
                             activeCount, queueSize);
             }
 
+            if (newCore < currentCore) {
+                // Shrinking: lower core first. Lowering core alone is always
+                // safe (core just needs to be <= the max that's still in
+                // place), whereas lowering max first while core is still at
+                // its old, larger value would transiently violate max >= core
+                // and throw IllegalArgumentException() with no message.
+                workerPool.setCorePoolSize(newCore);
+                LOGGER.info("Adjusted core threads: {} → {}", currentCore, newCore);
+            }
             if (newMax != currentMax) {
                 workerPool.setMaximumPoolSize(newMax);
                 LOGGER.info("Adjusted max threads: {} → {}", currentMax, newMax);
             }
-            if (newCore != currentCore) {
+            if (newCore > currentCore) {
+                // Growing: raise max first (done above), then core, so core
+                // never transiently exceeds the still-old, smaller max.
                 workerPool.setCorePoolSize(newCore);
                 LOGGER.info("Adjusted core threads: {} → {}", currentCore, newCore);
             }
@@ -716,6 +727,63 @@ public class ParallelProcessingManager {
             }
         } catch (Exception ignored) { }
         return -1;
+    }
+
+    /**
+     * Returns currently-free physical system memory in megabytes, or
+     * {@code -1} if unavailable.
+     */
+    private long getFreeSystemMemoryMB() {
+        try {
+            OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
+                long free = sunBean.getFreeMemorySize();
+                if (free > 0) {
+                    return free / (1024 * 1024);
+                }
+            }
+        } catch (Exception ignored) { }
+        return -1;
+    }
+
+    /**
+     * Computes how many concurrent WhisperX model instances this machine can
+     * safely support, based on currently-free system RAM rather than a fixed
+     * guess. Each loaded large-model CPU instance is budgeted conservatively
+     * (torch + model weights + working buffers can spike well beyond the raw
+     * model size), and a fixed reserve is set aside for the JVM/UI and OS.
+     *
+     * <p>Falls back to a safe default of 1 (fully sequential transcription)
+     * if free memory can't be determined - a slower batch is always
+     * preferable to a native OOM crash.</p>
+     *
+     * @param upperBound absolute ceiling regardless of available RAM (there's
+     *                   little throughput benefit to more concurrent CPU
+     *                   transcriptions past a point, and it only adds risk)
+     * @return the model pool size to use, between 1 and {@code upperBound}
+     */
+    private int calculateSafeModelPoolSize(int upperBound) {
+        // Conservative per-instance budget: large-model CPU inference (weights,
+        // activations, alignment/diarisation buffers) can comfortably use
+        // several GB per concurrent instance.
+        final long PER_INSTANCE_BUDGET_MB = 4096;
+        // Reserve for the JVM heap, JavaFX UI, OS, and other running apps.
+        final long BASE_RESERVE_MB = 2048;
+
+        long freeMB = getFreeSystemMemoryMB();
+        if (freeMB < 0) {
+            LOGGER.warn("Could not determine free system memory - defaulting model pool to 1 (sequential)");
+            return 1;
+        }
+
+        long usableMB = Math.max(0, freeMB - BASE_RESERVE_MB);
+        int budgetBased = (int) (usableMB / PER_INSTANCE_BUDGET_MB);
+        int safeSize = Math.max(1, Math.min(upperBound, budgetBased));
+
+        LOGGER.info("Model pool sizing: {}MB free, {}MB usable after reserve, budget {}MB/instance -> {} concurrent instance(s)",
+            freeMB, usableMB, PER_INSTANCE_BUDGET_MB, safeSize);
+
+        return safeSize;
     }
 
     /**

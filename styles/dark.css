@@ -61,6 +61,11 @@
     -fx-font-style: italic;
 }
 
+.status-completed { -fx-text-fill: #66bb6a !important; -fx-font-weight: bold !important; }
+.status-processing { -fx-text-fill: #42a5f5 !important; -fx-font-weight: bold !important; }
+.status-failed { -fx-text-fill: #ef5350 !important; -fx-font-weight: bold !important; }
+.status-pending { -fx-text-fill: #9E9E9E !important; }
+
 /* ============================= Buttons ============================= */
 
 .button {
