@@ -26,47 +26,36 @@ import java.util.concurrent.TimeUnit;
  * Single source of truth for locating a faster-whisper model folder inside
  * HuggingFace's on-disk cache.
  *
- * <h2>What this replaces</h2>
- * {@code ModelManager} previously had <b>three separate, independently
- * hand-rolled</b> implementations of "guess where HuggingFace might have put
- * this model" — {@code isModelInHuggingFaceCache}, {@code
- * getModelSizeFromHuggingFaceCache}, and {@code isModelCachedAnywhere} each
- * built their own candidate-path list, and each did it slightly differently
- * (different file-extension filters, different minimum-file-count
- * thresholds, different subsets of candidate roots). That triplication is
- * exactly the kind of maintenance trap flagged in review: a future change to
- * HuggingFace's cache layout would need to be applied in three places, and
- * it would be easy to fix one and miss the others.
+ * <p>This class consolidates all HuggingFace cache lookup logic into one
+ * place, replacing three separate hand-rolled implementations that were
+ * scattered across {@code ModelManager}. Key features:
+ * <ul>
+ *   <li><b>Manifest-based resolution:</b> Queries {@code huggingface-cli scan-cache}
+ *       for authoritative cache location</li>
+ *   <li><b>Pattern-matching fallback:</b> Falls back to filesystem pattern
+ *       matching when the CLI is not available</li>
+ *   <li><b>Null-safe path resolution:</b> Handles {@code LOCALAPPDATA} being
+ *       {@code null} on non-Windows platforms</li>
+ *   <li><b>Model size calculation:</b> Computes total on-disk size of a model</li>
+ *   <li><b>Sufficient file detection:</b> Checks for minimum file count to
+ *       identify complete downloads</li>
+ * </ul>
  *
- * <p>It also had a live bug: two of the three built
- * {@code Paths.get(System.getenv("LOCALAPPDATA"), ...)} unconditionally.
- * {@code LOCALAPPDATA} is {@code null} on Linux/macOS, and
- * {@code Paths.get(null, ...)} throws {@code NullPointerException}
- * immediately — not caught anywhere in those two call paths — so any model
- * lookup that reached {@code isModelInHuggingFaceCache} or {@code
- * isModelCachedAnywhere} on a non-Windows machine would crash rather than
- * simply report "not found". (The third implementation, {@code
- * findModelPath}, happened to null-guard it correctly — which is exactly the
- * kind of inconsistency you get from copy-pasted logic.)
+ * <p><b>Resolution order:</b>
+ * <ol>
+ *   <li>Query {@code huggingface-cli scan-cache --format json} for the manifest</li>
+ *   <li>If CLI is unavailable or fails, use filesystem pattern matching</li>
+ * </ol>
  *
- * <h2>Manifest-based resolution (this class's main lookup path)</h2>
- * {@link #resolve(String)} now queries HuggingFace's own cache index via
- * {@code huggingface-cli scan-cache --format json} first — the real
- * manifest, not a guess at folder-naming conventions — parsed the same way
- * {@code WhisperXTranscriptionService} already parses subprocess JSON
- * output (see {@code isWhisperXInstalled} there for the established
- * ProcessBuilder + redirected-stream + timeout pattern this follows).
- * {@link #candidateRoots()}-based pattern-matching is kept as the fallback
- * for when that command isn't on PATH (huggingface_hub not installed, or
- * installed without the CLI extras) or its output can't be parsed — so a
- * user without huggingface_hub's CLI still gets a working, if less
- * authoritative, lookup rather than a hard failure.
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ModelManager
  */
 public final class HuggingFaceCacheResolver {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(HuggingFaceCacheResolver.class);
 
-    /** Minimum files to consider a folder a "real", fully-downloaded model rather than a stub/partial download. */
+    /** Minimum files to consider a folder a "real", fully-downloaded model. */
     private static final int MIN_MODEL_FILE_COUNT = 4;
 
     private static final List<String> MODEL_FILE_EXTENSIONS =
@@ -75,9 +64,13 @@ public final class HuggingFaceCacheResolver {
     private HuggingFaceCacheResolver() {}
 
     /**
-     * All plausible HuggingFace cache root directories on this machine,
-     * skipping any that depend on an environment variable that isn't set on
-     * this platform (fixes the {@code LOCALAPPDATA} NPE described above).
+     * Returns all plausible HuggingFace cache root directories on this machine.
+     *
+     * <p>This method skips any path that depends on an environment variable
+     * that isn't set on this platform (fixes the {@code LOCALAPPDATA} NPE
+     * on Linux/macOS).</p>
+     *
+     * @return a list of candidate cache root paths
      */
     public static List<Path> candidateRoots() {
         String userHome = System.getProperty("user.home");
@@ -98,26 +91,36 @@ public final class HuggingFaceCacheResolver {
         return roots;
     }
 
-    /** Standard HuggingFace folder-naming pattern for a faster-whisper model. */
+    /**
+     * Returns the standard HuggingFace folder name for a faster-whisper model.
+     *
+     * @param modelName the model name (e.g., "base")
+     * @return the folder name (e.g., "models--Systran--faster-whisper-base")
+     */
     public static String folderNameFor(String modelName) {
         return "models--Systran--faster-whisper-" + modelName.toLowerCase().replace("-", "--");
     }
 
-    /** repo_id as huggingface-cli's scan-cache reports it for a faster-whisper model. */
+    /**
+     * Returns the repo_id as reported by {@code huggingface-cli scan-cache}.
+     *
+     * @param modelName the model name
+     * @return the repo_id (e.g., "Systran/faster-whisper-base")
+     */
     private static String repoIdFor(String modelName) {
         return "Systran/faster-whisper-" + modelName.toLowerCase();
     }
 
     /**
-     * Locate the cache folder for {@code modelName}, if it exists and
-     * contains what looks like a real (non-partial) download.
+     * Locates the cache folder for a model, if it exists and contains a
+     * complete download.
      *
-     * <p>Tries the real HuggingFace cache manifest first ({@code
-     * huggingface-cli scan-cache}); falls back to filesystem pattern-
-     * matching only if that command isn't available, times out, or its
-     * output can't be parsed as expected — see {@link #resolveViaCli}.</p>
+     * <p>Tries the real HuggingFace cache manifest first; falls back to
+     * filesystem pattern-matching only if the CLI is not available,
+     * times out, or its output can't be parsed.</p>
      *
-     * @return the resolved path, or empty if not found in any known root
+     * @param modelName the model name (e.g., "base", "small", "medium", "large")
+     * @return the resolved path, or {@link Optional#empty()} if not found
      */
     public static Optional<Path> resolve(String modelName) {
         Optional<Path> viaCli = resolveViaCli(modelName);
@@ -147,19 +150,14 @@ public final class HuggingFaceCacheResolver {
     }
 
     /**
-     * Query the real HuggingFace cache manifest via {@code huggingface-cli
-     * scan-cache --format json} rather than guessing folder-naming
-     * conventions. Every failure mode here (CLI missing, non-zero exit,
-     * timeout, unparseable/unexpected JSON shape) is caught and logged at
-     * debug level, returning empty so {@link #resolve} falls back to
-     * pattern-matching — this must never throw out to a caller expecting a
-     * simple "found or not" answer.
+     * Queries the real HuggingFace cache manifest via CLI.
      *
-     * <p>Expected shape (huggingface_hub's documented scan-cache JSON
-     * output): a top-level object with a {@code "repos"} array; each repo
-     * has {@code "repo_id"} (e.g. {@code "Systran/faster-whisper-base"}),
-     * {@code "size_on_disk"} (bytes), and a {@code "revisions"} array whose
-     * entries have a {@code "snapshot_path"}.</p>
+     * <p>Every failure mode here (CLI missing, non-zero exit, timeout,
+     * unparseable JSON) is caught and logged at debug level, returning
+     * empty so {@link #resolve} falls back to pattern-matching.</p>
+     *
+     * @param modelName the model name
+     * @return the resolved path, or {@link Optional#empty()} if not found
      */
     private static Optional<Path> resolveViaCli(String modelName) {
         String targetRepoId = repoIdFor(modelName);
@@ -211,10 +209,6 @@ public final class HuggingFaceCacheResolver {
                     }
                 }
             }
-            // Repo simply isn't in the cache — a legitimate "not found",
-            // not a parse/tooling failure, so no fallback needed for this
-            // specific case; resolve() will still try pattern-matching
-            // harmlessly on top, which will also correctly find nothing.
             return Optional.empty();
         } catch (IOException e) {
             LOGGER.debug("huggingface-cli not available ({}) — falling back to pattern matching.", e.getMessage());
@@ -224,22 +218,31 @@ public final class HuggingFaceCacheResolver {
             return Optional.empty();
         } catch (RuntimeException e) {
             // Covers JsonParseException and any JSON-shape surprises
-            // (missing keys, unexpected types) — a huggingface_hub version
-            // bump changing its JSON schema must degrade to the fallback,
-            // not crash model resolution app-wide.
             LOGGER.debug("Unexpected huggingface-cli scan-cache output shape ({}) — falling back to pattern matching.",
                     e.getMessage());
             return Optional.empty();
         }
     }
 
-    /** Total on-disk size (bytes) of a resolved model folder, or 0 if not found. */
+    /**
+     * Returns the total on-disk size (bytes) of a resolved model folder.
+     *
+     * @param modelName the model name
+     * @return the total size in bytes, or {@code 0} if not found
+     */
     public static long sizeOf(String modelName) {
         return resolve(modelName)
                 .map(HuggingFaceCacheResolver::directorySize)
                 .orElse(0L);
     }
 
+    /**
+     * Checks if a directory contains a sufficient number of model files.
+     *
+     * @param dir the directory to check
+     * @return {@code true} if the directory contains at least
+     *         {@value #MIN_MODEL_FILE_COUNT} model files
+     */
     private static boolean hasSufficientModelFiles(Path dir) {
         if (dir == null || !Files.isDirectory(dir)) return false;
         try (var stream = Files.walk(dir, FileVisitOption.FOLLOW_LINKS)) {
@@ -254,11 +257,24 @@ public final class HuggingFaceCacheResolver {
         }
     }
 
+    /**
+     * Checks if a file has a model file extension.
+     *
+     * @param p the file path
+     * @return {@code true} if the file ends with {@code .bin}, {@code .safetensors},
+     *         {@code .json}, {@code .txt}, or {@code .pt}
+     */
     private static boolean hasModelExtension(Path p) {
         String name = p.getFileName().toString().toLowerCase();
         return MODEL_FILE_EXTENSIONS.stream().anyMatch(name::endsWith);
     }
 
+    /**
+     * Calculates the total size of a directory recursively.
+     *
+     * @param dir the directory
+     * @return the total size in bytes
+     */
     private static long directorySize(Path dir) {
         try (var stream = Files.walk(dir)) {
             return stream

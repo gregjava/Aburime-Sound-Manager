@@ -7,6 +7,10 @@ package audiomanager.exceptions;
 /**
  * Root of the AudioManager typed-exception hierarchy.
  *
+ * <p>This class serves as the base for all application-specific exceptions,
+ * providing consistent error handling with user-friendly messages and
+ * recoverability indicators.</p>
+ *
  * <h2>Why this exists</h2>
  * The pre-existing code (notably {@code MainWindow}, with 18 separate
  * {@code catch (Exception e)} blocks) has no way to distinguish "FFmpeg isn't
@@ -38,6 +42,14 @@ package audiomanager.exceptions;
  *     showGenericError(e.getUserMessage());
  * }
  * }</pre>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see DependencyException
+ * @see FfmpegException
+ * @see ModelNotFoundException
+ * @see TranscriptionException
+ * @see OutputIntegrityException
  */
 public class AudioManagerException extends Exception {
 
@@ -55,24 +67,52 @@ public class AudioManagerException extends Exception {
      */
     private final boolean recoverable;
 
+    /**
+     * Constructs a new AudioManagerException with a technical message,
+     * user-facing message, and recoverability flag.
+     *
+     * @param technicalMessage the technical message for logging
+     * @param userMessage the user-friendly message for display
+     * @param recoverable {@code true} if the operation can be retried
+     */
     public AudioManagerException(String technicalMessage, String userMessage, boolean recoverable) {
         super(technicalMessage);
         this.userMessage = userMessage;
         this.recoverable = recoverable;
     }
 
+    /**
+     * Constructs a new AudioManagerException with a technical message,
+     * user-facing message, recoverability flag, and cause.
+     *
+     * @param technicalMessage the technical message for logging
+     * @param userMessage the user-friendly message for display
+     * @param recoverable {@code true} if the operation can be retried
+     * @param cause the underlying cause of this exception
+     */
     public AudioManagerException(String technicalMessage, String userMessage, boolean recoverable, Throwable cause) {
         super(technicalMessage, cause);
         this.userMessage = userMessage;
         this.recoverable = recoverable;
     }
 
-    /** User-facing message — safe to render directly in a dialog or status label. */
+    /**
+     * Returns the user-facing message.
+     *
+     * <p>This message is safe to render directly in a dialog or status label.
+     * If no user message was provided, a generic message is returned.</p>
+     *
+     * @return the user-friendly message
+     */
     public String getUserMessage() {
         return userMessage != null ? userMessage : "An unexpected error occurred.";
     }
 
-    /** True if the user can plausibly retry after taking some action. */
+    /**
+     * Returns whether the operation can be retried.
+     *
+     * @return {@code true} if the user can plausibly retry after taking some action
+     */
     public boolean isRecoverable() {
         return recoverable;
     }

@@ -5,30 +5,32 @@
 package audiomanager.ui;
 
 import audiomanager.constants.AppConstants;
+import audiomanager.constants.PreferenceKeys;
 import audiomanager.core.LicenseManager;
-import audiomanager.model.BatchFileItem;
+import audiomanager.model.TranscriptionConfig;
 import audiomanager.plugins.AudioSplitterTool;
 import audiomanager.plugins.FileCombinerTool;
 import audiomanager.util.PreferenceManager;
 import audiomanager.util.TimeLeftEstimator;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.Node;
-import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.image.Image;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
-import java.io.InputStream;
 import java.util.function.Consumer;
+import javafx.collections.FXCollections;
+import javafx.scene.input.KeyCombination;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Creates the UI for the main window.
  * Separated from MainWindow to keep UI construction separate from business logic.
  */
 public class MainWindowUICreator {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MainWindowUICreator.class);
 
     private final Stage stage;
     private final PreferenceManager prefManager;
@@ -58,6 +60,8 @@ public class MainWindowUICreator {
     private Runnable onWatchFolder;
     private Runnable onClearTimeData;
     private Runnable onRestApiToggle;
+    private Runnable onClearSessionData;
+    private MenuItem restApiMenuItem;
 
     // Theme state
     private boolean isDarkMode = false;
@@ -94,6 +98,7 @@ public class MainWindowUICreator {
     public void setOnWatchFolder(Runnable callback) { this.onWatchFolder = callback; }
     public void setOnClearTimeData(Runnable callback) { this.onClearTimeData = callback; }
     public void setOnRestApiToggle(Runnable callback) { this.onRestApiToggle = callback; }
+    public void setOnClearSessionData(Runnable callback) { this.onClearSessionData = callback; }
 
     // ========================================================================
     //  Theme Update
@@ -113,6 +118,29 @@ public class MainWindowUICreator {
         applyLogAreaTheme();
         // Update menu bar theme
         updateMenuBarTheme();
+        // Update log section theme
+        updateLogSectionTheme();
+    }
+
+    /**
+     * Updates the log section theme.
+     */
+    private void updateLogSectionTheme() {
+        // Find the log section VBox (it's the parent of the log area)
+        // This is a bit of a hack, but we can style it directly
+        if (logArea != null && logArea.getParent() != null) {
+            Node parent = logArea.getParent();
+            while (parent != null && !(parent instanceof VBox)) {
+                parent = parent.getParent();
+            }
+            if (parent instanceof VBox logSection) {
+                if (isDarkMode) {
+                    logSection.setStyle("-fx-border-color: #2a3a6a; -fx-border-width: 1 0 0 0; -fx-background-color: #16213e;");
+                } else {
+                    logSection.setStyle("-fx-border-color: #d0d0d0; -fx-border-width: 1 0 0 0; -fx-background-color: #ffffff;");
+                }
+            }
+        }
     }
 
     /**
@@ -142,7 +170,6 @@ public class MainWindowUICreator {
     public Scene createScene() {
         BorderPane root = new BorderPane();
         root.setPadding(new Insets(0));
-        // Apply theme-aware background
         root.getStyleClass().add("theme-fix-surface");
 
         menuBar = createMenuBar();
@@ -162,19 +189,20 @@ public class MainWindowUICreator {
                 appState,
                 () -> { if (onProcessClick != null) onProcessClick.run(); },
                 () -> { if (onExitClick != null) onExitClick.run(); },
-                null // TimeEstimator will be set later
+                null
         );
         if (onScheduleClick != null) {
             controlPanel.setScheduleAction(onScheduleClick);
         }
 
-        // Log area
+        // Log area - initialize with proper styling
         logArea = new TextArea();
         logArea.setEditable(false);
         logArea.setPrefHeight(150);
         logArea.setWrapText(true);
         logArea.getStyleClass().add("log-area");
-        // Apply theme-aware styling
+
+        // Apply theme-aware styling based on current theme
         applyLogAreaTheme();
 
         // Build sections
@@ -203,14 +231,14 @@ public class MainWindowUICreator {
 
     private void applyLogAreaTheme() {
         if (logArea == null) return;
+
+        // Remove both classes first
+        logArea.getStyleClass().removeAll("log-area-light", "log-area-dark");
+
         if (isDarkMode) {
-            logArea.setStyle("-fx-control-inner-background: #1e1e1e; -fx-text-fill: #d4d4d4; " +
-                "-fx-font-family: 'Consolas', 'Monaco', monospace; " +
-                "-fx-border-color: #2a3a6a;");
+            logArea.getStyleClass().add("log-area-dark");
         } else {
-            logArea.setStyle("-fx-control-inner-background: #1e1e1e; -fx-text-fill: #d4d4d4; " +
-                "-fx-font-family: 'Consolas', 'Monaco', monospace; " +
-                "-fx-border-color: #444444;");
+            logArea.getStyleClass().add("log-area-light");
         }
     }
 
@@ -272,9 +300,6 @@ public class MainWindowUICreator {
     // ========================================================================
 
     /**
-     * Creates a TitledPane with theme-aware styling.
-     */
-    /**
     * Creates a TitledPane with theme-aware styling.
     */
     private TitledPane createThemeAwareTitledPane(String title, Node content, boolean expanded) {
@@ -291,11 +316,12 @@ public class MainWindowUICreator {
 
         pane.setContent(content);
 
-        // Theme-aware border and background - NO white borders
+        // Theme-aware border and background
         if (isDarkMode) {
             pane.setStyle("-fx-border-color: #2a3a6a; -fx-border-width: 1; -fx-background-color: #16213e; -fx-border-insets: 0; -fx-padding: 0;");
         } else {
-            pane.setStyle("-fx-border-color: #e0e0e0; -fx-border-width: 1; -fx-background-color: #f8f9fa; -fx-border-insets: 0; -fx-padding: 0;");
+            // Light mode - use light border color that matches the toolbar
+            pane.setStyle("-fx-border-color: #d0d0d0; -fx-border-width: 1; -fx-background-color: #f8f9fa; -fx-border-insets: 0; -fx-padding: 0;");
         }
 
         return pane;
@@ -325,11 +351,12 @@ public class MainWindowUICreator {
     private TitledPane createToolsPane() {
         VBox toolsContainer = new VBox(0);
         toolsContainer.getStyleClass().add("theme-fix-surface");
-        
+
         if (isDarkMode) {
             toolsContainer.setStyle("-fx-background-color: #16213e; -fx-border-color: #2a3a6a; -fx-border-width: 1 0 1 0;");
         } else {
-            toolsContainer.setStyle("-fx-background-color: white; -fx-border-color: #bdc3c7; -fx-border-width: 1 0 1 0;");
+            // Light mode - use light colors
+            toolsContainer.setStyle("-fx-background-color: #f8f9fa; -fx-border-color: #d0d0d0; -fx-border-width: 1 0 1 0;");
         }
 
         TitledPane splitterPane = createAudioSplitterPane();
@@ -363,11 +390,12 @@ public class MainWindowUICreator {
     private VBox buildLogSection() {
         VBox logSection = new VBox(0);
         logSection.getStyleClass().add("theme-fix-surface");
-        
+
         if (isDarkMode) {
             logSection.setStyle("-fx-border-color: #2a3a6a; -fx-border-width: 1 0 0 0; -fx-background-color: #16213e;");
         } else {
-            logSection.setStyle("-fx-border-color: #bdc3c7; -fx-border-width: 1 0 0 0; -fx-background-color: white;");
+            // Light mode - white background with light border
+            logSection.setStyle("-fx-border-color: #d0d0d0; -fx-border-width: 1 0 0 0; -fx-background-color: #ffffff;");
         }
 
         Label logLabel = new Label("📝 Terminal");
@@ -375,9 +403,10 @@ public class MainWindowUICreator {
         if (isDarkMode) {
             logLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10 15 5 15; -fx-text-fill: #4CAF50;");
         } else {
+            // Light mode - dark text
             logLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10 15 5 15; -fx-text-fill: #2c3e50;");
         }
-        
+
         logSection.getChildren().addAll(logLabel, logArea);
         return logSection;
     }
@@ -452,11 +481,11 @@ public class MainWindowUICreator {
 
         MenuItem clearSessionItem = new MenuItem("Clear Session Data");
         clearSessionItem.setOnAction(e -> {
-            if (fileSelectionPanel != null) {
-                fileSelectionPanel.getBatchFiles().clear();
-                logger.accept("🗑️ Session data cleared");
+            if (onClearSessionData != null) {
+                onClearSessionData.run();
             }
         });
+        clearSessionItem.setAccelerator(KeyCombination.keyCombination("Shortcut+Shift+C"));
 
         MenuItem exitItem = new MenuItem("Exit");
         exitItem.setOnAction(e -> { if (onExitClick != null) onExitClick.run(); });
@@ -494,6 +523,7 @@ public class MainWindowUICreator {
         Menu toolsMenu = new Menu("Tools");
         toolsMenu.setStyle(isDarkMode ? "-fx-text-fill: #e0e0e0;" : "-fx-text-fill: #2c3e50;");
 
+        // ===== FIX: Open the actual configuration panel sections =====
         MenuItem batchSettingsItem = new MenuItem("Batch Processing Settings...");
         batchSettingsItem.setOnAction(e -> showBatchSettingsDialog());
         batchSettingsItem.setAccelerator(javafx.scene.input.KeyCombination.keyCombination("Shortcut+B"));
@@ -513,6 +543,7 @@ public class MainWindowUICreator {
 
         MenuItem restApiMenuItem = new MenuItem("🌐 Start REST API...");
         restApiMenuItem.setOnAction(e -> { if (onRestApiToggle != null) onRestApiToggle.run(); });
+        this.restApiMenuItem = restApiMenuItem;
 
         MenuItem performanceReportItem = new MenuItem("📊 Performance Report...");
         performanceReportItem.setOnAction(e -> { if (onPerformanceReport != null) onPerformanceReport.run(); });
@@ -575,47 +606,398 @@ public class MainWindowUICreator {
     }
 
     // ========================================================================
-    //  Dialog Methods
+    //  Dialog Methods - FIXED to open the actual Configuration Panel
     // ========================================================================
 
     private void showPreferencesDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Preferences");
         dialog.setHeaderText("User Interface Settings");
-        dialog.getDialogPane().setContent(new Label("Preferences dialog - coming soon"));
+        
+        // Create a simple preferences panel
+        VBox content = new VBox(10);
+        content.setPadding(new Insets(20));
+        
+        // Font size
+        Label fontLabel = new Label("Font Size:");
+        Slider fontSlider = new Slider(8, 20, prefManager.getFontSize());
+        fontSlider.setShowTickMarks(true);
+        fontSlider.setShowTickLabels(true);
+        fontSlider.setMajorTickUnit(2);
+        fontSlider.setPrefWidth(200);
+        
+        Label fontValueLabel = new Label(String.format("%.0fpx", fontSlider.getValue()));
+        fontSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
+            fontValueLabel.setText(String.format("%.0fpx", newVal.doubleValue()));
+        });
+        
+        HBox fontBox = new HBox(10, fontLabel, fontSlider, fontValueLabel);
+        fontBox.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        
+        // Theme toggle
+        CheckBox darkModeCheck = new CheckBox("Dark Mode");
+        darkModeCheck.setSelected("Dark".equals(prefManager.getTheme()));
+        darkModeCheck.setOnAction(e -> {
+            if (onToggleTheme != null) onToggleTheme.run();
+        });
+        
+        // Auto-update
+        CheckBox autoUpdateCheck = new CheckBox("Check for updates automatically");
+        autoUpdateCheck.setSelected(prefManager.getBoolean("auto.update.enabled", true));
+        autoUpdateCheck.setOnAction(e -> {
+            prefManager.putBoolean("auto.update.enabled", autoUpdateCheck.isSelected());
+            prefManager.flush();
+        });
+        
+        // Error reporting
+        CheckBox errorReportingCheck = new CheckBox("Send anonymous error reports");
+        errorReportingCheck.setSelected(prefManager.getBoolean("error.reporting.enabled", false));
+        errorReportingCheck.setOnAction(e -> {
+            prefManager.putBoolean("error.reporting.enabled", errorReportingCheck.isSelected());
+            prefManager.flush();
+            audiomanager.Studio studio = audiomanager.Studio.getInstance();
+            if (studio != null && studio.getErrorReporter() != null) {
+                studio.getErrorReporter().setEnabled(errorReportingCheck.isSelected());
+            }
+        });
+        
+        content.getChildren().addAll(fontBox, darkModeCheck, autoUpdateCheck, errorReportingCheck);
+        dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        
         ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
         dialog.showAndWait();
     }
 
+    /**
+     * Shows the Batch Processing Settings dialog.
+     * 
+     * ===== FIX: Now opens a dialog with the batch settings from ConfigurationPanel =====
+     */
     private void showBatchSettingsDialog() {
+        if (configurationPanel == null) {
+            logger.accept("❌ Configuration panel not available");
+            return;
+        }
+
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Batch Processing Settings");
         dialog.setHeaderText("Configure batch processing behavior");
-        dialog.getDialogPane().setContent(new Label("Batch settings - coming soon"));
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        dialog.setResizable(true);
+
+        // Create a copy of the batch section from configuration panel
+        VBox content = new VBox(10);
+        content.setPadding(new Insets(20));
+        content.setMinWidth(400);
+
+        // Max Parallel Files
+        Label parallelLabel = new Label("Max Parallel Files:");
+        Spinner<Integer> parallelSpinner = new Spinner<>(1, 16, configurationPanel.getMaxParallelFiles());
+        parallelSpinner.setEditable(true);
+        parallelSpinner.setPrefWidth(80);
+
+        // Checkboxes
+        CheckBox autoRemoveCheck = new CheckBox("Auto-Remove Completed Files");
+        autoRemoveCheck.setSelected(configurationPanel.isAutoRemoveCompleted());
+
+        CheckBox adaptiveScalingCheck = new CheckBox("Adaptive Concurrency Scaling");
+        adaptiveScalingCheck.setSelected(configurationPanel.isAdaptiveScalingEnabled());
+
+        CheckBox skipSegmentationCheck = new CheckBox("Baseline Mode (Skip Segmentation)");
+        skipSegmentationCheck.setSelected(configurationPanel.isSkipSegmentationEnabled());
+
+        // Note: Adaptive Scaling and Baseline Mode are mutually exclusive
+        adaptiveScalingCheck.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal) skipSegmentationCheck.setSelected(false);
+        });
+        skipSegmentationCheck.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal) adaptiveScalingCheck.setSelected(false);
+        });
+
+        content.getChildren().addAll(
+            new Label("Batch Processing Settings:"),
+            parallelLabel, parallelSpinner,
+            autoRemoveCheck,
+            adaptiveScalingCheck,
+            skipSegmentationCheck
+        );
+
+        dialog.getDialogPane().setContent(content);
+
+        ButtonType saveBtn = new ButtonType("Save", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveBtn, cancelBtn);
+
         ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-        dialog.showAndWait();
+
+        dialog.showAndWait().ifPresent(response -> {
+            if (response == saveBtn) {
+                // Apply settings
+                try {
+                    prefManager.setMaxParallelFiles(parallelSpinner.getValue());
+                    prefManager.setAutoRemoveCompleted(autoRemoveCheck.isSelected());
+                    prefManager.putBoolean("adaptive_scaling_enabled", adaptiveScalingCheck.isSelected());
+                    prefManager.putBoolean("skip_segmentation_baseline_mode", skipSegmentationCheck.isSelected());
+                    prefManager.flush();
+                    
+                    // Update configuration panel
+                    configurationPanel.loadPreferences();
+                    
+                    logger.accept("✅ Batch processing settings saved");
+                } catch (Exception e) {
+                    LOGGER.error("Failed to save batch settings", e);
+                    logger.accept("❌ Failed to save batch settings: " + e.getMessage());
+                }
+            }
+        });
     }
 
+    /**
+     * Shows the Transcription Settings dialog.
+     * 
+     * ===== FIX: Now opens a dialog with the transcription settings from ConfigurationPanel =====
+     */
     private void showWhisperSettingsDialog() {
+        if (configurationPanel == null) {
+            logger.accept("❌ Configuration panel not available");
+            return;
+        }
+
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Transcription Settings");
         dialog.setHeaderText("Configure Whisper transcription parameters");
-        dialog.getDialogPane().setContent(new Label("Transcription settings - coming soon"));
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        dialog.setResizable(true);
+
+        // Create a copy of the transcription section from configuration panel
+        VBox content = new VBox(10);
+        content.setPadding(new Insets(20));
+        content.setMinWidth(450);
+
+        // Get current values
+        TranscriptionConfig currentConfig = configurationPanel.getTranscriptionConfig();
+
+        // Model
+        Label modelLabel = new Label("Model:");
+        ComboBox<String> modelCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "tiny", "base", "small", "medium", "large"
+        ));
+        modelCombo.setValue(currentConfig.getModel());
+        modelCombo.setPrefWidth(120);
+
+        // Language
+        Label langLabel = new Label("Language:");
+        ComboBox<String> langCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "auto", "en", "es", "de", "fr", "it", "zh", "ja", "ru", "ko",
+            "pt", "tr", "pl", "ca", "nl", "ar", "sv", "id", "hi", "fi"
+        ));
+        langCombo.setValue(currentConfig.getLanguage());
+        langCombo.setPrefWidth(120);
+
+        // Checkboxes
+        CheckBox timestampsCheck = new CheckBox("Enable Timestamps");
+        timestampsCheck.setSelected(currentConfig.isTimestampsEnabled());
+
+        CheckBox confidenceCheck = new CheckBox("Include Confidence Scores");
+        confidenceCheck.setSelected(currentConfig.isConfidenceEnabled());
+
+        CheckBox diarizeCheck = new CheckBox("Enable Speaker Diarization");
+        diarizeCheck.setSelected(currentConfig.isDiarizeEnabled());
+
+        // Translation section
+        CheckBox translationCheck = new CheckBox("Enable Translation");
+        translationCheck.setSelected(currentConfig.isTranslationEnabled());
+
+        Label targetLangLabel = new Label("Target Language:");
+        ComboBox<String> targetLangCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ar", "hi",
+            "nl", "pl", "tr", "vi", "th", "ko", "sv", "no", "da", "fi"
+        ));
+        targetLangCombo.setValue(currentConfig.getTranslationTargetLanguage());
+        targetLangCombo.setPrefWidth(80);
+        targetLangCombo.setDisable(!translationCheck.isSelected());
+
+        translationCheck.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            targetLangCombo.setDisable(!newVal);
+        });
+
+        // Grid layout
+        GridPane grid = new GridPane();
+        grid.setHgap(15);
+        grid.setVgap(10);
+        
+        grid.add(modelLabel, 0, 0);
+        grid.add(modelCombo, 1, 0);
+        grid.add(langLabel, 2, 0);
+        grid.add(langCombo, 3, 0);
+        
+        grid.add(timestampsCheck, 0, 1, 2, 1);
+        grid.add(confidenceCheck, 2, 1, 2, 1);
+        grid.add(diarizeCheck, 0, 2, 2, 1);
+        
+        grid.add(new Separator(), 0, 3, 4, 1);
+        
+        grid.add(translationCheck, 0, 4, 4, 1);
+        grid.add(targetLangLabel, 0, 5);
+        grid.add(targetLangCombo, 1, 5);
+
+        content.getChildren().add(grid);
+
+        dialog.getDialogPane().setContent(content);
+
+        ButtonType saveBtn = new ButtonType("Save", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveBtn, cancelBtn);
+
         ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-        dialog.showAndWait();
+
+        dialog.showAndWait().ifPresent(response -> {
+            if (response == saveBtn) {
+                try {
+                    // Save preferences
+                    prefManager.setWhisperModel(modelCombo.getValue());
+                    prefManager.setLanguage(langCombo.getValue());
+                    prefManager.setTimestampsEnabled(timestampsCheck.isSelected());
+                    prefManager.setConfidenceEnabled(confidenceCheck.isSelected());
+                    prefManager.putBoolean("diarize.enabled", diarizeCheck.isSelected());
+                    
+                    // Translation preferences
+                    prefManager.setTranslationEnabled(translationCheck.isSelected());
+                    prefManager.setTranslationTargetLanguage(targetLangCombo.getValue());
+                    
+                    prefManager.flush();
+                    
+                    // Refresh configuration panel
+                    configurationPanel.loadPreferences();
+                    
+                    logger.accept("✅ Transcription settings saved");
+                } catch (Exception e) {
+                    LOGGER.error("Failed to save transcription settings", e);
+                    logger.accept("❌ Failed to save transcription settings: " + e.getMessage());
+                }
+            }
+        });
     }
 
+    /**
+     * Shows the Audio Processing Settings dialog.
+     * 
+     * ===== FIX: Now opens a dialog with the audio settings from ConfigurationPanel =====
+     */
     private void showAudioSettingsDialog() {
+        if (configurationPanel == null) {
+            logger.accept("❌ Configuration panel not available");
+            return;
+        }
+
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Audio Processing Settings");
         dialog.setHeaderText("Configure FFmpeg audio processing parameters");
-        dialog.getDialogPane().setContent(new Label("Audio settings - coming soon"));
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        dialog.setResizable(true);
+
+        // Create a copy of the audio section from configuration panel
+        VBox content = new VBox(10);
+        content.setPadding(new Insets(20));
+        content.setMinWidth(400);
+
+        // Output format
+        Label formatLabel = new Label("Output Format:");
+        ComboBox<String> formatCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "mp3", "wav", "ogg", "flac", "m4a"
+        ));
+        formatCombo.setValue(prefManager.getString(PreferenceKeys.OUTPUT_FORMAT, "mp3"));
+        formatCombo.setPrefWidth(100);
+
+        // Bitrate
+        Label bitrateLabel = new Label("Bitrate:");
+        ComboBox<String> bitrateCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "64k", "96k", "128k", "192k", "256k", "320k"
+        ));
+        bitrateCombo.setValue(prefManager.getString(PreferenceKeys.BITRATE, "128k"));
+        bitrateCombo.setPrefWidth(100);
+
+        // Volume Boost
+        Label volumeLabel = new Label("Volume Boost:");
+        Slider volumeSlider = new Slider(0, 10, prefManager.getVolumeBoost());
+        volumeSlider.setShowTickMarks(true);
+        volumeSlider.setShowTickLabels(true);
+        volumeSlider.setMajorTickUnit(2);
+        volumeSlider.setPrefWidth(150);
+        Label volumeValueLabel = new Label(String.format("%.1f dB", volumeSlider.getValue()));
+        volumeSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
+            volumeValueLabel.setText(String.format("%.1f dB", newVal.doubleValue()));
+        });
+        HBox volumeBox = new HBox(10, volumeSlider, volumeValueLabel);
+        volumeBox.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+
+        // Checkboxes
+        CheckBox noiseReductionCheck = new CheckBox("Enable Noise Reduction");
+        noiseReductionCheck.setSelected(prefManager.isNoiseReductionEnabled());
+
+        CheckBox normalizeCheck = new CheckBox("Normalize Audio");
+        normalizeCheck.setSelected(prefManager.isNormalizeAudioEnabled());
+
+        CheckBox removeSilenceCheck = new CheckBox("Remove Silence");
+        removeSilenceCheck.setSelected(prefManager.getBoolean("remove_silence", false));
+
+        CheckBox id3TaggingCheck = new CheckBox("Generate ID3 Tags (sidecar .meta file)");
+        id3TaggingCheck.setSelected(prefManager.isID3TaggingEnabled());
+
+        CheckBox autoVolumeCheck = new CheckBox("Auto Volume Optimization");
+        autoVolumeCheck.setSelected(prefManager.isAutoVolumeOptimizationEnabled());
+
+        // Grid layout
+        GridPane grid = new GridPane();
+        grid.setHgap(15);
+        grid.setVgap(10);
+        
+        grid.add(formatLabel, 0, 0);
+        grid.add(formatCombo, 1, 0);
+        grid.add(bitrateLabel, 2, 0);
+        grid.add(bitrateCombo, 3, 0);
+        
+        grid.add(volumeLabel, 0, 1);
+        grid.add(volumeBox, 1, 1, 3, 1);
+        
+        grid.add(noiseReductionCheck, 0, 2, 2, 1);
+        grid.add(normalizeCheck, 2, 2, 2, 1);
+        grid.add(removeSilenceCheck, 0, 3, 2, 1);
+        grid.add(id3TaggingCheck, 2, 3, 2, 1);
+        grid.add(autoVolumeCheck, 0, 4, 4, 1);
+
+        content.getChildren().add(grid);
+
+        dialog.getDialogPane().setContent(content);
+
+        ButtonType saveBtn = new ButtonType("Save", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveBtn, cancelBtn);
+
         ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
-        dialog.showAndWait();
+
+        dialog.showAndWait().ifPresent(response -> {
+            if (response == saveBtn) {
+                try {
+                    // Save preferences
+                    prefManager.putString(PreferenceKeys.OUTPUT_FORMAT, formatCombo.getValue());
+                    prefManager.putString(PreferenceKeys.BITRATE, bitrateCombo.getValue());
+                    prefManager.setVolumeBoost(volumeSlider.getValue());
+                    prefManager.setNoiseReductionEnabled(noiseReductionCheck.isSelected());
+                    prefManager.setNormalizeAudioEnabled(normalizeCheck.isSelected());
+                    prefManager.putBoolean("remove_silence", removeSilenceCheck.isSelected());
+                    prefManager.setID3TaggingEnabled(id3TaggingCheck.isSelected());
+                    prefManager.setAutoVolumeOptimizationEnabled(autoVolumeCheck.isSelected());
+                    prefManager.flush();
+                    
+                    // Refresh configuration panel
+                    configurationPanel.loadPreferences();
+                    
+                    logger.accept("✅ Audio processing settings saved");
+                } catch (Exception e) {
+                    LOGGER.error("Failed to save audio settings", e);
+                    logger.accept("❌ Failed to save audio settings: " + e.getMessage());
+                }
+            }
+        });
     }
 
     private void showAboutDialog() {
@@ -695,5 +1077,29 @@ public class MainWindowUICreator {
     public void setTimeEstimator(TimeLeftEstimator timeEstimator) {
         // Update control panel with time estimator
         // This is a workaround since ControlPanel needs it
+    }
+    
+    /**
+    * Updates the REST API menu item text based on running state.
+    */
+    public void updateRestApiMenuItem(boolean running) {
+        // This will be called from MainWindow when API state changes
+        // The menu item is created in createToolsMenu()
+        // We'll need to store a reference to the menu item
+    }
+    
+    /**
+    * Updates the REST API menu item.
+    */
+    public void setRestApiMenuItem(boolean running) {
+        if (restApiMenuItem != null) {
+            if (running) {
+                restApiMenuItem.setText("🌐 Stop REST API");
+                restApiMenuItem.setStyle("-fx-text-fill: #2e7d32;");
+            } else {
+                restApiMenuItem.setText("🌐 Start REST API...");
+                restApiMenuItem.setStyle("");
+            }
+        }
     }
 }

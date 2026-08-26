@@ -15,36 +15,67 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
- * Simplified parallel processing manager with GPU support.
- * 
- * <p>Key simplifications vs. original:</p>
+ * Enhanced parallel processing manager with dynamic thread pool optimization.
+ *
+ * <p>This class orchestrates the parallel processing of multiple audio files,
+ * providing features such as:
  * <ul>
- *   <li>Fixed thread pool with staggered submission instead of dynamic resizing</li>
- *   <li>BlockingQueue-based model pool instead of custom semaphore + instance tracking</li>
- *   <li>No resource monitor thread - memory pressure is handled via admission staggering</li>
- *   <li>Cleaner cancellation semantics</li>
- *   <li>GPU acceleration support via GpuConfig</li>
+ *   <li><b>Dynamic thread pool sizing:</b> Automatically adjusts based on
+ *       system resources (CPU cores, memory, GPU availability)</li>
+ *   <li><b>Memory-aware admission control:</b> Staggers file admission to
+ *       prevent memory thundering herd</li>
+ *   <li><b>GPU-aware concurrency management:</b> Limits parallelism based
+ *       on GPU memory capacity</li>
+ *   <li><b>Performance monitoring and auto-tuning:</b> Continuously adjusts
+ *       thread pool size based on runtime conditions</li>
+ *   <li><b>Model instance pooling:</b> Reuses transcription service instances
+ *       to reduce startup overhead</li>
+ *   <li><b>Timing and performance reporting:</b> Captures detailed timing
+ *       and resource usage data for each file</li>
+ *   <li><b>Post-transcription translation:</b> Translates transcripts when
+ *       configured via BatchProcessor</li>
  * </ul>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see BatchProcessor
+ * @see FileTimingReport
+ * @see GpuConfig
  */
 public class ParallelProcessingManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ParallelProcessingManager.class);
 
-    // ===== Configuration =====
-    private static final int MODEL_POOL_CAP = 4;
+    // ===== Configuration Constants =====
+    private static final int MIN_THREADS = 1;
+    private static final int MAX_THREADS = 16;
+    private static final long THREAD_KEEP_ALIVE = 60L;
+    private static final int QUEUE_SIZE = 100;
+    // Max number of WhisperX model instances (and therefore concurrent
+    // transcriptions) allowed at once, independent of workerPool's thread
+    // count. Each loaded large-v2 CPU instance can use several GB of RAM;
+    // raise this only if your machine has RAM to spare for that many
+    // concurrent instances on top of the base app/JVM footprint. A value
+    // that's too high relative to available RAM can crash the JVM with a
+    // native out-of-memory error rather than fail individual files gracefully.
+    private static final int MODEL_POOL_CAP = 2;
     private static final long ADMISSION_STAGGER_MS = 3000;
     private static final double MEMORY_PRESSURE_THRESHOLD = 80.0;
     private static final long MAX_ADMISSION_WAIT_MS = 30000;
     private static final long FILE_TIMEOUT_HOURS = 24;
+    private static final long MONITOR_INTERVAL_MS = 5000;
 
     // ===== Dependencies =====
     private final AudioProcessor audioProcessor;
@@ -54,14 +85,29 @@ public class ParallelProcessingManager {
     private final TranscriptionOutputWriter outputWriter;
     private final GpuConfig gpuConfig = GpuConfig.getInstance();
 
+    // ===== NEW: Reference to BatchProcessor for translation =====
+    private BatchProcessor batchProcessor;
+
     // ===== Threading =====
-    private final ExecutorService workerPool;
-    private final BlockingQueue<WhisperXTranscriptionService> modelPool;
-    private final int maxConcurrentFiles;
+    private ThreadPoolExecutor workerPool;
+    // Dedicated executor for the batch coordinator task (see processBatchParallel).
+    // MUST stay separate from workerPool: the coordinator submits per-file tasks to
+    // workerPool and then blocks waiting on them. If the coordinator itself ran on
+    // workerPool, it could occupy the only available thread and deadlock the batch
+    // (this happened when corePoolSize was 1 and the queue never filled enough to
+    // grow the pool - the coordinator held the sole thread while waiting on file
+    // tasks that had no thread left to run on).
+    private final ExecutorService coordinatorExecutor;
+    private final ModelInstancePool modelInstancePool;
+    private final ScheduledExecutorService monitorService;
+    private final int availableProcessors;
     private volatile boolean cancelled = false;
+    private volatile boolean running = true;
 
     // ===== Status =====
     private final AtomicInteger activeFileCount = new AtomicInteger(0);
+    private final AtomicInteger totalTasksProcessed = new AtomicInteger(0);
+    private final AtomicLong totalProcessingTime = new AtomicLong(0);
     private final Map<BatchFileItem, Map<String, Long>> pythonStageTimings = new ConcurrentHashMap<>();
     private final Map<BatchFileItem, double[]> pythonResourceUsage = new ConcurrentHashMap<>();
     private final List<FileTimingReport> recentTimingReports = new CopyOnWriteArrayList<>();
@@ -79,14 +125,31 @@ public class ParallelProcessingManager {
     //  Construction
     // ========================================================================
 
+    /**
+     * Constructs a new ParallelProcessingManager with default parallelism.
+     *
+     * @param audioProcessor the audio processor for file conversion
+     * @param transcriptionService the transcription service
+     * @param logger a consumer for log messages
+     * @param timeEstimator the time estimator for progress tracking
+     */
     public ParallelProcessingManager(AudioProcessor audioProcessor,
                                      WhisperXTranscriptionService transcriptionService,
                                      Consumer<String> logger,
                                      TimeLeftEstimator timeEstimator) {
-        this(audioProcessor, transcriptionService, logger, timeEstimator, 
+        this(audioProcessor, transcriptionService, logger, timeEstimator,
              Runtime.getRuntime().availableProcessors());
     }
 
+    /**
+     * Constructs a new ParallelProcessingManager with a specified maximum.
+     *
+     * @param audioProcessor the audio processor for file conversion
+     * @param transcriptionService the transcription service
+     * @param logger a consumer for log messages
+     * @param timeEstimator the time estimator for progress tracking
+     * @param maxConcurrentFiles the maximum number of concurrent files
+     */
     public ParallelProcessingManager(AudioProcessor audioProcessor,
                                      WhisperXTranscriptionService transcriptionService,
                                      Consumer<String> logger,
@@ -96,8 +159,7 @@ public class ParallelProcessingManager {
         this.transcriptionService = transcriptionService;
         this.logger = logger;
         this.timeEstimator = timeEstimator;
-        this.maxConcurrentFiles = Math.max(1, maxConcurrentFiles);
-        this.outputWriter = new TranscriptionOutputWriter();
+        this.availableProcessors = Runtime.getRuntime().availableProcessors();
 
         // Initialize GPU detection
         gpuConfig.detectGpu();
@@ -107,67 +169,283 @@ public class ParallelProcessingManager {
             LOGGER.info("ℹ️ No GPU detected — running on CPU mode");
         }
 
-        // Create worker pool with fixed size
-        this.workerPool = Executors.newFixedThreadPool(
-            this.maxConcurrentFiles,
-            new NamedThreadFactory("Parallel-Worker")
+        // Initialize output writer
+        this.outputWriter = new TranscriptionOutputWriter();
+
+        // Create dynamic thread pool
+        int optimalThreads = calculateOptimalThreadCount(maxConcurrentFiles);
+        this.workerPool = createThreadPool(optimalThreads);
+
+        // Coordinator runs on its own single-thread executor so it never competes
+        // with the per-file worker threads it submits work to and blocks on.
+        this.coordinatorExecutor = Executors.newSingleThreadExecutor(
+            new NamedThreadFactory("Batch-Coordinator"));
+
+        LOGGER.info("Dynamic thread pool initialized: core={}, max={}, queue={}",
+                    optimalThreads, optimalThreads, QUEUE_SIZE);
+
+        // Model pool: lazily creates WhisperX instances on demand, up to
+        // min(optimalThreads, MODEL_POOL_CAP). Unlike a plain fixed-size queue,
+        // borrow() blocks callers when the pool is at capacity instead of timing
+        // out and failing the file - this correctly throttles concurrent
+        // transcriptions to what the model pool can support, even when
+        // workerPool's thread concurrency is higher.
+        int modelPoolSize = Math.min(optimalThreads, MODEL_POOL_CAP);
+        this.modelInstancePool = new ModelInstancePool(
+            "whisperx", modelPoolSize, this::createModelInstance, LOGGER);
+
+        // Start monitor service for dynamic adjustment
+        this.monitorService = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "ParallelProcessor-Monitor");
+            t.setDaemon(true);
+            return t;
+        });
+        this.monitorService.scheduleAtFixedRate(
+            this::adjustThreadPool,
+            MONITOR_INTERVAL_MS,
+            MONITOR_INTERVAL_MS,
+            TimeUnit.MILLISECONDS
         );
 
-        // Pre-fill model pool
-        int poolSize = Math.min(this.maxConcurrentFiles, MODEL_POOL_CAP);
-        this.modelPool = new ArrayBlockingQueue<>(poolSize);
-        for (int i = 0; i < poolSize; i++) {
-            try {
-                modelPool.offer(createModelInstance());
-            } catch (Exception e) {
-                LOGGER.warn("Failed to pre-create model instance {}: {}", i, e.getMessage());
+        LOGGER.info("ParallelProcessingManager initialized: {} cores, dynamic pool, GPU: {}",
+            availableProcessors, gpuConfig.isGpuAvailable() ? "available" : "not available");
+    }
+
+    // ========================================================================
+    //  Thread Pool Management
+    // ========================================================================
+
+    /**
+     * Creates the thread pool with dynamic sizing.
+     *
+     * @param maxThreads the maximum number of threads
+     * @return the configured ThreadPoolExecutor
+     */
+    private ThreadPoolExecutor createThreadPool(int maxThreads) {
+        BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(QUEUE_SIZE);
+        ThreadFactory threadFactory = new NamedThreadFactory("Parallel-Worker");
+
+        // corePoolSize is set equal to maxThreads (not MIN_THREADS) because a
+        // standard ThreadPoolExecutor only spins up threads beyond corePoolSize
+        // once the work queue is completely full. With QUEUE_SIZE=100, a normal
+        // batch would never fill the queue, so a corePoolSize of 1 meant the pool
+        // effectively never used more than one thread regardless of maxThreads.
+        // adjustThreadPool() still shrinks/grows corePoolSize at runtime based on
+        // load, so this only changes the starting point, not the dynamic behavior.
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            maxThreads,
+            maxThreads,
+            THREAD_KEEP_ALIVE,
+            TimeUnit.SECONDS,
+            workQueue,
+            threadFactory,
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+        // Since corePoolSize now starts equal to maxThreads, core threads must be
+        // allowed to time out (otherwise idle workers are never reclaimed).
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
+    /**
+     * Calculates the optimal thread count based on system resources.
+     *
+     * <p>This method considers:
+     * <ul>
+     *   <li>CPU cores (leaves one core for the system)</li>
+     *   <li>GPU memory (limits parallelism based on available VRAM)</li>
+     *   <li>System memory (limits based on available RAM)</li>
+     *   <li>User-specified maximum</li>
+     * </ul>
+     *
+     * @param userMax the user-specified maximum
+     * @return the optimal thread count
+     */
+    private int calculateOptimalThreadCount(int userMax) {
+        // Base on CPU cores (leave one core for system)
+        int cpuBased = Math.max(1, availableProcessors - 1);
+
+        // Adjust for GPU
+        int gpuBased = Integer.MAX_VALUE;
+        if (gpuConfig.isGpuAvailable() && gpuConfig.shouldUseGpu()) {
+            long gpuMemoryMB = gpuConfig.getGpuMemoryMB();
+            if (gpuMemoryMB > 0) {
+                long usableMemory = Math.max(0, gpuMemoryMB - 1024);
+                gpuBased = (int) Math.max(1, usableMemory / 500);
+                LOGGER.debug("GPU-based thread limit: {} (memory: {} MB, usable: {} MB)",
+                            gpuBased, gpuMemoryMB, usableMemory);
             }
         }
 
-        LOGGER.info("ParallelProcessingManager initialized: {} workers, {} model instances, GPU: {}",
-            this.maxConcurrentFiles, modelPool.size(), 
-            gpuConfig.isGpuAvailable() ? "available" : "not available");
+        // Adjust for memory
+        long maxMemory = Runtime.getRuntime().maxMemory();
+        int memoryBased = (int) (maxMemory / (300 * 1024 * 1024)); // 300MB per job
+        memoryBased = Math.max(1, memoryBased);
+
+        // Combine all factors
+        int optimal = Math.min(cpuBased, Math.min(gpuBased, memoryBased));
+        optimal = Math.min(optimal, userMax);
+        optimal = Math.max(MIN_THREADS, Math.min(MAX_THREADS, optimal));
+
+        LOGGER.debug("Thread calculation: CPU={}, GPU={}, Memory={}, User={}, Optimal={}",
+                    cpuBased, gpuBased == Integer.MAX_VALUE ? "N/A" : gpuBased,
+                    memoryBased, userMax, optimal);
+
+        return optimal;
+    }
+
+    /**
+     * Dynamically adjusts the thread pool size based on system conditions.
+     *
+     * <p>This method is called periodically by the monitor service and
+     * adjusts thread count based on memory pressure, queue backlog, and
+     * under-utilisation.</p>
+     */
+    private void adjustThreadPool() {
+        if (!running || cancelled || workerPool == null) return;
+
+        try {
+            Runtime runtime = Runtime.getRuntime();
+            long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+            long maxMemory = runtime.maxMemory();
+            double memoryUsage = (double) usedMemory / maxMemory * 100.0;
+
+            int queueSize = workerPool.getQueue().size();
+            int activeCount = workerPool.getActiveCount();
+            int currentMax = workerPool.getMaximumPoolSize();
+            int currentCore = workerPool.getCorePoolSize();
+
+            boolean memoryPressure = memoryUsage > MEMORY_PRESSURE_THRESHOLD;
+            boolean queueBacklog = queueSize > 50 && activeCount >= currentCore;
+            boolean underutilized = activeCount < currentCore / 2 && queueSize < 10;
+
+            int newMax = currentMax;
+            int newCore = currentCore;
+
+            if (memoryPressure) {
+                newMax = Math.max(MIN_THREADS, currentMax - 1);
+                newCore = Math.min(newCore, newMax);
+                LOGGER.debug("Memory pressure ({:.1f}%), reducing threads", memoryUsage);
+            } else if (queueBacklog && currentMax < MAX_THREADS) {
+                newMax = Math.min(MAX_THREADS, currentMax + 1);
+                newCore = Math.min(newCore + 1, newMax);
+                LOGGER.debug("Queue backlog ({} tasks), increasing threads", queueSize);
+            } else if (underutilized && currentCore > MIN_THREADS) {
+                newCore = Math.max(MIN_THREADS, currentCore - 1);
+                newMax = Math.max(MIN_THREADS, currentMax - 1);
+                LOGGER.debug("Underutilized ({} active, {} queue), reducing threads",
+                            activeCount, queueSize);
+            }
+
+            if (newMax != currentMax) {
+                workerPool.setMaximumPoolSize(newMax);
+                LOGGER.info("Adjusted max threads: {} → {}", currentMax, newMax);
+            }
+            if (newCore != currentCore) {
+                workerPool.setCorePoolSize(newCore);
+                LOGGER.info("Adjusted core threads: {} → {}", currentCore, newCore);
+            }
+
+        } catch (Exception e) {
+            LOGGER.warn("Failed to adjust thread pool: {}", e.getMessage());
+        }
     }
 
     // ========================================================================
     //  Public API
     // ========================================================================
 
+    /**
+     * Sets the callback for file completion events.
+     *
+     * @param callback the completion callback
+     */
     public void setFileCompletionCallback(BatchProcessor.FileCompletionCallback callback) {
         this.completionCallback = callback;
     }
 
+    /**
+     * Sets the BatchProcessor reference for translation support.
+     *
+     * @param batchProcessor the batch processor instance
+     */
+    public void setBatchProcessor(BatchProcessor batchProcessor) {
+        this.batchProcessor = batchProcessor;
+        LOGGER.debug("BatchProcessor reference set for translation support");
+    }
+
+    /**
+     * Sets whether to export Word copies of transcriptions.
+     *
+     * @param enabled {@code true} to enable Word export
+     */
     public void setExportWordCopy(boolean enabled) {
         this.exportWordCopy = enabled;
     }
 
+    /**
+     * Sets whether to export PDF copies of transcriptions.
+     *
+     * @param enabled {@code true} to enable PDF export
+     */
     public void setExportPdfCopy(boolean enabled) {
         this.exportPdfCopy = enabled;
     }
 
+    /**
+     * Sets the error reporter for diagnostics.
+     *
+     * @param errorReporter the error reporter
+     */
     public void setErrorReporter(ErrorReporter errorReporter) {
         this.errorReporter = errorReporter;
     }
 
+    /**
+     * Enables or disables adaptive scaling.
+     *
+     * @param enabled {@code true} to enable adaptive scaling
+     */
     public void setAdaptiveScalingEnabled(boolean enabled) {
-        // Adaptive scaling is now handled by the fixed thread pool + staggered admission
-        // This is kept for API compatibility but does nothing in the simplified model
-        LOGGER.debug("Adaptive scaling enabled: {} (fixed pool model)", enabled);
+        // Adaptive scaling is handled by the dynamic thread pool
+        LOGGER.debug("Adaptive scaling enabled: {} (dynamic pool model)", enabled);
     }
 
+    /**
+     * Returns whether adaptive scaling is enabled.
+     *
+     * @return {@code true} if adaptive scaling is enabled
+     */
     public boolean isAdaptiveScalingEnabled() {
-        // In the simplified model, adaptive scaling is always "enabled" via staggered admission
         return true;
     }
 
     /**
-     * Process a batch of files in parallel.
-     * 
-     * @param items the files to process
-     * @param processingConfig audio processing configuration
-     * @param transcriptionConfig transcription configuration
-     * @param maxParallel max concurrent files (capped by constructor value)
-     * @return a future containing the batch result
+     * Returns current pool statistics.
+     *
+     * @return a {@link PoolStats} object
+     */
+    public PoolStats getPoolStats() {
+        if (workerPool == null) {
+            return new PoolStats(0, 0, 0, 0, 0);
+        }
+        return new PoolStats(
+            workerPool.getPoolSize(),
+            workerPool.getActiveCount(),
+            workerPool.getQueue().size(),
+            workerPool.getCompletedTaskCount(),
+            workerPool.getMaximumPoolSize()
+        );
+    }
+
+    /**
+     * Processes a batch of files in parallel.
+     *
+     * @param items the list of files to process
+     * @param processingConfig the audio processing configuration
+     * @param transcriptionConfig the transcription configuration
+     * @param maxParallel the maximum number of parallel tasks
+     * @return a {@link CompletableFuture} containing the batch result
      */
     public CompletableFuture<ParallelBatchResult> processBatchParallel(
             List<BatchFileItem> items,
@@ -175,14 +453,29 @@ public class ParallelProcessingManager {
             TranscriptionConfig transcriptionConfig,
             int maxParallel) {
 
+        // Defensive guard: recreate the worker pool if it was somehow torn down
+        // (e.g. shutdown() called concurrently with a new batch starting).
+        if (workerPool == null || workerPool.isShutdown()) {
+            LOGGER.warn("workerPool was null or shutdown - creating emergency pool");
+            int optimalThreads = calculateOptimalThreadCount(Math.min(maxParallel, items.size()));
+            this.workerPool = createThreadPool(optimalThreads);
+        }
+
+        LOGGER.debug("workerPool state: poolSize={}, activeCount={}, queueSize={}, corePoolSize={}, maxPoolSize={}",
+            workerPool.getPoolSize(),
+            workerPool.getActiveCount(),
+            workerPool.getQueue().size(),
+            workerPool.getCorePoolSize(),
+            workerPool.getMaximumPoolSize());
+
         if (items.isEmpty()) {
             return CompletableFuture.completedFuture(
                 new ParallelBatchResult(0, 0, 0, 0, false));
         }
 
-        int effectiveParallel = Math.min(maxParallel, maxConcurrentFiles);
-        LOGGER.info("Starting parallel batch: {} files, {} workers, GPU: {}", 
-            items.size(), effectiveParallel, 
+        int effectiveParallel = calculateOptimalParallelism(maxParallel, items.size());
+        LOGGER.info("Starting parallel batch: {} files, {} workers, GPU: {}",
+            items.size(), effectiveParallel,
             gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
 
         return CompletableFuture.supplyAsync(() -> {
@@ -194,17 +487,19 @@ public class ParallelProcessingManager {
             List<BatchFileItem> sorted = new ArrayList<>(items);
             sorted.sort(Comparator.comparingInt(i -> i.getPriority().ordinal()));
 
-            // Submit files with staggered admission to avoid memory thundering herd
+            // Submit files with staggered admission
             for (int i = 0; i < sorted.size(); i++) {
+                LOGGER.debug("Processing file index: {} of {}", i, sorted.size());
                 if (cancelled) break;
 
-                // Stagger admission to let memory pressure be visible
                 if (i > 0 && i % effectiveParallel == 0) {
                     awaitAdmissionSlot(i);
                 }
 
                 BatchFileItem item = sorted.get(i);
                 long queueEnteredMs = System.currentTimeMillis();
+                LOGGER.debug("Submitting file: {}", item.getFileName());
+
                 futures.add(processFile(
                     item,
                     processingConfig,
@@ -214,7 +509,7 @@ public class ParallelProcessingManager {
                 ));
             }
 
-            // Wait for all files to complete (or timeout)
+            // Wait for all files to complete
             try {
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .get(FILE_TIMEOUT_HOURS, TimeUnit.HOURS);
@@ -246,32 +541,158 @@ public class ParallelProcessingManager {
             ParallelBatchResult result = new ParallelBatchResult(
                 items.size(), completed, failed, duration, cancelled);
 
-            LOGGER.info("Batch complete: {}/{} files in {}ms (GPU: {})", 
+            LOGGER.info("Batch complete: {}/{} files in {}ms (GPU: {})",
                 completed, items.size(), duration,
                 gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
             return result;
 
-        }, workerPool);
+        }, coordinatorExecutor);
     }
 
+    // ========================================================================
+    //  Cancellation and Shutdown
+    // ========================================================================
+
     /**
-     * Cancel the current batch.
+     * Cancels the current batch processing.
      */
     public void cancel() {
         cancelled = true;
         LOGGER.info("Cancelling parallel batch...");
-        
-        // Kill any active subprocesses
+
         int killed = ProcessRunner.destroyAllActiveProcesses();
         if (killed > 0) {
             LOGGER.info("Forcibly terminated {} active subprocess(es)", killed);
         }
 
-        // Shutdown worker pool
-        workerPool.shutdownNow();
+        if (workerPool != null) {
+            workerPool.shutdownNow();
+            try {
+                if (!workerPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                    LOGGER.warn("Worker pool did not terminate within 5s");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Shuts down all resources.
+     */
+    public void shutdown() {
+        running = false;
+
+        if (monitorService != null) {
+            monitorService.shutdown();
+            try {
+                monitorService.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                monitorService.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        cancel();
+
+        if (workerPool != null && !workerPool.isTerminated()) {
+            workerPool.shutdownNow();
+        }
+
+        if (coordinatorExecutor != null && !coordinatorExecutor.isTerminated()) {
+            coordinatorExecutor.shutdownNow();
+        }
+
+        LOGGER.info("ParallelProcessingManager shutdown complete. Total tasks: {}, Total time: {}ms",
+            totalTasksProcessed.get(), totalProcessingTime.get());
+    }
+
+    /**
+     * Returns recent timing reports for processed files.
+     *
+     * @return a list of {@link FileTimingReport} objects
+     */
+    public List<FileTimingReport> getRecentTimingReports() {
+        return new ArrayList<>(recentTimingReports);
+    }
+
+    // ========================================================================
+    //  GPU Status
+    // ========================================================================
+
+    /**
+     * Returns whether GPU acceleration is enabled and available.
+     *
+     * @return {@code true} if GPU is enabled
+     */
+    public boolean isGpuEnabled() {
+        return gpuConfig.shouldUseGpu();
+    }
+
+    /**
+     * Returns whether GPU acceleration is available.
+     *
+     * @return {@code true} if GPU is available
+     */
+    public boolean isGpuAvailable() {
+        return gpuConfig.isGpuAvailable();
+    }
+
+    /**
+     * Returns the GPU name.
+     *
+     * @return the GPU name, or "No GPU" if not available
+     */
+    public String getGpuName() {
+        if (gpuConfig.isGpuAvailable()) {
+            return gpuConfig.getGpuName();
+        }
+        return "No GPU";
+    }
+
+    // ========================================================================
+    //  Private Helpers
+    // ========================================================================
+
+    /**
+     * Calculates optimal parallelism based on current system state.
+     */
+    private int calculateOptimalParallelism(int userParallel, int fileCount) {
+        int optimal = calculateOptimalThreadCount(userParallel);
+        optimal = Math.min(optimal, fileCount);
+        optimal = Math.max(1, optimal);
+        return optimal;
+    }
+
+    /**
+     * Waits for an admission slot to prevent memory thundering herd.
+     */
+    private void awaitAdmissionSlot(int index) {
+        if (index == 0) {
+            return;
+        }
+
+        long waited = 0;
         try {
-            if (!workerPool.awaitTermination(5, TimeUnit.SECONDS)) {
-                LOGGER.warn("Worker pool did not terminate within 5s");
+            // Back off while system memory is under pressure, instead of a flat
+            // sleep that ignores actual resource conditions. This is what stops
+            // the coordinator from admitting more heavy transcriptions (each a
+            // multi-GB WhisperX subprocess) than the machine can actually hold,
+            // which previously led to native OOM crashes under real concurrency.
+            while (waited < MAX_ADMISSION_WAIT_MS) {
+                double memUsed = getSystemMemoryUsedPercent();
+                if (memUsed >= 0 && memUsed < MEMORY_PRESSURE_THRESHOLD) {
+                    break;
+                }
+                if (memUsed >= 0) {
+                    LOGGER.info("Admission stagger: system memory at {}% (threshold {}%), waiting...",
+                        String.format("%.0f", memUsed), MEMORY_PRESSURE_THRESHOLD);
+                }
+                Thread.sleep(500);
+                waited += 500;
+            }
+            if (waited >= MAX_ADMISSION_WAIT_MS) {
+                LOGGER.warn("Admission stagger: proceeded after {}ms despite continued memory pressure", waited);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -279,21 +700,47 @@ public class ParallelProcessingManager {
     }
 
     /**
-     * Shutdown all resources.
+     * Returns the system memory used percentage.
+     *
+     * @return the memory usage as a percentage, or {@code -1} if unavailable
      */
-    public void shutdown() {
-        cancel();
-        LOGGER.info("ParallelProcessingManager shutdown complete");
+    private double getSystemMemoryUsedPercent() {
+        try {
+            OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
+                long total = sunBean.getTotalMemorySize();
+                long free = sunBean.getFreeMemorySize();
+                if (total > 0) {
+                    return (total - free) * 100.0 / total;
+                }
+            }
+        } catch (Exception ignored) { }
+        return -1;
     }
 
-    public List<FileTimingReport> getRecentTimingReports() {
-        return new ArrayList<>(recentTimingReports);
+    /**
+     * Creates a new transcription service instance.
+     *
+     * @return a new WhisperXTranscriptionService instance
+     */
+    private WhisperXTranscriptionService createModelInstance() {
+        gpuConfig.detectGpu();
+
+        WhisperXTranscriptionService instance = new WhisperXTranscriptionService(
+            new DependencyManager(),
+            timeEstimator,
+            null,
+            errorReporter
+        );
+
+        instance.setGpuEnabled(gpuConfig.shouldUseGpu());
+
+        return instance;
     }
 
-    // ========================================================================
-    //  File Processing
-    // ========================================================================
-
+    /**
+     * Process a single file asynchronously.
+     */
     private CompletableFuture<FileResult> processFile(
             BatchFileItem item,
             ProcessingConfig processingConfig,
@@ -301,49 +748,71 @@ public class ParallelProcessingManager {
             long queueEnteredMs,
             long batchStartEpochMs) {
 
+        LOGGER.debug("processFile entered for: {}", item.getFileName());
+
         return CompletableFuture.supplyAsync(() -> {
+            LOGGER.debug("processFile started on worker for: {}", item.getFileName());
             File file = item.getFile();
             activeFileCount.incrementAndGet();
             File tempWav = null;
             WhisperXTranscriptionService model = null;
+            TranscriptionResult transcriptionResult = null;
 
             try {
                 long queueWaitMs = System.currentTimeMillis() - queueEnteredMs;
-                LOGGER.debug("Processing {} (queue wait: {}ms, GPU: {})", 
+                LOGGER.debug("Processing {} (queue wait: {}ms, GPU: {})",
                     file.getName(), queueWaitMs,
                     gpuConfig.shouldUseGpu() ? "enabled" : "disabled");
 
-                // Update item status
                 item.setStatus("PROCESSING");
                 setItemProgress(item, 0.0);
 
-                // === Step 1: Preprocess audio ===
+                // Step 1: Preprocess audio
                 long preprocessStart = System.currentTimeMillis();
                 tempWav = preprocessFile(file, processingConfig);
                 long preprocessMs = System.currentTimeMillis() - preprocessStart;
                 setItemProgress(item, 0.3);
 
-                // === Step 2: Borrow model instance ===
+                // Step 2: Borrow model instance
                 long modelAcquireStart = System.currentTimeMillis();
                 model = borrowModel();
                 long modelAcquireMs = System.currentTimeMillis() - modelAcquireStart;
                 long modelAcquiredEpoch = System.currentTimeMillis();
 
-                // === Step 3: Transcribe ===
+                // Step 3: Transcribe
                 long transcribeStart = System.currentTimeMillis();
-                TranscriptionResult result = transcribeFile(tempWav, transcriptionConfig, item);
+                transcriptionResult = transcribeFile(tempWav, transcriptionConfig, item);
                 long transcribeMs = System.currentTimeMillis() - transcribeStart;
-                setItemProgress(item, 0.95);
+                setItemProgress(item, 0.85);
 
-                // Capture Python-side timing data
+                // ===== NEW: Apply translation if enabled =====
+                TranscriptionResult finalResult = transcriptionResult;
+                if (batchProcessor != null && batchProcessor.isTranslationAvailable() 
+                        && transcriptionConfig.isTranslationEnabled()) {
+                    LOGGER.info("🌐 Applying translation for {} to: {}", 
+                        file.getName(), transcriptionConfig.getTranslationTargetLanguage());
+                    
+                    long translateStart = System.currentTimeMillis();
+                    finalResult = batchProcessor.translateResult(transcriptionResult, transcriptionConfig);
+                    long translateMs = System.currentTimeMillis() - translateStart;
+                    
+                    if (finalResult != transcriptionResult) {
+                        LOGGER.info("🌐 Translation completed for {} in {}ms", 
+                            file.getName(), translateMs);
+                        setItemProgress(item, 0.90);
+                    } else {
+                        LOGGER.info("🌐 Translation skipped for {} (no changes)", file.getName());
+                    }
+                }
+
                 capturePythonTimings(item, model);
 
-                // === Step 4: Save output ===
+                // Step 4: Save output (uses finalResult)
                 long saveStart = System.currentTimeMillis();
-                saveOutput(file, result, transcriptionConfig, processingConfig);
+                saveOutput(file, finalResult, transcriptionConfig, processingConfig);
                 long saveMs = System.currentTimeMillis() - saveStart;
 
-                // === Step 5: Complete ===
+                // Step 5: Complete
                 setItemProgress(item, 1.0);
                 item.setStatus("COMPLETED");
                 item.setErrorMessage(null);
@@ -351,14 +820,15 @@ public class ParallelProcessingManager {
                 long totalMs = System.currentTimeMillis() - queueEnteredMs;
                 long completedEpoch = System.currentTimeMillis();
 
-                // Record timing report with GPU info
                 recordTimingReport(file, queueWaitMs, preprocessMs, modelAcquireMs,
                     transcribeMs, saveMs, totalMs, batchStartEpochMs,
                     queueEnteredMs, preprocessStart, modelAcquiredEpoch,
                     transcribeStart, saveStart, completedEpoch,
                     transcriptionConfig, item);
 
-                // Notify completion
+                totalTasksProcessed.incrementAndGet();
+                totalProcessingTime.addAndGet(totalMs);
+
                 if (completionCallback != null) {
                     completionCallback.onFileCompleted(item, true);
                 }
@@ -371,7 +841,6 @@ public class ParallelProcessingManager {
                 item.setErrorMessage(e.getMessage());
                 setItemProgress(item, 0.0);
 
-                // Record failure report with GPU info
                 recordFailureReport(file, e, batchStartEpochMs, transcriptionConfig);
 
                 if (completionCallback != null) {
@@ -381,7 +850,6 @@ public class ParallelProcessingManager {
                 return new FileResult(file, false, e.getMessage());
 
             } finally {
-                // Clean up
                 cleanupTempFile(tempWav);
                 if (model != null) {
                     releaseModel(model);
@@ -394,10 +862,9 @@ public class ParallelProcessingManager {
         }, workerPool);
     }
 
-    // ========================================================================
-    //  Processing Steps
-    // ========================================================================
-
+    /**
+     * Preprocesses a file by converting it to WAV.
+     */
     private File preprocessFile(File file, ProcessingConfig config) throws Exception {
         AudioProcessor.ProcessingResult result;
         if (config.isNormalize() || config.getVolumeBoost() > 0) {
@@ -408,25 +875,31 @@ public class ParallelProcessingManager {
         return new File(result.getOutputPath());
     }
 
+    /**
+     * Borrows a model instance from the pool.
+     */
     private WhisperXTranscriptionService borrowModel() throws InterruptedException {
-        WhisperXTranscriptionService model = modelPool.poll(30, TimeUnit.SECONDS);
-        if (model == null) {
-            throw new InterruptedException("No model instance available");
-        }
+        WhisperXTranscriptionService model = modelInstancePool.borrow();
+        model.setGpuEnabled(gpuConfig.shouldUseGpu());
         return model;
     }
 
+    /**
+     * Releases a model instance back to the pool.
+     */
     private void releaseModel(WhisperXTranscriptionService model) {
-        modelPool.offer(model);
+        modelInstancePool.release(model);
     }
 
+    /**
+     * Transcribes a file using the borrowed model.
+     */
     private TranscriptionResult transcribeFile(File wavFile,
                                                TranscriptionConfig config,
                                                BatchFileItem item) throws Exception {
-        // Check GPU status before transcription
         boolean gpuEnabled = gpuConfig.shouldUseGpu();
         LOGGER.debug("Transcribing {} with GPU: {}", wavFile.getName(), gpuEnabled ? "enabled" : "disabled");
-        
+
         return transcriptionService.transcribe(
             wavFile.getAbsolutePath(),
             config,
@@ -435,11 +908,25 @@ public class ParallelProcessingManager {
         );
     }
 
+    /**
+     * Saves the transcription output.
+     *
+     * <p>This method now uses the finalResult which may have been translated.</p>
+     *
+     * @param originalFile the original audio file
+     * @param result the transcription result (may be translated)
+     * @param config the transcription configuration
+     * @param processingConfig the processing configuration
+     * @throws IOException if the file cannot be written
+     */
     private void saveOutput(File originalFile,
                             TranscriptionResult result,
                             TranscriptionConfig config,
                             ProcessingConfig processingConfig) throws IOException {
-        
+
+        // ===== Note: result is already translated if translation was enabled =====
+        // The translation is applied in processFile() before calling saveOutput()
+
         File out = outputWriter.save(
             originalFile.getName(),
             result,
@@ -447,14 +934,12 @@ public class ParallelProcessingManager {
             processingConfig.getOutputDirectory()
         );
 
-        // Ensure output actually exists
         if (!out.exists() || out.length() == 0) {
             throw new IOException("Output file is missing or empty: " + out);
         }
 
         LOGGER.info("Saved output for {}: {}", originalFile.getName(), out);
 
-        // Optional exports
         if (exportWordCopy) {
             exportWordCopy(originalFile, result, processingConfig);
         }
@@ -463,6 +948,104 @@ public class ParallelProcessingManager {
         }
     }
 
+    /**
+     * Captures Python-side timing data from the model.
+     */
+    private void capturePythonTimings(BatchFileItem item, WhisperXTranscriptionService model) {
+        Map<String, Long> timings = model.getLastPythonStageTimingsMs();
+        if (!timings.isEmpty()) {
+            pythonStageTimings.put(item, timings);
+        }
+        double peakMem = model.getLastPythonPeakMemoryMb();
+        double avgCpu = model.getLastPythonAvgCpuPercent();
+        if (peakMem >= 0 || avgCpu >= 0) {
+            pythonResourceUsage.put(item, new double[]{peakMem, avgCpu});
+        }
+    }
+
+    /**
+     * Records a timing report for a completed file.
+     */
+    private void recordTimingReport(File file, long queueWaitMs, long preprocessMs,
+                                     long modelAcquireMs, long transcribeMs,
+                                     long saveMs, long totalMs, long batchStartEpochMs,
+                                     long queueEnteredMs, long preprocessStart,
+                                     long modelAcquiredEpoch, long transcribeStart,
+                                     long saveStart, long completedEpoch,
+                                     TranscriptionConfig config, BatchFileItem item) {
+
+        FileTimingReport report = new FileTimingReport(file.getName());
+        report.setProcessingMode(config.isSkipSegmentation() ? "BASELINE" : "ADAPTIVE");
+        report.setStage("queue_wait", queueWaitMs);
+        report.setStage("preprocessing", preprocessMs);
+        report.setStage("model_acquisition", modelAcquireMs);
+        report.setStage("transcription_wall_clock", transcribeMs);
+        report.setStage("output_saving", saveMs);
+        report.setStage("total_pipeline", totalMs);
+
+        // ===== NEW: Add translation timing if available =====
+        // The translation timing is captured within the processFile method
+        // but not explicitly tracked here. We could add a separate stage
+        // if we wanted to track it.
+
+        Map<String, Long> pythonTimings = pythonStageTimings.remove(item);
+        if (pythonTimings != null) {
+            pythonTimings.forEach(report::setStage);
+        }
+
+        double[] resources = pythonResourceUsage.remove(item);
+        if (resources != null) {
+            if (resources[0] >= 0) report.setPythonPeakMemoryMb(resources[0]);
+            if (resources[1] >= 0) report.setPythonAvgCpuPercent(resources[1]);
+        }
+
+        report.setBatchStartEpochMs(batchStartEpochMs);
+        report.setStageEpoch("queue_entered", queueEnteredMs);
+        report.setStageEpoch("preprocess_start", preprocessStart);
+        report.setStageEpoch("model_acquired", modelAcquiredEpoch);
+        report.setStageEpoch("transcribe_start", transcribeStart);
+        report.setStageEpoch("save_start", saveStart);
+        report.setStageEpoch("completed", completedEpoch);
+
+        boolean gpuUsed = gpuConfig.shouldUseGpu();
+        report.setGpuInfo(gpuConfig, gpuUsed);
+
+        Runtime rt = Runtime.getRuntime();
+        report.setPeakHeapUsedMB((rt.totalMemory() - rt.freeMemory()) / (1024 * 1024));
+
+        recordTimingReport(report);
+    }
+
+    /**
+     * Records a failure report for a failed file.
+     */
+    private void recordFailureReport(File file, Exception e, long batchStartEpochMs,
+                                      TranscriptionConfig config) {
+        FileTimingReport report = new FileTimingReport(file.getName());
+        report.setProcessingMode(config.isSkipSegmentation() ? "BASELINE" : "ADAPTIVE");
+        report.setFailure(e);
+        report.setBatchStartEpochMs(batchStartEpochMs);
+        report.setStageEpoch("failed_at", System.currentTimeMillis());
+
+        boolean gpuUsed = gpuConfig.shouldUseGpu();
+        report.setGpuInfo(gpuConfig, gpuUsed);
+
+        recordTimingReport(report);
+    }
+
+    /**
+     * Records a timing report to the history.
+     */
+    private synchronized void recordTimingReport(FileTimingReport report) {
+        recentTimingReports.add(0, report);
+        while (recentTimingReports.size() > MAX_REPORTS) {
+            recentTimingReports.remove(recentTimingReports.size() - 1);
+        }
+    }
+
+    /**
+     * Exports a Word copy of the transcription.
+     */
     private void exportWordCopy(File originalFile, TranscriptionResult result,
                                 ProcessingConfig config) {
         try {
@@ -475,6 +1058,9 @@ public class ParallelProcessingManager {
         }
     }
 
+    /**
+     * Exports a PDF copy of the transcription.
+     */
     private void exportPdfCopy(File originalFile, TranscriptionResult result,
                                ProcessingConfig config) {
         try {
@@ -489,140 +1075,9 @@ public class ParallelProcessingManager {
         }
     }
 
-    // ========================================================================
-    //  Timing & Reporting
-    // ========================================================================
-
-    private void capturePythonTimings(BatchFileItem item, WhisperXTranscriptionService model) {
-        Map<String, Long> timings = model.getLastPythonStageTimingsMs();
-        if (!timings.isEmpty()) {
-            pythonStageTimings.put(item, timings);
-        }
-        double peakMem = model.getLastPythonPeakMemoryMb();
-        double avgCpu = model.getLastPythonAvgCpuPercent();
-        if (peakMem >= 0 || avgCpu >= 0) {
-            pythonResourceUsage.put(item, new double[]{peakMem, avgCpu});
-        }
-    }
-
-    private void recordTimingReport(File file, long queueWaitMs, long preprocessMs,
-                                     long modelAcquireMs, long transcribeMs,
-                                     long saveMs, long totalMs, long batchStartEpochMs,
-                                     long queueEnteredMs, long preprocessStart,
-                                     long modelAcquiredEpoch, long transcribeStart,
-                                     long saveStart, long completedEpoch,
-                                     TranscriptionConfig config, BatchFileItem item) {
-        
-        FileTimingReport report = new FileTimingReport(file.getName());
-        report.setProcessingMode(config.isSkipSegmentation() ? "BASELINE" : "ADAPTIVE");
-        report.setStage("queue_wait", queueWaitMs);
-        report.setStage("preprocessing", preprocessMs);
-        report.setStage("model_acquisition", modelAcquireMs);
-        report.setStage("transcription_wall_clock", transcribeMs);
-        report.setStage("output_saving", saveMs);
-        report.setStage("total_pipeline", totalMs);
-
-        // Python-side stages
-        Map<String, Long> pythonTimings = pythonStageTimings.remove(item);
-        if (pythonTimings != null) {
-            pythonTimings.forEach(report::setStage);
-        }
-
-        // Resource usage
-        double[] resources = pythonResourceUsage.remove(item);
-        if (resources != null) {
-            if (resources[0] >= 0) report.setPythonPeakMemoryMb(resources[0]);
-            if (resources[1] >= 0) report.setPythonAvgCpuPercent(resources[1]);
-        }
-
-        // Wall-clock timeline
-        report.setBatchStartEpochMs(batchStartEpochMs);
-        report.setStageEpoch("queue_entered", queueEnteredMs);
-        report.setStageEpoch("preprocess_start", preprocessStart);
-        report.setStageEpoch("model_acquired", modelAcquiredEpoch);
-        report.setStageEpoch("transcribe_start", transcribeStart);
-        report.setStageEpoch("save_start", saveStart);
-        report.setStageEpoch("completed", completedEpoch);
-
-        // GPU Info
-        boolean gpuUsed = gpuConfig.shouldUseGpu();
-        report.setGpuInfo(gpuConfig, gpuUsed);
-        
-        // Log GPU status for this file
-        if (gpuUsed) {
-            LOGGER.debug("File {} processed with GPU: {}", file.getName(), gpuConfig.getGpuName());
-        }
-
-        // JVM-side resource snapshot
-        Runtime rt = Runtime.getRuntime();
-        report.setPeakHeapUsedMB((rt.totalMemory() - rt.freeMemory()) / (1024 * 1024));
-
-        recordTimingReport(report);
-    }
-
-    private void recordFailureReport(File file, Exception e, long batchStartEpochMs,
-                                      TranscriptionConfig config) {
-        FileTimingReport report = new FileTimingReport(file.getName());
-        report.setProcessingMode(config.isSkipSegmentation() ? "BASELINE" : "ADAPTIVE");
-        report.setFailure(e);
-        report.setBatchStartEpochMs(batchStartEpochMs);
-        report.setStageEpoch("failed_at", System.currentTimeMillis());
-        
-        // Include GPU info even for failures
-        boolean gpuUsed = gpuConfig.shouldUseGpu();
-        report.setGpuInfo(gpuConfig, gpuUsed);
-        
-        recordTimingReport(report);
-    }
-
-    private synchronized void recordTimingReport(FileTimingReport report) {
-        recentTimingReports.add(0, report);
-        while (recentTimingReports.size() > MAX_REPORTS) {
-            recentTimingReports.remove(recentTimingReports.size() - 1);
-        }
-    }
-
-    // ========================================================================
-    //  Resource Management
-    // ========================================================================
-
-    private void awaitAdmissionSlot(int index) {
-        if (index == 0) return;
-
-        try {
-            Thread.sleep(ADMISSION_STAGGER_MS);
-
-            long waited = 0;
-            while (waited < MAX_ADMISSION_WAIT_MS) {
-                double memPct = getSystemMemoryUsedPercent();
-                if (memPct < 0 || memPct < MEMORY_PRESSURE_THRESHOLD) {
-                    return;
-                }
-                LOGGER.info("Delaying admission - memory at {}% (threshold {}%)",
-                    String.format("%.0f", memPct), (int) MEMORY_PRESSURE_THRESHOLD);
-                Thread.sleep(2000);
-                waited += 2000;
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private double getSystemMemoryUsedPercent() {
-        try {
-            java.lang.management.OperatingSystemMXBean osBean =
-                java.lang.management.ManagementFactory.getOperatingSystemMXBean();
-            if (osBean instanceof com.sun.management.OperatingSystemMXBean sunBean) {
-                long total = sunBean.getTotalMemorySize();
-                long free = sunBean.getFreeMemorySize();
-                if (total > 0) {
-                    return (total - free) * 100.0 / total;
-                }
-            }
-        } catch (Exception ignored) { }
-        return -1;
-    }
-
+    /**
+     * Cleans up a temporary file.
+     */
     private void cleanupTempFile(File tempWav) {
         if (tempWav == null || !tempWav.exists()) return;
         try {
@@ -633,41 +1088,66 @@ public class ParallelProcessingManager {
         }
     }
 
+    /**
+     * Sets the progress of a batch item.
+     */
     private void setItemProgress(BatchFileItem item, double value) {
         item.setProgress(Math.min(1.0, Math.max(0.0, value)));
         item.setIndividualProgress(item.getProgress());
     }
 
-    // ========================================================================
-    //  Helpers
-    // ========================================================================
-
-    private WhisperXTranscriptionService createModelInstance() {
-        // Ensure GPU detection is initialized
-        gpuConfig.detectGpu();
-        
-        WhisperXTranscriptionService instance = new WhisperXTranscriptionService(
-            new DependencyManager(),
-            timeEstimator,
-            null,
-            errorReporter
-        );
-        
-        // Set GPU preference based on config
-        instance.setGpuEnabled(gpuConfig.shouldUseGpu());
-        
-        return instance;
-    }
-
+    /**
+     * Returns the base name of a file (without extension).
+     */
     private String getBaseName(String fileName) {
         int dot = fileName.lastIndexOf('.');
         return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
+    /**
+     * Retry a failed file.
+     */
+    public BatchFileItem retryFile(BatchFileItem item,
+                                   ProcessingConfig processingConfig,
+                                   TranscriptionConfig transcriptionConfig) throws Exception {
+        if (!"FAILED".equals(item.getStatus())) {
+            return item;
+        }
+
+        LOGGER.info("Retrying failed file: {}", item.getFileName());
+
+        item.setStatus("PENDING");
+        item.setProgress(0.0);
+        item.setErrorMessage(null);
+
+        CompletableFuture<FileResult> future = processFile(
+            item,
+            processingConfig,
+            transcriptionConfig,
+            System.currentTimeMillis(),
+            System.currentTimeMillis()
+        );
+
+        try {
+            FileResult result = future.get(FILE_TIMEOUT_HOURS, TimeUnit.HOURS);
+            if (result.success) {
+                LOGGER.info("Retry successful for: {}", item.getFileName());
+                return item;
+            } else {
+                throw new Exception("Retry failed: " + result.message);
+            }
+        } catch (TimeoutException e) {
+            throw new Exception("Retry timed out after " + FILE_TIMEOUT_HOURS + " hours");
+        }
     }
 
     // ========================================================================
     //  Inner Classes
     // ========================================================================
 
+    /**
+     * Internal file result wrapper.
+     */
     private static class FileResult {
         final File file;
         final boolean success;
@@ -680,6 +1160,9 @@ public class ParallelProcessingManager {
         }
     }
 
+    /**
+     * Parallel batch result with statistics.
+     */
     public static class ParallelBatchResult {
         private final int total;
         private final int completed;
@@ -704,6 +1187,32 @@ public class ParallelProcessingManager {
         public boolean wasCancelled() { return cancelled; }
     }
 
+    /**
+     * Pool statistics.
+     */
+    public static class PoolStats {
+        public final int poolSize;
+        public final int activeCount;
+        public final int queueSize;
+        public final long completedTasks;
+        public final int maxPoolSize;
+
+        public PoolStats(int poolSize, int activeCount, int queueSize, long completedTasks, int maxPoolSize) {
+            this.poolSize = poolSize;
+            this.activeCount = activeCount;
+            this.queueSize = queueSize;
+            this.completedTasks = completedTasks;
+            this.maxPoolSize = maxPoolSize;
+        }
+
+        public double getUtilization() {
+            return maxPoolSize > 0 ? (double) activeCount / maxPoolSize : 0;
+        }
+    }
+
+    /**
+     * Named thread factory for worker threads.
+     */
     private static class NamedThreadFactory implements ThreadFactory {
         private final String prefix;
         private final AtomicInteger counter = new AtomicInteger(1);

@@ -8,18 +8,29 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Per-file stage-by-stage timing breakdown, combining Java-side measured
- * stages (preprocessing, output saving, cleanup) with the Python script's
- * self-reported internal stages (model load, audio load, transcription,
- * alignment, diarization) parsed from its {@code STAGE_TIMING:} log lines.
+ * Per-file stage-by-stage timing breakdown for performance analysis.
  *
- * <p>Previously this data existed only scattered across the log file (some
- * of it not at all, before the Python script gained timing instrumentation).
- * This is the structured, in-memory form surfaced in the UI's Performance
- * Report dialog.</p>
- * 
- * <p>Now includes GPU usage tracking to show whether GPU acceleration
- * was used for each file processed.</p>
+ * <p>This class captures detailed timing information for each file processed
+ * through the system, combining:
+ * <ul>
+ *   <li><b>Java-side measured stages:</b> Preprocessing, output saving, cleanup</li>
+ *   <li><b>Python script self-reported stages:</b> Model load, audio load,
+ *       transcription, alignment, diarisation</li>
+ *   <li><b>Resource usage:</b> Peak heap memory, average CPU load</li>
+ *   <li><b>GPU usage:</b> Whether GPU acceleration was used, GPU name, memory</li>
+ * </ul>
+ *
+ * <p>This structured data is used in the Performance Report dialog to show
+ * users detailed breakdowns of processing time for each file.</p>
+ *
+ * <p><b>Timeline support:</b> In addition to stage durations, this class
+ * also records wall-clock timestamps for stage boundaries, enabling
+ * visualisation of when each stage occurred relative to batch start.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ParallelProcessingManager
+ * @see GpuConfig
  */
 public class FileTimingReport {
 
@@ -29,149 +40,365 @@ public class FileTimingReport {
     private long peakHeapUsedMB = -1;
     private double avgCpuLoadPercent = -1;
 
-    // FIX (wall-clock timeline): stageMillis stores DURATIONS (how long a
-    // stage took), which is what most consumers of this class actually
-    // want — but it can't answer "what time did this stage start, relative
-    // to when the batch itself started?" A duration-only report makes you
-    // manually reconstruct that by summing every prior stage's duration,
-    // which is exactly the "screenshot-cross-referencing exercise" this
-    // was built to eliminate. Kept as a SEPARATE map rather than
-    // overloading setStage/getStageMillis (which are typed and named for
-    // durations throughout the existing UI/log code) — this is purely
-    // additive, so nothing that reads durations today is affected.
+    // Timeline support - wall-clock timestamps for stage boundaries
     private long batchStartEpochMs = -1;
     private final Map<String, Long> stageStartEpochMs = new LinkedHashMap<>();
 
-    /** The wall-clock time (epoch ms) the whole batch this file belongs to started — set once, shared across every file in that batch. */
-    public void setBatchStartEpochMs(long epochMs) {
-        this.batchStartEpochMs = epochMs;
-    }
-
-    public long getBatchStartEpochMs() {
-        return batchStartEpochMs;
-    }
-
-    /** Records the wall-clock time (epoch ms) a named stage boundary was reached — e.g. "queue_entered", "preprocess_start", "model_acquired", "transcribe_start", "save_start". */
-    public void setStageEpoch(String stageName, long epochMs) {
-        stageStartEpochMs.put(stageName, epochMs);
-    }
-
-    /** Epoch ms for a stage boundary previously recorded via {@link #setStageEpoch}, or -1 if that stage wasn't recorded (e.g. a script without STAGE_TIMING instrumentation, or a stage this file's path skipped). */
-    public long getStageEpoch(String stageName) {
-        return stageStartEpochMs.getOrDefault(stageName, -1L);
-    }
-
-    /** Milliseconds from batch start to this stage boundary, or -1 if either isn't known. This is the number that answers "how far into the batch was this file at stage X?" without the caller having to do the subtraction themselves. */
-    public long getElapsedSinceBatchStartMs(String stageName) {
-        long stageEpoch = getStageEpoch(stageName);
-        if (stageEpoch < 0 || batchStartEpochMs < 0) return -1;
-        return stageEpoch - batchStartEpochMs;
-    }
-
-    public Map<String, Long> getStageStartEpochMs() {
-        return stageStartEpochMs;
-    }
-
-    // FIX (doc-review — "Average CPU utilization" / "Peak memory usage"):
-    // the fields above are a single JVM-side system-CPU snapshot taken when
-    // the file finished, and this JVM's own heap usage — neither is what
-    // was actually asked for, which is the resource usage of the
-    // transcription work itself. These two are the real thing: sampled by
-    // the Python script throughout the whole transcribe() call (RSS memory
-    // and CPU% of the Python process and any children), reported via
-    // STAGE_TIMING:peak_memory_mb / STAGE_TIMING:avg_cpu_percent. -1 means
-    // psutil wasn't installed in that Python venv, not that usage was zero.
+    // Python-side resource usage
     private double pythonPeakMemoryMb = -1;
     private double pythonAvgCpuPercent = -1;
 
-    public void setPythonPeakMemoryMb(double mb) { this.pythonPeakMemoryMb = mb; }
-    public void setPythonAvgCpuPercent(double percent) { this.pythonAvgCpuPercent = percent; }
-    public double getPythonPeakMemoryMb() { return pythonPeakMemoryMb; }
-    public double getPythonAvgCpuPercent() { return pythonAvgCpuPercent; }
-
-    // Architectural spec: logging must self-identify the processing mode
-    // (Adaptive / Baseline-Conservative / Baseline-Naive) while staying
-    // structurally identical otherwise — same batch-summary format, same
-    // wall-clock fields, same peak RAM/CPU capture — so the existing
-    // adaptive-mode analysis script keeps working unmodified on baseline
-    // logs too, with the mode as just one more column rather than a
-    // reason to build a second parsing pipeline.
+    // Processing mode
     private String processingMode = "ADAPTIVE";
 
-    public void setProcessingMode(String mode) { this.processingMode = mode; }
-    public String getProcessingMode() { return processingMode; }
-
-    // Architectural spec, failure semantics: under baseline mode a whole
-    // file either succeeds or throws — no partial credit, no retry. What
-    // specifically failed (exception type + message) is the evidence that
-    // makes a fault-tolerance comparison concrete rather than just "fewer
-    // files completed", so it's captured here rather than only as a
-    // pass/fail count — and this is populated in both modes, not only
-    // baseline, since the same evidence is just as useful when adaptive
-    // mode's retry logic ultimately still fails a file.
+    // Failure information
     private String failureExceptionType = null;
     private String failureExceptionMessage = null;
 
-    public void setFailure(Throwable t) {
-        if (t == null) return;
-        this.failureExceptionType = t.getClass().getName();
-        this.failureExceptionMessage = t.getMessage();
-    }
-
-    public String getFailureExceptionType() { return failureExceptionType; }
-    public String getFailureExceptionMessage() { return failureExceptionMessage; }
-    public boolean isFailed() { return failureExceptionType != null; }
-
-    // ===== GPU Support =====
+    // GPU Support
     private boolean gpuUsed = false;
     private String gpuName = "None";
     private String gpuComputeCapability = "N/A";
     private long gpuMemoryMB = 0;
 
     /**
-     * Sets whether GPU acceleration was used for this file.
+     * Constructs a new timing report for the specified file.
+     *
+     * @param fileName the name of the processed file
      */
-    public void setGpuUsed(boolean used) { this.gpuUsed = used; }
+    public FileTimingReport(String fileName) {
+        this.fileName = fileName;
+    }
+
+    // ========================================================================
+    //  Timeline (Wall-Clock) Methods
+    // ========================================================================
 
     /**
-     * Returns true if GPU acceleration was used for this file.
+     * Sets the wall-clock time (epoch ms) when the batch started.
+     *
+     * @param epochMs the batch start time in milliseconds since epoch
      */
-    public boolean isGpuUsed() { return gpuUsed; }
+    public void setBatchStartEpochMs(long epochMs) {
+        this.batchStartEpochMs = epochMs;
+    }
 
     /**
-     * Sets the GPU name used for this file (e.g., "NVIDIA GeForce RTX 3080").
+     * Returns the batch start time in epoch milliseconds.
+     *
+     * @return the batch start epoch in milliseconds
      */
-    public void setGpuName(String name) { this.gpuName = name != null ? name : "None"; }
+    public long getBatchStartEpochMs() {
+        return batchStartEpochMs;
+    }
 
     /**
-     * Returns the GPU name used for this file.
+     * Records the wall-clock time when a stage boundary was reached.
+     *
+     * <p>Stage names include: {@code queue_entered}, {@code preprocess_start},
+     * {@code model_acquired}, {@code transcribe_start}, {@code save_start},
+     * {@code completed}.</p>
+     *
+     * @param stageName the name of the stage
+     * @param epochMs the time in milliseconds since epoch
      */
-    public String getGpuName() { return gpuName; }
+    public void setStageEpoch(String stageName, long epochMs) {
+        stageStartEpochMs.put(stageName, epochMs);
+    }
 
     /**
-     * Sets the GPU compute capability (e.g., "8.6").
+     * Returns the epoch time for a stage boundary.
+     *
+     * @param stageName the name of the stage
+     * @return the epoch time, or {@code -1} if not recorded
      */
-    public void setGpuComputeCapability(String capability) { 
-        this.gpuComputeCapability = capability != null ? capability : "N/A"; 
+    public long getStageEpoch(String stageName) {
+        return stageStartEpochMs.getOrDefault(stageName, -1L);
+    }
+
+    /**
+     * Returns the elapsed time from batch start to a stage boundary.
+     *
+     * @param stageName the name of the stage
+     * @return the elapsed time in milliseconds, or {@code -1} if not available
+     */
+    public long getElapsedSinceBatchStartMs(String stageName) {
+        long stageEpoch = getStageEpoch(stageName);
+        if (stageEpoch < 0 || batchStartEpochMs < 0) return -1;
+        return stageEpoch - batchStartEpochMs;
+    }
+
+    /**
+     * Returns a map of all stage start times.
+     *
+     * @return an unmodifiable view of the stage start times
+     */
+    public Map<String, Long> getStageStartEpochMs() {
+        return stageStartEpochMs;
+    }
+
+    // ========================================================================
+    //  Stage Duration Methods
+    // ========================================================================
+
+    /**
+     * Records the duration of a stage.
+     *
+     * @param stageName the name of the stage
+     * @param millis the duration in milliseconds
+     */
+    public void setStage(String stageName, long millis) {
+        stageMillis.put(stageName, millis);
+    }
+
+    /**
+     * Returns the duration of a stage.
+     *
+     * @param stage the name of the stage
+     * @return the duration in milliseconds, or {@code -1} if not recorded
+     */
+    public long getStageMillis(String stage) {
+        return stageMillis.getOrDefault(stage, -1L);
+    }
+
+    /**
+     * Returns all stage durations.
+     *
+     * @return a map of stage names to durations in milliseconds
+     */
+    public Map<String, Long> getStageMillis() {
+        return stageMillis;
+    }
+
+    /**
+     * Returns the total pipeline time.
+     *
+     * @return the total time in milliseconds, or {@code -1} if not recorded
+     */
+    public long getTotalMillis() {
+        return stageMillis.getOrDefault("total_pipeline", -1L);
+    }
+
+    // ========================================================================
+    //  Resource Usage Methods
+    // ========================================================================
+
+    /**
+     * Sets the peak JVM heap usage.
+     *
+     * @param mb the peak heap size in megabytes
+     */
+    public void setPeakHeapUsedMB(long mb) {
+        this.peakHeapUsedMB = mb;
+    }
+
+    /**
+     * Returns the peak JVM heap usage.
+     *
+     * @return the peak heap size in megabytes
+     */
+    public long getPeakHeapUsedMB() {
+        return peakHeapUsedMB;
+    }
+
+    /**
+     * Sets the average CPU load percentage.
+     *
+     * @param percent the average CPU load as a percentage
+     */
+    public void setAvgCpuLoadPercent(double percent) {
+        this.avgCpuLoadPercent = percent;
+    }
+
+    /**
+     * Returns the average CPU load percentage.
+     *
+     * @return the average CPU load as a percentage
+     */
+    public double getAvgCpuLoadPercent() {
+        return avgCpuLoadPercent;
+    }
+
+    /**
+     * Sets the Python process peak memory usage.
+     *
+     * @param mb the peak memory in megabytes
+     */
+    public void setPythonPeakMemoryMb(double mb) {
+        this.pythonPeakMemoryMb = mb;
+    }
+
+    /**
+     * Returns the Python process peak memory usage.
+     *
+     * @return the peak memory in megabytes, or {@code -1} if not available
+     */
+    public double getPythonPeakMemoryMb() {
+        return pythonPeakMemoryMb;
+    }
+
+    /**
+     * Sets the Python process average CPU usage.
+     *
+     * @param percent the average CPU usage as a percentage
+     */
+    public void setPythonAvgCpuPercent(double percent) {
+        this.pythonAvgCpuPercent = percent;
+    }
+
+    /**
+     * Returns the Python process average CPU usage.
+     *
+     * @return the average CPU usage as a percentage, or {@code -1} if not available
+     */
+    public double getPythonAvgCpuPercent() {
+        return pythonAvgCpuPercent;
+    }
+
+    // ========================================================================
+    //  Processing Mode Methods
+    // ========================================================================
+
+    /**
+     * Sets the processing mode.
+     *
+     * @param mode the processing mode (e.g., "ADAPTIVE", "BASELINE")
+     */
+    public void setProcessingMode(String mode) {
+        this.processingMode = mode;
+    }
+
+    /**
+     * Returns the processing mode.
+     *
+     * @return the processing mode
+     */
+    public String getProcessingMode() {
+        return processingMode;
+    }
+
+    // ========================================================================
+    //  Failure Methods
+    // ========================================================================
+
+    /**
+     * Records failure information from a throwable.
+     *
+     * @param t the throwable that caused the failure
+     */
+    public void setFailure(Throwable t) {
+        if (t == null) return;
+        this.failureExceptionType = t.getClass().getName();
+        this.failureExceptionMessage = t.getMessage();
+    }
+
+    /**
+     * Returns the failure exception type.
+     *
+     * @return the exception class name, or {@code null} if no failure
+     */
+    public String getFailureExceptionType() {
+        return failureExceptionType;
+    }
+
+    /**
+     * Returns the failure exception message.
+     *
+     * @return the exception message, or {@code null} if no failure
+     */
+    public String getFailureExceptionMessage() {
+        return failureExceptionMessage;
+    }
+
+    /**
+     * Returns whether this file failed.
+     *
+     * @return {@code true} if the file failed processing
+     */
+    public boolean isFailed() {
+        return failureExceptionType != null;
+    }
+
+    // ========================================================================
+    //  GPU Methods
+    // ========================================================================
+
+    /**
+     * Sets whether GPU acceleration was used.
+     *
+     * @param used {@code true} if GPU was used
+     */
+    public void setGpuUsed(boolean used) {
+        this.gpuUsed = used;
+    }
+
+    /**
+     * Returns whether GPU acceleration was used.
+     *
+     * @return {@code true} if GPU was used
+     */
+    public boolean isGpuUsed() {
+        return gpuUsed;
+    }
+
+    /**
+     * Sets the GPU name.
+     *
+     * @param name the GPU name (e.g., "NVIDIA GeForce RTX 3080")
+     */
+    public void setGpuName(String name) {
+        this.gpuName = name != null ? name : "None";
+    }
+
+    /**
+     * Returns the GPU name.
+     *
+     * @return the GPU name
+     */
+    public String getGpuName() {
+        return gpuName;
+    }
+
+    /**
+     * Sets the GPU compute capability.
+     *
+     * @param capability the compute capability (e.g., "8.6")
+     */
+    public void setGpuComputeCapability(String capability) {
+        this.gpuComputeCapability = capability != null ? capability : "N/A";
     }
 
     /**
      * Returns the GPU compute capability.
+     *
+     * @return the compute capability
      */
-    public String getGpuComputeCapability() { return gpuComputeCapability; }
+    public String getGpuComputeCapability() {
+        return gpuComputeCapability;
+    }
 
     /**
-     * Sets the GPU memory in MB.
+     * Sets the GPU memory size.
+     *
+     * @param memoryMB the GPU memory in megabytes
      */
-    public void setGpuMemoryMB(long memoryMB) { this.gpuMemoryMB = memoryMB; }
+    public void setGpuMemoryMB(long memoryMB) {
+        this.gpuMemoryMB = memoryMB;
+    }
 
     /**
-     * Returns the GPU memory in MB.
+     * Returns the GPU memory size.
+     *
+     * @return the GPU memory in megabytes
      */
-    public long getGpuMemoryMB() { return gpuMemoryMB; }
+    public long getGpuMemoryMB() {
+        return gpuMemoryMB;
+    }
 
     /**
-     * Returns a formatted GPU status string for display.
+     * Returns a formatted GPU status string.
+     *
+     * @return a string like "GPU: NVIDIA GeForce RTX 3080 (10240 MB)"
      */
     public String getGpuStatus() {
         if (!gpuUsed) {
@@ -181,50 +408,21 @@ public class FileTimingReport {
     }
 
     /**
-     * Returns a detailed GPU info string for display.
+     * Returns a detailed GPU info string.
+     *
+     * @return a detailed string with GPU name, memory, and compute capability
      */
     public String getGpuDetails() {
         if (!gpuUsed) {
             return "No GPU acceleration";
         }
-        return String.format("%s | Memory: %d MB | Compute: %s", 
+        return String.format("%s | Memory: %d MB | Compute: %s",
             gpuName, gpuMemoryMB, gpuComputeCapability);
     }
 
-    public FileTimingReport(String fileName) {
-        this.fileName = fileName;
-    }
-
-    public void setStage(String stageName, long millis) {
-        stageMillis.put(stageName, millis);
-    }
-
-    public void setPeakHeapUsedMB(long mb) {
-        this.peakHeapUsedMB = mb;
-    }
-
-    public void setAvgCpuLoadPercent(double percent) {
-        this.avgCpuLoadPercent = percent;
-    }
-
-    public String getFileName() { return fileName; }
-    public long getTimestamp() { return timestamp; }
-    public Map<String, Long> getStageMillis() { return stageMillis; }
-    public long getStageMillis(String stage) { return stageMillis.getOrDefault(stage, -1L); }
-    public long getPeakHeapUsedMB() { return peakHeapUsedMB; }
-    public double getAvgCpuLoadPercent() { return avgCpuLoadPercent; }
-
-    public long getTotalMillis() {
-        return stageMillis.getOrDefault("total_pipeline", -1L);
-    }
-
-    // ========================================================================
-    //  Builder-style methods for convenient chaining
-    // ========================================================================
-
     /**
-     * Convenience method to set all GPU-related fields at once.
-     * 
+     * Convenience method to set all GPU fields at once.
+     *
      * @param gpuConfig the GpuConfig instance to read GPU info from
      * @param used whether GPU was actually used for this file
      */
@@ -243,7 +441,10 @@ public class FileTimingReport {
 
     /**
      * Creates a copy of this report with GPU info added.
-     * Useful for when GPU info is determined after the report is created.
+     *
+     * @param gpuConfig the GpuConfig instance to read GPU info from
+     * @param used whether GPU was used for this file
+     * @return a copy of this report with GPU info populated
      */
     public FileTimingReport withGpuInfo(GpuConfig gpuConfig, boolean used) {
         FileTimingReport copy = new FileTimingReport(this.fileName);
@@ -259,6 +460,28 @@ public class FileTimingReport {
         copy.failureExceptionMessage = this.failureExceptionMessage;
         copy.setGpuInfo(gpuConfig, used);
         return copy;
+    }
+
+    // ========================================================================
+    //  Getters
+    // ========================================================================
+
+    /**
+     * Returns the file name.
+     *
+     * @return the file name
+     */
+    public String getFileName() {
+        return fileName;
+    }
+
+    /**
+     * Returns the report timestamp.
+     *
+     * @return the timestamp in milliseconds since epoch
+     */
+    public long getTimestamp() {
+        return timestamp;
     }
 
     @Override

@@ -12,26 +12,23 @@ import audiomanager.model.*;
 import audiomanager.plugins.AudioSplitterTool;
 import audiomanager.plugins.FileCombinerTool;
 import audiomanager.util.PreferenceManager;
+import audiomanager.util.SoundManager;
 import audiomanager.util.TimeLeftEstimator;
 import java.io.File;
+import java.io.IOException;
 import javafx.animation.*;
 import javafx.application.Platform;
-import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.image.Image;
 import javafx.scene.input.KeyCode;
-import javafx.scene.input.KeyCodeCombination;
-import javafx.scene.input.KeyCombination;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -163,6 +160,9 @@ public class MainWindow {
     public void initialize() {
         LicenseManager license = LicenseManager.getInstance();
         license.loadLicense();
+        
+        // ✅ Preload sound effects
+        SoundManager.preload();
 
         configureStage();
 
@@ -170,9 +170,6 @@ public class MainWindow {
         
         // ===== APPLY CSS =====
         applyCSSIfAvailable(scene);
-        
-        // ===== SETUP KEYBOARD SHORTCUTS =====
-        setupKeyboardShortcuts(scene);
         
         stage.setScene(scene);
 
@@ -224,6 +221,7 @@ public class MainWindow {
         // Ctrl+Shift+D - Toggle Dark Mode
         scene.setOnKeyPressed(event -> {
             if (event.getCode() == KeyCode.D && event.isShortcutDown() && event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 toggleTheme(!"Dark".equals(prefManager.getTheme()));
                 event.consume();
                 log("🌙 Theme toggled via keyboard shortcut");
@@ -233,6 +231,7 @@ public class MainWindow {
             // F5 - Check Dependencies
             if (event.getCode() == KeyCode.F5 && !event.isShortcutDown()) {
                 if (controller != null) {
+                    SoundManager.playClick();  // ✅ ADDED
                     controller.checkDependencies();
                     event.consume();
                     log("🔍 Dependency check triggered via keyboard shortcut");
@@ -242,6 +241,7 @@ public class MainWindow {
             
             // Ctrl+Shift+W - Toggle Folder Watch
             if (event.getCode() == KeyCode.W && event.isShortcutDown() && event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 toggleFolderWatch();
                 event.consume();
                 return;
@@ -249,6 +249,7 @@ public class MainWindow {
             
             // Ctrl+Shift+P - Performance Report
             if (event.getCode() == KeyCode.P && event.isShortcutDown() && event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 showPerformanceReportDialog();
                 event.consume();
                 return;
@@ -256,6 +257,7 @@ public class MainWindow {
             
             // Ctrl+B - Batch Settings
             if (event.getCode() == KeyCode.B && event.isShortcutDown() && !event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 showBatchSettingsDialog();
                 event.consume();
                 return;
@@ -263,6 +265,7 @@ public class MainWindow {
             
             // Ctrl+Q - Exit
             if (event.getCode() == KeyCode.Q && event.isShortcutDown() && !event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 handleExitButtonClick();
                 event.consume();
                 return;
@@ -270,6 +273,7 @@ public class MainWindow {
             
             // Ctrl+Comma - Preferences
             if (event.getCode() == KeyCode.COMMA && event.isShortcutDown() && !event.isShiftDown()) {
+                SoundManager.playClick();  // ✅ ADDED
                 showPreferencesDialog();
                 event.consume();
                 return;
@@ -278,6 +282,7 @@ public class MainWindow {
             // Ctrl+Z - Undo (handled by FileSelectionPanel)
             if (event.getCode() == KeyCode.Z && event.isShortcutDown() && !event.isShiftDown()) {
                 if (fileSelectionPanel != null && fileSelectionPanel.undo()) {
+                    SoundManager.playClick();  // ✅ ADDED
                     log("↩️ Undo performed via keyboard shortcut");
                     event.consume();
                 }
@@ -288,6 +293,7 @@ public class MainWindow {
             if ((event.getCode() == KeyCode.Z && event.isShortcutDown() && event.isShiftDown()) ||
                 (event.getCode() == KeyCode.Y && event.isShortcutDown() && !event.isShiftDown())) {
                 if (fileSelectionPanel != null && fileSelectionPanel.redo()) {
+                    SoundManager.playClick();  // ✅ ADDED
                     log("↪️ Redo performed via keyboard shortcut");
                     event.consume();
                 }
@@ -296,22 +302,17 @@ public class MainWindow {
             
             // Ctrl+A - Select All in table (handled by table itself)
             if (event.getCode() == KeyCode.A && event.isShortcutDown() && !event.isShiftDown()) {
-                // Let the table handle this if it has focus
                 if (!(event.getTarget() instanceof TableView)) {
-                    // If not in table, maybe select all in log area?
                     if (event.getTarget() instanceof TextArea && logArea != null) {
                         logArea.selectAll();
                         event.consume();
                     }
                 }
-                // Otherwise let the table handle it
                 return;
             }
             
             // Escape - Clear selection or close dialogs
             if (event.getCode() == KeyCode.ESCAPE) {
-                // If a dialog is open, it will handle this
-                // Otherwise, clear selection in table if focused
                 if (event.getTarget() instanceof TableView) {
                     TableView<?> table = (TableView<?>) event.getTarget();
                     table.getSelectionModel().clearSelection();
@@ -319,15 +320,8 @@ public class MainWindow {
                 }
                 return;
             }
-            
-            // Space - Toggle play/pause for selected audio (if applicable)
-            if (event.getCode() == KeyCode.SPACE && !event.isShortcutDown() && !event.isShiftDown()) {
-                // Could be used for play/pause in waveform or recorder
-                // Let individual components handle it
-            }
         });
         
-        // Also support shortcut key combinations via menu items
         LOGGER.info("✅ Keyboard shortcuts initialized");
     }
 
@@ -336,8 +330,6 @@ public class MainWindow {
     // ========================================================================
 
     private void showPreferencesDialog() {
-        // This should open the preferences dialog
-        // For now, create a simple dialog
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Preferences");
         dialog.setHeaderText("User Interface Settings");
@@ -348,7 +340,6 @@ public class MainWindow {
     }
 
     private void showBatchSettingsDialog() {
-        // This should open batch settings dialog
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Batch Processing Settings");
         dialog.setHeaderText("Configure batch processing behavior");
@@ -368,7 +359,6 @@ public class MainWindow {
      */
     private void applyCSSIfAvailable(Scene scene) {
         try {
-            // Look for styles.css in the root of the classpath
             String cssPath = getClass().getResource("/styles/styles.css").toExternalForm();
             if (cssPath != null && !scene.getStylesheets().contains(cssPath)) {
                 scene.getStylesheets().add(cssPath);
@@ -395,15 +385,21 @@ public class MainWindow {
                         }
                     });
                 } else {
-                    LOGGER.info("ℹ️ No GPU detected — running on CPU mode");
+                    LOGGER.info("ℹ️ Running in CPU mode");
+                    LOGGER.debug("  No NVIDIA GPU detected (nvidia-smi not found) - this is normal if you don't have an NVIDIA GPU");
                     Platform.runLater(() -> {
                         if (logArea != null) {
-                            log("ℹ️ No GPU detected — running on CPU mode");
+                            log("ℹ️ Running in CPU mode (no GPU detected)");
                         }
                     });
                 }
             } catch (Exception e) {
                 LOGGER.warn("GPU detection failed: {}", e.getMessage());
+                Platform.runLater(() -> {
+                    if (logArea != null) {
+                        log("⚠️ GPU detection failed - running in CPU mode");
+                    }
+                });
             }
         });
     }
@@ -422,6 +418,7 @@ public class MainWindow {
         uiCreator.setOnWatchFolder(this::toggleFolderWatch);
         uiCreator.setOnClearTimeData(this::clearTimeEstimationData);
         uiCreator.setOnRestApiToggle(this::toggleRestApi);
+        uiCreator.setOnClearSessionData(this::clearSessionData);
     }
 
     // ========================================================================
@@ -440,6 +437,7 @@ public class MainWindow {
     // ========================================================================
 
     private void handleProcessButtonClick() {
+        SoundManager.playClick();  // ✅ ADDED - Always play click for process button
         if (controller.isProcessing()) {
             showCancelConfirmation();
             controller.cancelBatch();
@@ -541,6 +539,7 @@ public class MainWindow {
     // ========================================================================
 
     private void toggleTheme(boolean dark) {
+        SoundManager.playClick();  // ✅ Click sound when toggling theme
         Scene scene = stage.getScene();
         if (scene == null) return;
 
@@ -724,6 +723,7 @@ public class MainWindow {
     }
 
     private void handleExitButtonClick() {
+        SoundManager.playClick();  // ✅ Click sound for exit
         if (controller.isProcessing()) {
             Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
             alert.setTitle("Exit Confirmation");
@@ -753,12 +753,15 @@ public class MainWindow {
         ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
+            SoundManager.playClick();  // ✅ ADDED - Click sound for cancel confirmation
             log("⏹️ Cancelling batch processing...");
             controller.cancelBatch();
         }
     }
 
     private void showScheduleDialog() {
+        SoundManager.playClick();  // ✅ ADDED - Click sound for schedule dialog
+        // Check if batch queue is empty
         if (batchFiles.isEmpty()) {
             log("❌ Cannot schedule: batch queue is empty");
             Alert alert = new Alert(Alert.AlertType.WARNING);
@@ -771,27 +774,65 @@ public class MainWindow {
         }
 
         Studio studio = Studio.getInstance();
-        if (studio == null || studio.getBatchScheduler() == null) {
-            log("❌ Batch scheduler not available");
+        if (studio == null) {
+            log("❌ Studio instance not available");
+            showError("Scheduler Error", "The application studio is not available. Please restart the application.");
             return;
         }
 
         BatchScheduler scheduler = studio.getBatchScheduler();
+        if (scheduler == null) {
+            log("❌ Batch scheduler not available");
+            showError("Scheduler Error", "The batch scheduler is not available. Please restart the application.");
+            return;
+        }
 
+        // Check if a batch is already scheduled
+        if (scheduler.isScheduled()) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Scheduled Batch Exists");
+            confirm.setHeaderText("A batch is already scheduled");
+            confirm.setContentText("Do you want to replace the existing scheduled batch?");
+            confirm.getButtonTypes().setAll(ButtonType.YES, ButtonType.NO);
+            ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
+
+            Optional<ButtonType> result = confirm.showAndWait();
+            if (result.isEmpty() || result.get() != ButtonType.YES) {
+                log("📅 Schedule operation cancelled - existing batch preserved");
+                return;
+            }
+            // Cancel the existing schedule
+            scheduler.cancelScheduledBatch();
+            log("📅 Existing scheduled batch cancelled");
+        }
+
+        // Show the scheduling dialog
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Schedule Batch Processing");
         dialog.setHeaderText("Schedule the current batch to run later");
+        dialog.setResizable(true);
 
         VBox content = new VBox(15);
         content.setPadding(new Insets(20));
-        content.setMinWidth(350);
+        content.setMinWidth(400);
 
-        Label batchInfo = new Label(String.format("📊 Current batch: %d files", batchFiles.size()));
+        // Batch info
+        Label batchInfo = new Label(String.format("📊 Current batch: %d files, total duration: %s", 
+            batchFiles.size(), appState.getTotalDuration()));
         batchInfo.setWrapText(true);
+        batchInfo.setStyle("-fx-font-size: 13px;");
+
+        // Separator
+        Separator separator = new Separator();
+
+        // Time selection
+        Label timeLabel = new Label("Select start time:");
+        timeLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
 
         HBox timeBox = new HBox(10);
         timeBox.setAlignment(Pos.CENTER_LEFT);
 
+        // Hour combo
         ComboBox<String> hourCombo = new ComboBox<>();
         for (int i = 1; i <= 12; i++) {
             hourCombo.getItems().add(String.format("%02d", i));
@@ -799,6 +840,7 @@ public class MainWindow {
         hourCombo.setValue("12");
         hourCombo.setPrefWidth(70);
 
+        // Minute combo
         ComboBox<String> minuteCombo = new ComboBox<>();
         for (int i = 0; i < 60; i += 5) {
             minuteCombo.getItems().add(String.format("%02d", i));
@@ -806,6 +848,7 @@ public class MainWindow {
         minuteCombo.setValue("00");
         minuteCombo.setPrefWidth(70);
 
+        // AM/PM combo
         ComboBox<String> amPmCombo = new ComboBox<>();
         amPmCombo.getItems().addAll("AM", "PM");
         amPmCombo.setValue("AM");
@@ -819,27 +862,43 @@ public class MainWindow {
             amPmCombo
         );
 
+        // Current time display
         Label currentTimeLabel = new Label("Current time: " +
                 LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
-        setStyled(currentTimeLabel, "-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+        currentTimeLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
 
+        // Status label for existing schedule
         Label statusLabel = new Label();
         if (scheduler.isScheduled()) {
             LocalDateTime scheduledTime = scheduler.getScheduledTime();
             if (scheduledTime != null) {
                 statusLabel.setText("⚠️ Currently scheduled for: " +
                         scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
-                statusLabel.setStyle("-fx-text-fill: #ed6c02;");
+                statusLabel.setStyle("-fx-text-fill: #ed6c02; -fx-font-weight: bold;");
             }
         }
 
+        // Estimated completion time
+        Label completionLabel = new Label();
+        completionLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+
+        // Add live preview of estimated completion
+        timeBox.lookupAll(".combo-box").forEach(node -> {
+            if (node instanceof ComboBox) {
+                ((ComboBox<?>) node).valueProperty().addListener((obs, oldVal, newVal) -> {
+                    updateCompletionLabel(hourCombo, minuteCombo, amPmCombo, completionLabel);
+                });
+            }
+        });
+
         content.getChildren().addAll(
             batchInfo,
-            new Separator(),
-            new Label("Select start time:"),
+            separator,
+            timeLabel,
             timeBox,
             currentTimeLabel,
-            statusLabel
+            statusLabel,
+            completionLabel
         );
 
         dialog.getDialogPane().setContent(content);
@@ -849,58 +908,141 @@ public class MainWindow {
         ButtonType clearBtn = new ButtonType("Clear Schedule", ButtonBar.ButtonData.OTHER);
         dialog.getDialogPane().getButtonTypes().addAll(scheduleBtn, cancelBtn, clearBtn);
 
+        // Set default button
+        Button scheduleButton = (Button) dialog.getDialogPane().lookupButton(scheduleBtn);
+        if (scheduleButton != null) {
+            scheduleButton.setDefaultButton(true);
+        }
+
         ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
 
+        // Show dialog and handle response
         dialog.showAndWait().ifPresent(response -> {
             if (response == scheduleBtn) {
-                try {
-                    int hour = Integer.parseInt(hourCombo.getValue());
-                    int minute = Integer.parseInt(minuteCombo.getValue());
-                    boolean isPM = "PM".equals(amPmCombo.getValue());
-
-                    if (isPM && hour != 12) hour += 12;
-                    if (!isPM && hour == 12) hour = 0;
-
-                    LocalTime time = LocalTime.of(hour, minute);
-                    LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
-
-                    if (scheduledTime.isBefore(LocalDateTime.now())) {
-                        scheduledTime = scheduledTime.plusDays(1);
-                        log("📅 Scheduled time is in the past - scheduling for tomorrow");
-                    }
-
-                    scheduler.scheduleBatch(scheduledTime, batchFiles, batchProcessor);
-                    log("📅 Batch scheduled for: " +
-                            scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
-
-                    Alert confirm = new Alert(Alert.AlertType.INFORMATION);
-                    confirm.setTitle("Batch Scheduled");
-                    confirm.setHeaderText("Batch processing scheduled");
-                    confirm.setContentText(String.format(
-                            "Your batch of %d files will start automatically at:\n%s",
-                            batchFiles.size(),
-                            scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a"))
-                    ));
-                    ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
-                    confirm.showAndWait();
-
-                } catch (NumberFormatException e) {
-                    log("❌ Invalid time format");
-                    Alert alert = new Alert(Alert.AlertType.ERROR);
-                    alert.setTitle("Invalid Time");
-                    alert.setHeaderText("Invalid time format");
-                    alert.setContentText("Please select valid hour and minute values.");
-                    ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
-                    alert.showAndWait();
-                }
+                handleScheduleConfirmation(hourCombo, minuteCombo, amPmCombo, scheduler);
             } else if (response == clearBtn) {
                 scheduler.cancelScheduledBatch();
+                SoundManager.playClick();  // ✅ ADDED - Click sound for clearing schedule
                 log("📅 Scheduled batch cancelled");
+                showInfo("Schedule Cancelled", "The scheduled batch has been cancelled.");
             }
         });
     }
 
+    /**
+    * Updates the estimated completion time label.
+    */
+   private void updateCompletionLabel(ComboBox<String> hourCombo, ComboBox<String> minuteCombo,
+                                      ComboBox<String> amPmCombo, Label completionLabel) {
+       try {
+           int hour = Integer.parseInt(hourCombo.getValue());
+           int minute = Integer.parseInt(minuteCombo.getValue());
+           boolean isPM = "PM".equals(amPmCombo.getValue());
+
+           if (isPM && hour != 12) hour += 12;
+           if (!isPM && hour == 12) hour = 0;
+
+           LocalTime time = LocalTime.of(hour, minute);
+           LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
+
+           if (scheduledTime.isBefore(LocalDateTime.now())) {
+               scheduledTime = scheduledTime.plusDays(1);
+           }
+
+           long estimatedProcessingMs = estimateBatchProcessingTime();
+           LocalDateTime estimatedCompletion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedProcessingMs));
+
+           completionLabel.setText("Estimated completion: " + 
+               estimatedCompletion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
+           completionLabel.setVisible(true);
+           completionLabel.setManaged(true);
+       } catch (Exception e) {
+           completionLabel.setVisible(false);
+           completionLabel.setManaged(false);
+       }
+   }
+
+    /**
+     * Estimates total batch processing time in milliseconds.
+     */
+    private long estimateBatchProcessingTime() {
+        if (batchFiles.isEmpty()) return 0;
+
+        if (timeEstimator != null) {
+            long estimatedTotal = timeEstimator.getBatchTimeEstimate().totalTimeMs;
+            if (estimatedTotal > 0) {
+                return estimatedTotal;
+            }
+        }
+
+        double totalSizeMB = 0;
+        for (BatchFileItem item : batchFiles) {
+            totalSizeMB += item.getFile().length() / (1024.0 * 1024.0);
+        }
+
+        return (long) (totalSizeMB * 2000);
+    }
+
+    /**
+     * Handles the schedule confirmation.
+     */
+    private void handleScheduleConfirmation(ComboBox<String> hourCombo, ComboBox<String> minuteCombo,
+                                           ComboBox<String> amPmCombo, BatchScheduler scheduler) {
+        try {
+            int hour = Integer.parseInt(hourCombo.getValue());
+            int minute = Integer.parseInt(minuteCombo.getValue());
+            boolean isPM = "PM".equals(amPmCombo.getValue());
+
+            if (isPM && hour != 12) hour += 12;
+            if (!isPM && hour == 12) hour = 0;
+
+            LocalTime time = LocalTime.of(hour, minute);
+            LocalDateTime scheduledTime = LocalDateTime.of(LocalDate.now(), time);
+
+            if (scheduledTime.isBefore(LocalDateTime.now())) {
+                scheduledTime = scheduledTime.plusDays(1);
+                log("📅 Scheduled time is in the past - scheduling for tomorrow");
+            }
+
+            scheduler.scheduleBatch(scheduledTime, batchFiles, batchProcessor);
+            log("📅 Batch scheduled for: " +
+                    scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")));
+
+            Alert confirm = new Alert(Alert.AlertType.INFORMATION);
+            confirm.setTitle("Batch Scheduled");
+            confirm.setHeaderText("✅ Batch processing scheduled");
+            confirm.setContentText(String.format(
+                "Your batch of %d files will start automatically at:\n%s\n\n" +
+                "Estimated completion: %s",
+                batchFiles.size(),
+                scheduledTime.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a")),
+                estimateCompletionTime(scheduledTime)
+            ));
+            ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
+            confirm.showAndWait();
+
+        } catch (NumberFormatException e) {
+            log("❌ Invalid time format");
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setTitle("Invalid Time");
+            alert.setHeaderText("Invalid time format");
+            alert.setContentText("Please select valid hour and minute values.");
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.showAndWait();
+        }
+    }
+
+    /**
+    * Estimates completion time for a scheduled batch.
+    */
+   private String estimateCompletionTime(LocalDateTime scheduledTime) {
+       long estimatedMs = estimateBatchProcessingTime();
+       LocalDateTime completion = scheduledTime.plus(java.time.Duration.ofMillis(estimatedMs));
+       return completion.format(DateTimeFormatter.ofPattern("MMM dd, yyyy hh:mm a"));
+   }
+
     private void showPerformanceReportDialog() {
+        SoundManager.playClick();  // ✅ ADDED - Click sound for performance report
         new PerformanceReportDialog().show(batchProcessor.getRecentTimingReports());
     }
 
@@ -913,6 +1055,7 @@ public class MainWindow {
         
         confirm.showAndWait().ifPresent(response -> {
             if (response == ButtonType.OK && timeEstimator != null) {
+                SoundManager.playClick();  // ✅ ADDED - Click sound for clearing time data
                 timeEstimator.clearSavedData();
                 log("🗑️ Time estimation data cleared");
                 if (controlPanel != null) {
@@ -923,29 +1066,123 @@ public class MainWindow {
     }
 
     private void toggleRestApi() {
+        SoundManager.playClick();  // ✅ ADDED - Click sound for REST API toggle
         if (restApiServer != null && restApiServer.isRunning()) {
             restApiServer.stop();
             restApiServer = null;
             log("🌐 REST API stopped.");
+            showInfo("REST API Stopped", "The REST API server has been stopped.");
+            updateRestApiMenuState(false);
             return;
         }
 
-        javafx.scene.control.TextInputDialog portDialog = new javafx.scene.control.TextInputDialog("8756");
-        portDialog.setTitle("Start REST API");
-        portDialog.setHeaderText("Start the local REST API for headless/scripted operation.\n"
-                + "Binds to 127.0.0.1 only — not reachable from other machines.");
-        portDialog.setContentText("Port:");
-        Optional<String> portInput = portDialog.showAndWait();
-        if (portInput.isEmpty()) return;
+        // Show port selection dialog with documentation
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Start REST API");
+        dialog.setHeaderText("🌐 Start the local REST API for headless/scripted operation");
+        dialog.setResizable(true);
 
+        VBox content = new VBox(12);
+        content.setPadding(new Insets(20));
+        content.setMinWidth(450);
+
+        // API Documentation
+        Label docTitle = new Label("API Documentation:");
+        docTitle.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+
+        TextArea docArea = new TextArea(
+            "POST /api/jobs    - Submit a file for transcription\n" +
+            "  Body: {\"filePath\": \"/path/to/audio.mp3\"}\n" +
+            "  Response: {\"jobId\": \"...\", \"status\": \"queued\"}\n\n" +
+            "GET /api/jobs     - List all jobs\n" +
+            "  Response: {\"jobs\": [...]}\n\n" +
+            "GET /api/jobs/{id} - Get job status\n" +
+            "  Response: {\"jobId\": \"...\", \"status\": \"completed|failed|processing\", \"outputDirectory\": \"...\"}\n\n" +
+            "GET /api/health   - Check if API is running\n" +
+            "  Response: {\"status\": \"ok\"}"
+        );
+        docArea.setEditable(false);
+        docArea.setWrapText(true);
+        docArea.setPrefHeight(180);
+        docArea.setStyle("-fx-font-family: 'Consolas', 'Monaco', monospace; -fx-font-size: 12px;");
+
+        // Port input
+        HBox portBox = new HBox(10);
+        portBox.setAlignment(Pos.CENTER_LEFT);
+
+        Label portLabel = new Label("Port:");
+        portLabel.setStyle("-fx-font-weight: bold;");
+
+        TextField portField = new TextField("8756");
+        portField.setPrefWidth(100);
+        portField.setPromptText("Port number");
+
+        Label noteLabel = new Label("(localhost only - not reachable from other machines)");
+        noteLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #7f8c8d;");
+
+        portBox.getChildren().addAll(portLabel, portField, noteLabel);
+
+        content.getChildren().addAll(
+            docTitle,
+            docArea,
+            new Separator(),
+            portBox
+        );
+
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().addAll(
+            new ButtonType("Start", ButtonBar.ButtonData.OK_DONE),
+            ButtonType.CANCEL
+        );
+
+        // Set default button
+        Button startButton = (Button) dialog.getDialogPane().lookupButton(
+            dialog.getDialogPane().getButtonTypes().stream()
+                .filter(bt -> "Start".equals(bt.getText()))
+                .findFirst()
+                .orElse(null)
+        );
+        if (startButton != null) {
+            startButton.setDefaultButton(true);
+        }
+
+        ThemeManager.applyCurrentThemeToDialog(dialog.getDialogPane(), null);
+
+        Optional<ButtonType> result = dialog.showAndWait();
+        if (result.isEmpty() || result.get() != dialog.getDialogPane().getButtonTypes().get(0)) {
+            return;
+        }
+
+        // Parse port
         int port;
         try {
-            port = Integer.parseInt(portInput.get().trim());
+            port = Integer.parseInt(portField.getText().trim());
+            if (port < 1 || port > 65535) {
+                showError("Invalid Port", "Port must be between 1 and 65535.");
+                return;
+            }
         } catch (NumberFormatException e) {
-            showInfo("Invalid port", "Enter a numeric port, e.g. 8756.");
+            showError("Invalid Port", "Please enter a valid port number.");
             return;
         }
 
+        // Check if port is already in use
+        if (isPortInUse(port)) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Port in Use");
+            confirm.setHeaderText("⚠️ Port " + port + " is already in use");
+            confirm.setContentText("Do you want to try a different port?");
+            confirm.getButtonTypes().setAll(ButtonType.YES, ButtonType.NO);
+            ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
+
+            Optional<ButtonType> choice = confirm.showAndWait();
+            if (choice.isPresent() && choice.get() == ButtonType.YES) {
+                toggleRestApi();
+            }
+            return;
+        }
+
+        // Start the API
         restApiServer = new RestApiServer(
                 batchProcessor,
                 () -> configurationPanel.getProcessingConfig(),
@@ -955,10 +1192,46 @@ public class MainWindow {
         try {
             restApiServer.start(port);
             log("🌐 REST API started on http://127.0.0.1:" + port);
-        } catch (Exception e) {
+            showInfo("REST API Started", 
+                "✅ REST API is running on http://127.0.0.1:" + port + "\n\n" +
+                "📋 Use the endpoints shown in the dialog to submit jobs.\n" +
+                "🔒 The API is only accessible from localhost for security."
+            );
+            updateRestApiMenuState(true);
+
+            Platform.runLater(() -> {
+                if (logArea != null) {
+                    logArea.appendText("[🌐] REST API server running on port " + port + "\n");
+                }
+            });
+        } catch (IOException e) {
             LOGGER.error("Failed to start REST API on port {}: {}", port, e.getMessage());
-            showInfo("Could not start REST API", "Port " + port + " may already be in use: " + e.getMessage());
+            showError("Could Not Start REST API", 
+                "Failed to start REST API on port " + port + ":\n" + e.getMessage() + 
+                "\n\nTry a different port or check if the port is already in use.");
             restApiServer = null;
+            updateRestApiMenuState(false);
+        }
+    }
+
+    /**
+     * Checks if a port is already in use.
+     */
+    private boolean isPortInUse(int port) {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(port)) {
+            socket.setReuseAddress(true);
+            return false;
+        } catch (IOException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Updates the REST API menu item state.
+     */
+    private void updateRestApiMenuState(boolean running) {
+        if (uiCreator != null) {
+            uiCreator.setRestApiMenuItem(running);
         }
     }
 
@@ -1108,6 +1381,7 @@ public class MainWindow {
     // ========================================================================
 
     private void toggleFolderWatch() {
+        SoundManager.playClick();  // ✅ ADDED - Click sound for folder watch toggle
         if (folderWatcher != null) {
             stopFolderWatch();
             return;
@@ -1219,5 +1493,135 @@ public class MainWindow {
 
     public AppState getAppState() {
         return appState;
+    }
+    
+    /**
+    * Clears all session data with confirmation.
+    */
+    private void clearSessionData() {
+        // First, check if processing is active
+        if (controller.isProcessing()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Cannot Clear Session");
+            alert.setHeaderText("⚠️ Processing is Active");
+            alert.setContentText("Cannot clear session data while batch processing is running.\n" +
+                                "Please wait for processing to complete or cancel it first.");
+            ThemeManager.applyCurrentThemeToDialog(alert.getDialogPane(), null);
+            alert.showAndWait();
+            return;
+        }
+
+        // Show confirmation dialog with details
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Clear Session Data");
+        confirm.setHeaderText("🗑️ Clear All Session Data?");
+
+        // Build detailed content
+        StringBuilder details = new StringBuilder();
+        details.append("This will clear:\n\n");
+        details.append("• ").append(batchFiles.size()).append(" files from the batch queue\n");
+
+        if (timeEstimator != null) {
+            int learnedPatterns = timeEstimator.getLearnedPatternCount();
+            if (learnedPatterns > 0) {
+                details.append("• ").append(learnedPatterns).append(" learned time estimation patterns\n");
+            }
+        }
+
+        details.append("• All log messages from the terminal\n");
+        details.append("• Application state (will reset to initial state)\n\n");
+        details.append("⚠️ This action cannot be undone!");
+
+        TextArea detailsArea = new TextArea(details.toString());
+        detailsArea.setEditable(false);
+        detailsArea.setWrapText(true);
+        detailsArea.setPrefSize(400, 180);
+        detailsArea.setStyle("-fx-font-family: 'Segoe UI', Arial, sans-serif; -fx-font-size: 13px;");
+
+        confirm.getDialogPane().setContent(detailsArea);
+        confirm.getButtonTypes().setAll(
+            new ButtonType("Clear All", ButtonBar.ButtonData.OK_DONE),
+            ButtonType.CANCEL
+        );
+
+        // Style the clear button
+        Button clearButton = (Button) confirm.getDialogPane().lookupButton(
+            confirm.getDialogPane().getButtonTypes().stream()
+                .filter(bt -> "Clear All".equals(bt.getText()))
+                .findFirst()
+                .orElse(null)
+        );
+        if (clearButton != null) {
+            clearButton.getStyleClass().add("action-btn-danger");
+        }
+
+        ThemeManager.applyCurrentThemeToDialog(confirm.getDialogPane(), null);
+
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (result.isEmpty() || result.get().getButtonData() != ButtonBar.ButtonData.OK_DONE) {
+            log("🗑️ Session data clearing cancelled");
+            return;
+        }
+
+        // Perform the clearing
+        try {
+            SoundManager.playClick();  // ✅ ADDED - Click sound for session clear
+
+            // 1. Clear batch queue
+            int clearedFiles = batchFiles.size();
+            batchFiles.clear();
+            log("🗑️ Cleared " + clearedFiles + " files from batch queue");
+
+            // 2. Clear time estimation data
+            if (timeEstimator != null) {
+                timeEstimator.clearSavedData();
+                log("🗑️ Cleared time estimation data");
+            }
+
+            // 3. Clear log area
+            if (logArea != null) {
+                Platform.runLater(() -> {
+                    logArea.clear();
+                    logArea.appendText("[Session cleared at " + 
+                        LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "]\n");
+                });
+            }
+
+            // 4. Reset application state
+            appState.reset();
+            log("🗑️ Application state reset");
+
+            // 5. Reset batch stats in UI
+            if (fileSelectionPanel != null) {
+                fileSelectionPanel.updateBatchQueueTotals();
+                fileSelectionPanel.updateBatchStatus(batchFiles);
+            }
+
+            // 6. Clear control panel status
+            if (controlPanel != null) {
+                controlPanel.updateStatus("Ready", "Session data cleared");
+            }
+
+            // 7. Update UI
+            Platform.runLater(() -> {
+                if (configurationPanel != null) {
+                    configurationPanel.refreshUI();
+                }
+            });
+
+            // Show success message
+            showInfo("Session Cleared", 
+                "✅ Session data has been cleared successfully.\n\n" +
+                "• " + clearedFiles + " files removed from queue\n" +
+                "• Time estimation data reset\n" +
+                "• Log area cleared\n" +
+                "• Application state reset to default\n\n" +
+                "The application is ready for a fresh session.");
+
+        } catch (Exception e) {
+            LOGGER.error("Failed to clear session data", e);
+            showError("Error Clearing Session", 
+                "An error occurred while clearing session data:\n" + e.getMessage());
+        }
     }
 }

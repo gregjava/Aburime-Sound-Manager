@@ -8,6 +8,7 @@ tools/LicenseKeyGenerator.java
 src/audiomanager/resources/license-keys/
 src/audiomanager/resources/keys/
 *.license
+LICENSE
 
 # Private keys and certificates
 *.p12

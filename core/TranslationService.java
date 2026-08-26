@@ -21,34 +21,41 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Auto-translates a completed transcript's segments — "Translation API
- * integration" from the commercial-competitiveness review, never
- * previously built.
+ * Auto-translates a completed transcript's segments.
  *
- * <h2>Why an HTTP endpoint, not a bundled library or a specific paid API</h2>
- * Deliberately kept generic and pluggable rather than hardcoding a
- * dependency on a specific paid service (Google Translate, DeepL) this
- * app's users may not have accounts for, or bundling a heavyweight offline
- * translation model this session has no way to validate the licensing/size
- * tradeoffs of. Instead this speaks the widely-implemented
- * LibreTranslate-compatible REST contract (self-hostable, several public
- * instances exist, and DeepL/Google-compatible shims for this exact
- * request shape exist too) — point {@link #TranslationService(String, String)}
- * at whichever compatible endpoint you have access to.
+ * <p>This class provides translation capabilities for transcription results,
+ * allowing users to translate transcripts into different languages. It uses a
+ * LibreTranslate-compatible REST API endpoint.</p>
  *
- * <p>This keeps the app's core "never phones home without being asked"
- * policy intact: translation is opt-in per use (nothing calls this
- * automatically), and the endpoint is whatever the user configures — not a
- * hardcoded third-party service this app would otherwise be silently
- * sending transcript content to.</p>
+ * <p><b>Why an HTTP endpoint, not a bundled library or a specific paid API:</b>
+ * Deliberately kept generic and pluggable rather than hardcoding a dependency
+ * on a specific paid service (Google Translate, DeepL) or bundling a
+ * heavyweight offline translation model. This speaks the widely-implemented
+ * LibreTranslate-compatible REST contract which can be self-hosted or pointed
+ * at various compatible services.</p>
+ *
+ * <p><b>Privacy note:</b> The app never phones home without being asked.
+ * Translation is opt-in per use, and the endpoint is whatever the user
+ * configures — not a hardcoded third-party service.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see TranscriptionResult
+ * @see TranscriptionException
  */
 public class TranslationService {
 
-    private final String endpointUrl; // e.g. "https://libretranslate.example.com/translate"
+    private final String endpointUrl;
     private final String apiKey;      // nullable — some self-hosted instances don't require one
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /**
+     * Constructs a new TranslationService.
+     *
+     * @param endpointUrl the URL of the translation endpoint (LibreTranslate-compatible)
+     * @param apiKey the API key for the translation service (may be {@code null})
+     */
     public TranslationService(String endpointUrl, String apiKey) {
         this.endpointUrl = endpointUrl;
         this.apiKey = apiKey;
@@ -58,16 +65,17 @@ public class TranslationService {
     }
 
     /**
-     * Translates every segment's text in {@code result} to {@code targetLanguageCode}
-     * (ISO 639-1, e.g. "es", "fr", "de") and returns a NEW {@link TranscriptionResult}
-     * with translated text — the original is left untouched, so callers decide
-     * whether to save the translation alongside or instead of the original.
+     * Translates every segment's text in the result to the target language.
      *
-     * @throws TranscriptionException if the endpoint is unreachable, returns
-     *         an error, or the response can't be parsed — using the existing
-     *         typed exception hierarchy so callers (e.g. a REST API job, or
-     *         batch UI code) can distinguish "translation failed" from other
-     *         failure categories rather than catching a bare Exception.
+     * <p>This method returns a new {@link TranscriptionResult} with translated
+     * text — the original is left untouched, so callers decide whether to
+     * save the translation alongside or instead of the original.</p>
+     *
+     * @param result the transcription result to translate
+     * @param targetLanguageCode the target language code (ISO 639-1, e.g., "es", "fr", "de")
+     * @return a new {@link TranscriptionResult} with translated segments
+     * @throws TranscriptionException if the endpoint is unreachable, returns an error,
+     *         or the response can't be parsed
      */
     public TranscriptionResult translateSegments(TranscriptionResult result, String targetLanguageCode)
             throws TranscriptionException {
@@ -78,12 +86,6 @@ public class TranslationService {
                     null, false);
         }
 
-        // FIX: TranscriptionResult.Segment doesn't exist — segments are
-        // audiomanager.model.TranscriptionSegment, a top-level class, not a
-        // nested one. Also, neither TranscriptionSegment nor
-        // TranscriptionResult has a "with*" copy method — both are plain
-        // immutable classes with a constructor and getters — so a translated
-        // copy has to be built via their real constructors instead.
         List<TranscriptionSegment> segments = result.getSegments();
         List<TranscriptionSegment> translated = new java.util.ArrayList<>(segments.size());
         StringBuilder translatedFullText = new StringBuilder();
@@ -96,15 +98,23 @@ public class TranslationService {
             translatedFullText.append(translatedText);
         }
 
-        // The returned result's top-level text/language now reflect the
-        // translation too (not just the segments) — a caller reading
-        // getText()/getLanguage() on the returned object should see the
-        // translated content, not silently-stale original-language values.
         return new TranscriptionResult(translatedFullText.toString(), targetLanguageCode,
                 result.getDuration(), translated);
     }
 
-    /** Translates a single string. Exposed separately in case a caller wants to translate, e.g., just a title or summary rather than a whole transcript. */
+    /**
+     * Translates a single string.
+     *
+     * <p>This method is exposed separately for use cases where only a single
+     * string needs translation (e.g., a title or summary rather than a whole
+     * transcript).</p>
+     *
+     * @param text the text to translate
+     * @param targetLanguageCode the target language code (ISO 639-1)
+     * @param sourceLanguageCode the source language code (ISO 639-1), or "auto" for auto-detection
+     * @return the translated text
+     * @throws TranscriptionException if the translation fails
+     */
     public String translateText(String text, String targetLanguageCode, String sourceLanguageCode)
             throws TranscriptionException {
         if (text == null || text.isBlank()) return text;
@@ -155,6 +165,9 @@ public class TranslationService {
         }
     }
 
+    /**
+     * Truncates a string to 300 characters for error messages.
+     */
     private static String truncate(String s) {
         if (s == null) return "";
         return s.length() > 300 ? s.substring(0, 300) + "..." : s;

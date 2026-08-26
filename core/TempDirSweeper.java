@@ -12,24 +12,26 @@ import java.nio.file.*;
 import java.util.Comparator;
 
 /**
- * JVM shutdown hook that performs two tasks when the application exits
- * (cleanly or via SIGTERM):
+ * JVM shutdown hook that performs cleanup tasks when the application exits.
  *
+ * <p>This class registers a shutdown hook that performs two critical tasks:
  * <ol>
  *   <li>Calls {@link BatchProcessor#cancel()} so in-flight transcription jobs
- *       write their partial state before the process dies.</li>
- *   <li>Sweeps the system temp directory for {@code segment_work_*} and
- *       {@code whisperx_output_*} orphan directories older than 24 hours.</li>
+ *       write their partial state before the process dies</li>
+ *   <li>Sweeps the system temp directory for orphaned directories older than
+ *       24 hours ({@code segment_work_*} and {@code whisperx_output_*})</li>
  * </ol>
  *
- * <h2>Registration</h2>
- * Register this hook once at application startup, typically in
- * {@code MainWindow.start()}:
+ * <p><b>Usage:</b> Register the hook once at application startup:</p>
  * <pre>{@code
  * TempDirSweeper.registerShutdownHook(batchProcessor);
  * }</pre>
  *
- * <p>If the hook has already been registered a second call is a no-op.</p>
+ * <p>If the hook has already been registered, a second call is a no-op.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see BatchProcessor
  */
 public final class TempDirSweeper {
 
@@ -41,11 +43,12 @@ public final class TempDirSweeper {
     private TempDirSweeper() { /* utility class */ }
 
     /**
-     * Register the shutdown hook (idempotent).
+     * Registers the shutdown hook (idempotent).
      *
-     * @param batchProcessor the active {@link BatchProcessor}; may be
-     *                       {@code null} if the processor has not been created
-     *                       yet (the hook will still sweep temp dirs).
+     * <p>If {@code batchProcessor} is {@code null}, the hook will still
+     * perform the temp directory sweep.</p>
+     *
+     * @param batchProcessor the active {@link BatchProcessor}; may be {@code null}
      */
     public static synchronized void registerShutdownHook(BatchProcessor batchProcessor) {
         if (registered) return;
@@ -75,6 +78,13 @@ public final class TempDirSweeper {
     //  Temp-dir sweep
     // -------------------------------------------------------------------------
 
+    /**
+     * Sweeps the system temp directory for orphaned directories older than 24 hours.
+     *
+     * <p>This method looks for directories with names starting with
+     * {@code segment_work_} or {@code whisperx_output_} and deletes them
+     * if their last modified time is older than the cutoff.</p>
+     */
     static void sweepTempDirs() {
         Path tempDir = Paths.get(System.getProperty("java.io.tmpdir"));
         long cutoff  = System.currentTimeMillis() - ORPHAN_MAX_AGE_MS;
@@ -98,6 +108,11 @@ public final class TempDirSweeper {
         }
     }
 
+    /**
+     * Deletes a directory tree recursively.
+     *
+     * @param root the root directory to delete
+     */
     private static void deleteTree(Path root) {
         try {
             Files.walk(root)

@@ -4,11 +4,6 @@
  */
 package audiomanager.util;
 
-/**
- *
- * @author USER
- */
-
 import audiomanager.constants.AppConstants;
 import audiomanager.constants.PreferenceKeys;
 import java.util.prefs.BackingStoreException;
@@ -28,6 +23,12 @@ public class PreferenceManager {
     private static final String AUTO_VOLUME_OPTIMIZATION_KEY = "autoVolumeOptimization";
     private static final String TARGET_VOLUME_DB_KEY = "targetVolumeDb";
 
+    // ===== NEW: Translation Preference Keys =====
+    private static final String TRANSLATION_ENABLED_KEY = "translation.enabled";
+    private static final String TRANSLATION_TARGET_LANGUAGE_KEY = "translation.target_language";
+    private static final String TRANSLATION_ENDPOINT_KEY = "translation.endpoint";
+    private static final String TRANSLATION_API_KEY_KEY = "translation.api_key";
+
     // Add getters/setters
     public boolean isAutoVolumeOptimizationEnabled() {
         return getBoolean(AUTO_VOLUME_OPTIMIZATION_KEY, true);
@@ -43,6 +44,84 @@ public class PreferenceManager {
 
     public void setTargetVolumeDb(double targetDb) {
         putDouble(TARGET_VOLUME_DB_KEY, targetDb);
+    }
+
+    // ===== NEW: Translation Getters/Setters =====
+
+    /**
+     * Returns whether translation is enabled.
+     *
+     * @return {@code true} if translation is enabled
+     */
+    public boolean isTranslationEnabled() {
+        return getBoolean(TRANSLATION_ENABLED_KEY, false);
+    }
+
+    /**
+     * Sets whether translation is enabled.
+     *
+     * @param enabled {@code true} to enable translation
+     */
+    public void setTranslationEnabled(boolean enabled) {
+        putBoolean(TRANSLATION_ENABLED_KEY, enabled);
+    }
+
+    /**
+     * Returns the target language for translation.
+     *
+     * @return the target language code (e.g., "es", "fr"), or "es" if not set
+     */
+    public String getTranslationTargetLanguage() {
+        return getString(TRANSLATION_TARGET_LANGUAGE_KEY, "es");
+    }
+
+    /**
+     * Sets the target language for translation.
+     *
+     * @param language the target language code (e.g., "es", "fr")
+     */
+    public void setTranslationTargetLanguage(String language) {
+        putString(TRANSLATION_TARGET_LANGUAGE_KEY, language != null ? language : "es");
+    }
+
+    /**
+     * Returns the translation endpoint URL.
+     *
+     * @return the endpoint URL, or the default LibreTranslate URL if not set
+     */
+    public String getTranslationEndpoint() {
+        return getString(TRANSLATION_ENDPOINT_KEY, "https://libretranslate.com/translate");
+    }
+
+    /**
+     * Sets the translation endpoint URL.
+     *
+     * @param endpoint the endpoint URL
+     */
+    public void setTranslationEndpoint(String endpoint) {
+        putString(TRANSLATION_ENDPOINT_KEY, endpoint != null ? endpoint : "https://libretranslate.com/translate");
+    }
+
+    /**
+     * Returns the translation API key.
+     *
+     * @return the API key, or {@code null} if not set
+     */
+    public String getTranslationApiKey() {
+        return getString(TRANSLATION_API_KEY_KEY, null);
+    }
+
+    /**
+     * Sets the translation API key.
+     *
+     * @param apiKey the API key, or {@code null} to clear
+     */
+    public void setTranslationApiKey(String apiKey) {
+        if (apiKey != null && !apiKey.isBlank()) {
+            putString(TRANSLATION_API_KEY_KEY, apiKey);
+        } else {
+            remove(TRANSLATION_API_KEY_KEY);
+        }
     }
 
     public PreferenceManager(Class<?> clazz) {

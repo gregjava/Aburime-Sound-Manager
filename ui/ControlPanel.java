@@ -8,6 +8,7 @@ import audiomanager.constants.AppConstants;
 import audiomanager.core.DependencyManager;
 import audiomanager.core.LicenseManager;
 import audiomanager.model.BatchFileItem;
+import audiomanager.util.SoundManager;
 import audiomanager.util.TimeLeftEstimator;
 import javafx.application.Platform;
 import javafx.collections.ObservableList;
@@ -215,22 +216,38 @@ public class ControlPanel {
         box.setAlignment(Pos.CENTER);
         setStyled(box, "-fx-padding: 0 0 10 0;");
 
+        // ===== PROCESS BUTTON =====
         setStyled(processButton, "");
         processButton.getStyleClass().add("action-btn-start");
-        processButton.setOnAction(e -> onProcessClick.run());
+        processButton.setOnAction(e -> {
+            SoundManager.playClick();  // ✅ ADDED: Click sound for process button
+            onProcessClick.run();
+        });
         processButton.setMinWidth(180);
 
+        // ===== CLEAR LOG BUTTON =====
         setStyled(clearLogButton, "");
         clearLogButton.getStyleClass().add("action-btn-clear-log");
+        clearLogButton.setOnAction(e -> {
+            SoundManager.playClick();  // ✅ ADDED: Click sound for clear log
+        });
 
+        // ===== SCHEDULE BUTTON =====
         setStyled(scheduleButton, "");
         scheduleButton.getStyleClass().add("action-btn-schedule");
         scheduleButton.setMinWidth(120);
         scheduleButton.setTooltip(new Tooltip("Schedule batch to run later"));
+        scheduleButton.setOnAction(e -> {
+            SoundManager.playClick();  // ✅ ADDED: Click sound for schedule button
+        });
 
+        // ===== EXIT BUTTON =====
         setStyled(exitButton, "");
         exitButton.getStyleClass().add("action-btn-exit");
-        exitButton.setOnAction(e -> onExitClick.run());
+        exitButton.setOnAction(e -> {
+            SoundManager.playClick();  // ✅ ADDED: Click sound for exit button
+            onExitClick.run();
+        });
 
         box.getChildren().addAll(processButton, clearLogButton, scheduleButton, exitButton);
         return box;
@@ -283,7 +300,10 @@ public class ControlPanel {
     // ========================================================================
 
     public void setScheduleAction(Runnable action) {
-        scheduleButton.setOnAction(e -> action.run());
+        scheduleButton.setOnAction(e -> {
+            SoundManager.playClick();  // ✅ ADDED: Click sound for schedule action
+            action.run();
+        });
     }
 
     public void updateStatus(String main, String detail) {
@@ -302,6 +322,10 @@ public class ControlPanel {
         appState.setProcessing(processing);
         if (!processing) {
             individualProgressRows.getChildren().clear();
+        }
+        // ✅ Sound for processing start/stop
+        if (processing) {
+            SoundManager.playStart();
         }
     }
 
@@ -353,10 +377,41 @@ public class ControlPanel {
             timeEstimator.getLiveTotalTimeLeftMs()
         );
 
+        // Get both metrics for accuracy
         int learnedProcesses = timeEstimator.getLearnedPatternCount();
-        if (learnedProcesses > 0) {
-            dataStatusLabel.setText("Using learned estimates (" + learnedProcesses
-                + " process type" + (learnedProcesses == 1 ? "" : "s") + " learned)");
+        double speedMultiplier = timeEstimator.getSpeedMultiplier();
+
+        // A system has learned data if:
+        // 1. It has learned process patterns, OR
+        // 2. The speed multiplier has adjusted from the default (1.0)
+        boolean hasLearnedData = learnedProcesses > 0 || Math.abs(speedMultiplier - 1.0) > 0.05;
+
+        if (hasLearnedData) {
+            // Build a detailed, informative status message
+            StringBuilder status = new StringBuilder("Using learned estimates");
+
+            // Add process count if available
+            if (learnedProcesses > 0) {
+                status.append(" (").append(learnedProcesses)
+                      .append(" process type").append(learnedProcesses == 1 ? "" : "s").append(" learned");
+            }
+
+            // Add speed multiplier if it has adjusted
+            if (Math.abs(speedMultiplier - 1.0) > 0.05) {
+                if (learnedProcesses > 0) {
+                    status.append(", ");
+                } else {
+                    status.append(" (");
+                }
+                status.append("speed: ").append(String.format("%.2fx", speedMultiplier));
+            }
+
+            // Close the parenthesis if we opened one
+            if (learnedProcesses > 0 || Math.abs(speedMultiplier - 1.0) > 0.05) {
+                status.append(")");
+            }
+
+            dataStatusLabel.setText(status.toString());
             setStyled(dataStatusLabel, "-fx-font-size: 10px; -fx-text-fill: #2e7d32; -fx-font-style: italic;");
         } else {
             dataStatusLabel.setText("Using default estimates");

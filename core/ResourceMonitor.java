@@ -15,32 +15,35 @@ import java.util.function.Consumer;
 import java.util.function.IntSupplier;
 
 /**
- * System resource probing and per-batch resource observability, extracted
- * out of {@link ParallelProcessingManager} (which had grown past 1,600
- * lines covering several distinct concerns at once — pipeline orchestration,
- * model pooling, AND resource monitoring all in one file).
+ * System resource probing and per-batch resource observability.
  *
- * <p>Owns three related but separable things:</p>
+ * <p>This class provides three related but separable capabilities:
  * <ol>
- *   <li><b>Point-in-time probes</b> — {@link #getSystemCpuLoadPercent()},
- *       {@link #getSystemMemoryUsedPercent()}, {@link #getUsedMemoryMB()} —
- *       used both by the adaptive concurrency cycle (still in
- *       {@code ParallelProcessingManager}, since only it has direct access
- *       to the model pools it resizes) and by this class's own sampler.</li>
- *   <li><b>The 2-second batch sampler</b> — {@link #startSampling}/
- *       {@link #stopSampling} — a purely observational background thread,
- *       separate from the adaptive cycle's 5-second control loop. Accumulates
- *       mean/peak CPU and RAM for {@link #buildBatchSummary}.</li>
- *   <li><b>Scaling-event tracking</b> — {@link #recordScalingEvent} — a
- *       simple counter the adaptive cycle calls into whenever it actually
- *       changes the model-pool concurrency target, so the batch summary can
- *       report how many times a batch was throttled without the caller
- *       needing to track that itself.</li>
+ *   <li><b>Point-in-time probes:</b> Methods to query current CPU load,
+ *       system memory usage, and JVM heap usage</li>
+ *   <li><b>Batch-level sampling:</b> A 2-second background sampler that
+ *       accumulates CPU and memory statistics for reporting</li>
+ *   <li><b>Scaling-event tracking:</b> A counter for adaptive concurrency
+ *       changes, surfaced in batch summaries</li>
  * </ol>
  *
- * <p>One instance is meant to live for the lifetime of a
- * {@code ParallelProcessingManager}; call {@link #resetForNewBatch()} at the
- * start of each batch so stats don't bleed across runs.</p>
+ * <p><b>Usage:</b></p>
+ * <pre>{@code
+ * ResourceMonitor monitor = new ResourceMonitor(logger);
+ * monitor.resetForNewBatch();
+ * monitor.startSampling(activeFileCountSupplier, uiLogger);
+ * // ... batch processing ...
+ * monitor.stopSampling();
+ * String summary = monitor.buildBatchSummary(filesProcessed, audioDuration, elapsedMs);
+ * }</pre>
+ *
+ * <p><b>Thread-safety:</b> One instance is meant to live for the lifetime
+ * of a {@link ParallelProcessingManager}. Call {@link #resetForNewBatch()}
+ * at the start of each batch to reset statistics.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ParallelProcessingManager
  */
 public class ResourceMonitor {
 
@@ -52,6 +55,11 @@ public class ResourceMonitor {
     private volatile long peakHeapMB = 0;
     private final AtomicInteger scalingEventCount = new AtomicInteger(0);
 
+    /**
+     * Constructs a new ResourceMonitor with the specified logger.
+     *
+     * @param logger the logger for resource monitoring output
+     */
     public ResourceMonitor(Logger logger) {
         this.logger = logger;
     }
@@ -60,7 +68,11 @@ public class ResourceMonitor {
     //  Point-in-time probes
     // -------------------------------------------------------------------------
 
-    /** System-wide CPU load as a percentage, or -1 if unavailable on this JVM/platform. */
+    /**
+     * Returns the system-wide CPU load as a percentage.
+     *
+     * @return the CPU load as a percentage, or {@code -1} if unavailable
+     */
     public double getSystemCpuLoadPercent() {
         try {
             java.lang.management.OperatingSystemMXBean osBean =
@@ -76,14 +88,13 @@ public class ResourceMonitor {
     }
 
     /**
-     * Percentage of total physical (system-wide) RAM currently in use, or
-     * -1 if unavailable on this JVM/platform.
+     * Returns the percentage of total physical (system-wide) RAM currently in use.
      *
-     * <p>Distinct from JVM heap usage: this app's actual memory-heavy work
+     * <p>This is distinct from JVM heap usage. The memory-heavy work
      * (WhisperX/torch model inference) runs in external Python subprocesses,
-     * whose memory usage is entirely invisible to the JVM heap — see
-     * {@code ParallelProcessingManager.startResourceMonitor} for why the
-     * adaptive concurrency cycle checks both signals.</p>
+     * whose memory usage is invisible to the JVM heap.</p>
+     *
+     * @return the system memory used as a percentage, or {@code -1} if unavailable
      */
     public double getSystemMemoryUsedPercent() {
         try {
@@ -103,15 +114,9 @@ public class ResourceMonitor {
     }
 
     /**
-     * Currently-used JVM heap, in MB.
+     * Returns the currently-used JVM heap memory in megabytes.
      *
-     * <p>Uses {@code totalMemory() - freeMemory()}, i.e. used space within
-     * what the JVM has actually committed — not {@code maxMemory()} (the
-     * real ceiling, e.g. {@code -Xmx}). A prior version of this measurement
-     * used {@code freeMemory()} alone as if it were available headroom,
-     * which reads as near-zero right after startup (before the heap has
-     * grown to reflect real usage) and permanently tripped low-memory
-     * fallback logic regardless of actual available headroom.</p>
+     * @return the JVM heap used in MB
      */
     public long getUsedMemoryMB() {
         Runtime r = Runtime.getRuntime();
@@ -122,7 +127,9 @@ public class ResourceMonitor {
     //  Batch-level sampling (2s, observation-only)
     // -------------------------------------------------------------------------
 
-    /** Clears accumulated stats — call once at the start of each batch. */
+    /**
+     * Clears accumulated stats for the start of a new batch.
+     */
     public void resetForNewBatch() {
         cpuStats = new DoubleSummaryStatistics();
         memStats = new DoubleSummaryStatistics();
@@ -131,15 +138,13 @@ public class ResourceMonitor {
     }
 
     /**
-     * Starts a 2-second background sampler that logs a compact resource
-     * snapshot and accumulates stats for {@link #buildBatchSummary}. Safe
-     * to call once per batch; call {@link #stopSampling()} when the batch
-     * ends (success, failure, or cancellation — a {@code finally} block).
+     * Starts a 2-second background sampler that logs resource snapshots.
      *
-     * @param activeFileCountSupplier reports how many files are actively
-     *        being processed right now, for the log line only
-     * @param uiLogger also-append each sample line here (e.g. the app's
-     *        Terminal panel), or {@code null} to only log via SLF4J
+     * <p>This method accumulates CPU and memory statistics for
+     * {@link #buildBatchSummary}. It should be called once per batch.</p>
+     *
+     * @param activeFileCountSupplier supplies the number of actively processed files
+     * @param uiLogger a consumer for UI log messages (may be {@code null})
      */
     public void startSampling(IntSupplier activeFileCountSupplier, Consumer<String> uiLogger) {
         samplerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -167,6 +172,12 @@ public class ResourceMonitor {
         }, 2, 2, TimeUnit.SECONDS);
     }
 
+    /**
+     * Stops the background sampler and releases resources.
+     *
+     * <p>This should be called when a batch completes (success, failure,
+     * or cancellation) in a {@code finally} block.</p>
+     */
     public void stopSampling() {
         if (samplerExecutor != null) {
             samplerExecutor.shutdownNow();
@@ -179,11 +190,16 @@ public class ResourceMonitor {
     // -------------------------------------------------------------------------
 
     /**
-     * Call from the adaptive concurrency cycle whenever it changes the
-     * live model-pool concurrency target. Logs the transition and
-     * increments the counter shown in {@link #buildBatchSummary}. Pass -1
-     * for {@code previousTarget} on the very first cycle of a batch (no
-     * transition to report yet) — this method is a no-op in that case.
+     * Records a scaling event when the adaptive concurrency target changes.
+     *
+     * <p>This method logs the transition and increments the counter shown
+     * in {@link #buildBatchSummary}. If {@code previousTarget} is {@code -1},
+     * the call is a no-op.</p>
+     *
+     * @param previousTarget the previous concurrency target, or {@code -1} for the first cycle
+     * @param newTarget the new concurrency target
+     * @param cpuLoadPct the CPU load at the time of scaling
+     * @param memUsedPct the memory used at the time of scaling
      */
     public void recordScalingEvent(int previousTarget, int newTarget, double cpuLoadPct, double memUsedPct) {
         if (previousTarget == -1 || previousTarget == newTarget) return;
@@ -197,10 +213,12 @@ public class ResourceMonitor {
     // -------------------------------------------------------------------------
 
     /**
-     * Builds the end-of-batch summary block (files, audio duration, elapsed
-     * time, throughput, CPU/RAM stats, peak heap, scaling events). The
-     * caller decides where it goes (SLF4J, the UI's Terminal panel, or
-     * both) — this method only formats it.
+     * Builds an end-of-batch summary block.
+     *
+     * @param filesProcessed the number of files processed
+     * @param totalAudioDurationSeconds the total audio duration in seconds
+     * @param elapsedMs the elapsed processing time in milliseconds
+     * @return a formatted summary string
      */
     public String buildBatchSummary(int filesProcessed, double totalAudioDurationSeconds, long elapsedMs) {
         double elapsedHours = elapsedMs / 3_600_000.0;
@@ -233,6 +251,12 @@ public class ResourceMonitor {
         return sb.toString();
     }
 
+    /**
+     * Formats a duration in milliseconds to a human-readable string.
+     *
+     * @param ms the duration in milliseconds
+     * @return a formatted string (e.g., "1h 2m 30s")
+     */
     public static String formatDuration(long ms) {
         long totalSeconds = ms / 1000;
         long h = totalSeconds / 3600;

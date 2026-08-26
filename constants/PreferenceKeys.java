@@ -5,7 +5,7 @@
 package audiomanager.constants;
 
 /**
- * Enhanced preference keys
+ * Preference keys
  */
 public final class PreferenceKeys {
     private PreferenceKeys() {}

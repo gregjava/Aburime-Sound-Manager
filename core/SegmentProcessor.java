@@ -20,26 +20,35 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * Processes a long audio file by splitting into segments, transcribing each
- * one, and merging the results.  Supports resuming after interruption.
+ * Processes a long audio file by splitting it into segments, transcribing each
+ * one, and merging the results.
  *
- * <h2>Fixes vs. original</h2>
+ * <p>This class handles audio files that are too long for direct transcription
+ * by splitting them into manageable segments and processing each segment
+ * independently. Key features include:
  * <ul>
- *   <li><b>Configurable segment duration:</b> The 10-second hard-coded
- *       {@code segmentDuration} is replaced by
- *       {@link TranscriptionConfig#getMaxSegmentDuration()}, which defaults to
- *       30 s.  10-second segments are too short — they fragment sentences,
- *       break alignment context, and degrade transcription quality.</li>
- *   <li><b>Temp-dir cleanup logging:</b> {@link #cleanup()} now logs a
- *       {@code WARN} for each file it cannot delete rather than silently
- *       swallowing the {@code IOException}.  Orphaned gigabytes accumulating
- *       in the system temp directory are now visible in the log.</li>
- *   <li><b>Startup orphan sweep:</b> {@link #sweepOrphanedWorkDirs()} is
- *       called once per JVM to delete {@code segment_work_*} directories that
- *       are older than 24 hours — cleaning up after crashes.</li>
- *   <li><b>Interrupt flag preserved:</b> If the segment loop is interrupted
- *       the flag is restored before the exception propagates.</li>
+ *   <li><b>Configurable segment duration:</b> Uses
+ *       {@link TranscriptionConfig#getMaxSegmentDuration()} (default 30s)</li>
+ *   <li><b>Resume capability:</b> Saves progress after each segment for crash
+ *       recovery</li>
+ *   <li><b>Segment retry:</b> Retries failed segments up to 3 times with
+ *       exponential backoff</li>
+ *   <li><b>Startup orphan sweep:</b> Cleans up orphaned work directories
+ *       older than 24 hours</li>
+ *   <li><b>Aggregated timing:</b> Summarises Python-side timings across all
+ *       segments</li>
+ *   <li><b>Self-correcting merge:</b> Anchors merged timestamps to actual
+ *       segment endpoints</li>
  * </ul>
+ *
+ * <p><b>Temp directory management:</b> Work directories are created in the
+ * system temp directory with the pattern {@code segment_work_*}. Orphaned
+ * directories older than 24 hours are automatically swept on startup.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see WhisperXTranscriptionService
+ * @see SegmentProgressListener
  */
 public class SegmentProcessor {
 
@@ -68,16 +77,7 @@ public class SegmentProcessor {
 
     private Path workDir;
 
-    // FIX (aggregation gap): previously nothing in this class captured the
-    // Python-side per-segment STAGE_TIMING data at all — a caller reading
-    // transcriptionService.getLastPythonStageTimingsMs() after
-    // processWithSegments() returns only ever saw the LAST segment's
-    // numbers, silently understating a 20-segment file's real transcription/
-    // alignment/diarization time by a factor of ~20. Summed here as each
-    // segment completes (time-valued stages) or aggregated appropriately
-    // (peak memory: max across segments; CPU%: mean of per-segment means —
-    // a reasonable approximation, not a true whole-file average, since
-    // that's the finest granularity available).
+    // Aggregated timing data across all segments
     private final Map<String, Long> aggregatedStageTimingsMs = new LinkedHashMap<>();
     private double aggregatedPeakMemoryMb = -1;
     private double cpuPercentSum = 0;
@@ -87,6 +87,15 @@ public class SegmentProcessor {
     //  Construction
     // -------------------------------------------------------------------------
 
+    /**
+     * Constructs a new SegmentProcessor.
+     *
+     * @param transcriptionService the transcription service for processing segments
+     * @param dependencyManager the dependency manager for FFmpeg
+     * @param timeEstimator the time estimator for progress tracking
+     * @param listener the segment progress listener (may be {@code null})
+     * @param errorReporter the error reporter for diagnostics (may be {@code null})
+     */
     public SegmentProcessor(WhisperXTranscriptionService transcriptionService,
                             DependencyManager dependencyManager,
                             TimeLeftEstimator timeEstimator,
@@ -105,32 +114,36 @@ public class SegmentProcessor {
         }
     }
 
-    SegmentProcessor(WhisperXTranscriptionService transcriptionService, DependencyManager dependencyManager, TimeLeftEstimator timeEstimator, Object object) {
-        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
-    }
-
     /**
-     * Sum of each Python-reported stage's time across every segment
-     * actually transcribed in the most recent {@link #processWithSegments}
-     * call. Segments resumed from a cached {@code result_N.json} (already
-     * completed in a previous run) don't contribute here — this run didn't
-     * re-transcribe them, so there's no fresh timing to add; the returned
-     * totals reflect only the work this run actually did.
+     * Returns the sum of Python-reported stage times across all segments.
+     *
+     * @return a map of stage names to total duration in milliseconds
      */
     public Map<String, Long> getAggregatedStageTimingsMs() {
         return new LinkedHashMap<>(aggregatedStageTimingsMs);
     }
 
-    /** Highest single-segment peak memory (MB) observed across the file, or -1 if unavailable for every segment. */
+    /**
+     * Returns the highest single-segment peak memory usage observed.
+     *
+     * @return the peak memory in MB, or {@code -1} if unavailable
+     */
     public double getAggregatedPeakMemoryMb() {
         return aggregatedPeakMemoryMb;
     }
 
-    /** Mean of each segment's own average CPU%, or -1 if unavailable for every segment. */
+    /**
+     * Returns the mean of each segment's average CPU usage.
+     *
+     * @return the average CPU percentage, or {@code -1} if unavailable
+     */
     public double getAggregatedAvgCpuPercent() {
         return cpuPercentSampleCount > 0 ? cpuPercentSum / cpuPercentSampleCount : -1;
     }
 
+    /**
+     * Resets aggregated timing data for a new file.
+     */
     private void resetAggregates() {
         aggregatedStageTimingsMs.clear();
         aggregatedPeakMemoryMb = -1;
@@ -138,7 +151,9 @@ public class SegmentProcessor {
         cpuPercentSampleCount = 0;
     }
 
-    /** Folds one segment's Python-reported timing/resource data into the running file-level totals. Call right after a segment's transcribe() call returns (not for resumed/cached segments — there's nothing fresh to add). */
+    /**
+     * Accumulates timing data from the most recent segment.
+     */
     private void accumulateSegmentTiming() {
         Map<String, Long> segmentStages = transcriptionService.getLastPythonStageTimingsMs();
         for (Map.Entry<String, Long> e : segmentStages.entrySet()) {
@@ -160,15 +175,24 @@ public class SegmentProcessor {
     // -------------------------------------------------------------------------
 
     /**
-     * Split {@code audioFile} into segments, transcribe each one
-     * (skipping already-completed segments), and merge the results.
+     * Splits an audio file into segments, transcribes each one, and merges the results.
      *
-     * @param audioFile        path to the source WAV file
-     * @param config           transcription configuration
-     * @param progressCallback overall progress listener
-     * @param audioDuration    total audio duration in seconds (informational)
-     * @return merged transcription result
-     * @throws Exception on any unrecoverable error
+     * <p>This method:
+     * <ol>
+     *   <li>Creates a work directory for this file</li>
+     *   <li>Splits the audio into segments using FFmpeg</li>
+     *   <li>Loads any previously completed segments for resume</li>
+     *   <li>Transcribes each segment with retry logic</li>
+     *   <li>Merges all segment results</li>
+     *   <li>Cleans up temporary files</li>
+     * </ol>
+     *
+     * @param audioFile the path to the source WAV file
+     * @param config the transcription configuration
+     * @param progressCallback the overall progress listener
+     * @param audioDuration the total audio duration in seconds
+     * @return the merged transcription result
+     * @throws Exception if any unrecoverable error occurs
      */
     public TranscriptionResult processWithSegments(String audioFile,
                                                    TranscriptionConfig config,
@@ -178,7 +202,6 @@ public class SegmentProcessor {
         LOGGER.info("Segment work dir: {}", workDir);
         resetAggregates();
 
-        // FIX: segment duration comes from config (defaults to 30 s if ≤ 0)
         int segmentDuration = config.getMaxSegmentDuration() > 0
                 ? (int) config.getMaxSegmentDuration()
                 : DEFAULT_SEGMENT_DURATION_SECONDS;
@@ -265,23 +288,6 @@ public class SegmentProcessor {
                 markSegmentCompleted(progressFile, i);
             }
         } finally {
-            // FIX (Total Time Left inaccuracy for the batch's last file):
-            // previously this call sat *after* the loop on the success path
-            // only. If transcribeSegmentWithRetry() exhausted its retries
-            // and threw on any segment, this file's TimeLeftEstimator
-            // activeFiles entry was never removed — a permanently leaked
-            // "ghost" entry. TimeLeftEstimator.getBatchTimeEstimate() only
-            // excludes an active file from othersTimeLeft when it's the
-            // exact same object reference as the currently-displayed file;
-            // a leaked entry for an already-failed file is neither
-            // displayed nor ever cleaned up, so it silently kept
-            // contributing its last-known (frozen) remaining-time estimate
-            // to "Total Time Left" for the rest of the batch — including
-            // once only one real file was left processing, which is
-            // exactly the "Total much higher than File, for the last file"
-            // symptom this closes. Matches the try/catch pattern
-            // WhisperXTranscriptionService.transcribe() already uses for
-            // its own (non-segmented) completeFileProcessing() call.
             if (timeEstimator != null) timeEstimator.completeFileProcessing(fileName);
         }
 
@@ -294,55 +300,13 @@ public class SegmentProcessor {
         return merged;
     }
 
-    /**
-     * Transcribe a single segment, retrying up to {@link #MAX_RETRIES} times
-     * (with a backoff proportional to the attempt number) before giving up.
-     * A transient failure on one segment (e.g. a flaky model load or a
-     * momentary resource spike) previously failed the whole file even though
-     * every other segment succeeded; this isolates that cost to one segment's
-     * retry delay instead.
-     */
-    private TranscriptionResult transcribeSegmentWithRetry(Path segment,
-                                                            int index,
-                                                            int totalSegments,
-                                                            TranscriptionConfig segmentConfig,
-                                                            AudioProcessor.ProgressCallback segmentProgress,
-                                                            int segmentDuration) throws Exception {
-        int retryCount = 0;
-        while (true) {
-            try {
-                if (retryCount > 0) {
-                    LOGGER.warn("Retrying segment {}/{} (attempt {}/{})",
-                            index + 1, totalSegments, retryCount + 1, MAX_RETRIES);
-                    Thread.sleep(RETRY_DELAY_MS * (retryCount + 1));
-                }
-                return transcriptionService.transcribe(
-                        segment.toString(), segmentConfig, segmentProgress, segmentDuration);
-            } catch (InterruptedException ie) {
-                // A sleep interruption means the batch is being cancelled —
-                // never swallow that as a retryable failure.
-                Thread.currentThread().interrupt();
-                throw ie;
-            } catch (Exception e) {
-                if (errorReporter != null && errorReporter.isEnabled()) {
-                    errorReporter.reportError(e, "Segment transcription: " + segment + " (attempt " + retryCount + ")");
-                }
-                retryCount++;
-                if (retryCount >= MAX_RETRIES) {
-                    LOGGER.error("Segment {}/{} failed after {} attempts: {}",
-                            index + 1, totalSegments, MAX_RETRIES, e.getMessage());
-                    throw e;
-                }
-                LOGGER.warn("Segment {}/{} failed (attempt {}/{}): {} - retrying...",
-                        index + 1, totalSegments, retryCount, MAX_RETRIES, e.getMessage());
-            }
-        }
-    }
-
     // -------------------------------------------------------------------------
     //  Private helpers
     // -------------------------------------------------------------------------
 
+    /**
+     * Creates a work directory for the given audio file.
+     */
     private Path createWorkDir(String audioFile) throws IOException {
         String baseName = Paths.get(audioFile).getFileName().toString();
         int dot = baseName.lastIndexOf('.');
@@ -354,6 +318,9 @@ public class SegmentProcessor {
         return dir;
     }
 
+    /**
+     * Splits an audio file into segments using FFmpeg.
+     */
     private List<Path> splitAudio(String audioFile, int segmentDuration) throws Exception {
         Path outputDir = workDir.resolve("segments");
         Files.createDirectories(outputDir);
@@ -386,6 +353,9 @@ public class SegmentProcessor {
         return segments;
     }
 
+    /**
+     * Loads progress from a progress file.
+     */
     private Set<Integer> loadProgress(Path progressFile) throws IOException {
         Set<Integer> done = new HashSet<>();
         if (Files.exists(progressFile)) {
@@ -397,6 +367,9 @@ public class SegmentProcessor {
         return done;
     }
 
+    /**
+     * Marks a segment as completed in the progress file.
+     */
     private void markSegmentCompleted(Path progressFile, int index) throws IOException {
         try (BufferedWriter writer = Files.newBufferedWriter(progressFile,
                 StandardOpenOption.APPEND, StandardOpenOption.CREATE)) {
@@ -405,6 +378,9 @@ public class SegmentProcessor {
         }
     }
 
+    /**
+     * Saves a segment result to disk.
+     */
     private void saveSegmentResult(int index, TranscriptionResult result) throws IOException {
         Path resultFile = workDir.resolve("result_" + index + ".json");
         try (Writer writer = Files.newBufferedWriter(resultFile)) {
@@ -412,6 +388,9 @@ public class SegmentProcessor {
         }
     }
 
+    /**
+     * Loads a segment result from disk.
+     */
     private TranscriptionResult loadSegmentResult(int index) throws IOException {
         Path resultFile = workDir.resolve("result_" + index + ".json");
         try (Reader reader = Files.newBufferedReader(resultFile)) {
@@ -420,17 +399,49 @@ public class SegmentProcessor {
     }
 
     /**
-     * FIX (doc-review item 10): previously accumulated
-     * {@code timeOffset += res.getDuration()} for every segment — but
-     * FFmpeg's {@code -segment_time} cuts don't land on exact boundaries
-     * (29.98s / 30.01s / 29.95s instead of a clean 30s each time), so
-     * summing each segment's *reported* duration drifts the merged
-     * timestamps further out of sync with the real audio the longer a file
-     * runs; on a long file with many segments this becomes a visible
-     * subtitle-sync error by the end. Anchoring to the actual END of the
-     * last real transcribed segment instead is self-correcting — it
-     * reflects where WhisperX itself placed the last word, not an
-     * assumption about how long the cut was supposed to be.
+     * Transcribes a segment with retry logic.
+     */
+    private TranscriptionResult transcribeSegmentWithRetry(Path segment,
+                                                            int index,
+                                                            int totalSegments,
+                                                            TranscriptionConfig segmentConfig,
+                                                            AudioProcessor.ProgressCallback segmentProgress,
+                                                            int segmentDuration) throws Exception {
+        int retryCount = 0;
+        while (true) {
+            try {
+                if (retryCount > 0) {
+                    LOGGER.warn("Retrying segment {}/{} (attempt {}/{})",
+                            index + 1, totalSegments, retryCount + 1, MAX_RETRIES);
+                    Thread.sleep(RETRY_DELAY_MS * (retryCount + 1));
+                }
+                return transcriptionService.transcribe(
+                        segment.toString(), segmentConfig, segmentProgress, segmentDuration);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw ie;
+            } catch (Exception e) {
+                if (errorReporter != null && errorReporter.isEnabled()) {
+                    errorReporter.reportError(e, "Segment transcription: " + segment + " (attempt " + retryCount + ")");
+                }
+                retryCount++;
+                if (retryCount >= MAX_RETRIES) {
+                    LOGGER.error("Segment {}/{} failed after {} attempts: {}",
+                            index + 1, totalSegments, MAX_RETRIES, e.getMessage());
+                    throw e;
+                }
+                LOGGER.warn("Segment {}/{} failed (attempt {}/{}): {} - retrying...",
+                        index + 1, totalSegments, retryCount, MAX_RETRIES, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Merges multiple segment results into a single transcription result.
+     *
+     * <p>This method anchors merged timestamps to the actual end of the
+     * last real transcribed segment, providing self-correcting alignment
+     * rather than summing segment durations that may drift.</p>
      */
     private TranscriptionResult mergeResults(List<TranscriptionResult> results) {
         if (results.isEmpty()) {
@@ -456,10 +467,6 @@ public class SegmentProcessor {
             if (addedAny) {
                 timeOffset = merged.get(merged.size() - 1).getEnd();
             } else {
-                // No segments came back for this chunk (e.g. WhisperX
-                // detected silence) — nothing to anchor to, so fall back to
-                // its reported duration just to keep advancing the offset
-                // roughly correctly before the next chunk's segments land.
                 timeOffset += res.getDuration();
             }
         }
@@ -468,11 +475,10 @@ public class SegmentProcessor {
     }
 
     /**
-     * Delete the work directory tree.
+     * Deletes the work directory tree.
      *
-     * <p>FIX: failures are now logged at {@code WARN} level rather than
-     * silently swallowed.  This makes orphaned temp files visible so operators
-     * can diagnose disk-space issues.</p>
+     * <p>Failures are logged at {@code WARN} level to make orphaned temp
+     * files visible for disk-space diagnosis.</p>
      */
     private void cleanup() {
         if (workDir == null || !Files.exists(workDir)) return;
@@ -497,9 +503,8 @@ public class SegmentProcessor {
     // -------------------------------------------------------------------------
 
     /**
-     * Scan the system temp directory for {@code segment_work_*} and
-     * {@code whisperx_output_*} directories left over from crashed JVM
-     * sessions (older than 24 hours) and delete them.
+     * Scans the system temp directory for orphaned work directories older
+     * than 24 hours and deletes them.
      *
      * <p>Called once per JVM at first {@link SegmentProcessor} construction.</p>
      */

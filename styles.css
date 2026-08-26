@@ -83,6 +83,34 @@
     -fx-background-color: #388e3c;
 }
 
+/* ============================= Danger Button ============================= */
+
+.action-btn-danger {
+    -fx-background-color: linear-gradient(to bottom, #e74c3c, #c0392b) !important;
+    -fx-text-fill: white !important;
+    -fx-font-weight: bold !important;
+    -fx-background-radius: 4 !important;
+    -fx-padding: 6 14 !important;
+    -fx-cursor: hand !important;
+}
+
+.action-btn-danger:hover {
+    -fx-background-color: linear-gradient(to bottom, #c0392b, #a93226) !important;
+    -fx-effect: dropshadow(three-pass-box, rgba(231, 76, 60, 0.3), 4, 0, 0, 1) !important;
+}
+
+.action-btn-danger:pressed {
+    -fx-background-color: #a93226 !important;
+    -fx-effect: innershadow(three-pass-box, rgba(0, 0, 0, 0.3), 2, 0, 0, 0) !important;
+}
+
+.action-btn-danger:disabled {
+    -fx-background-color: #7f8c8d !important;
+    -fx-text-fill: #bdc3c7 !important;
+    -fx-cursor: default !important;
+    -fx-effect: none !important;
+}
+
 /* ============================= Text Inputs ============================= */
 
 .text-field, .text-area, .password-field {
@@ -222,6 +250,7 @@
 /* ============================= Log Area ============================= */
 
 .log-area {
+    -fx-control-inner-background: #1e1e1e;
     -fx-background-color: #1e1e1e;
     -fx-text-fill: #d4d4d4;
     -fx-font-family: "Consolas", "Monaco", monospace;
@@ -232,6 +261,18 @@
 
 .log-area .content {
     -fx-background-color: #1e1e1e;
+}
+
+.log-area-light {
+    -fx-control-inner-background: #ffffff;
+    -fx-text-fill: #2c3e50;
+    -fx-font-family: 'Consolas', 'Monaco', monospace;
+    -fx-border-color: #d0d0d0;
+    -fx-background-color: #ffffff;
+}
+
+.log-area-light .content {
+    -fx-background-color: #ffffff;
 }
 
 /* ============================= Progress Bar ============================= */

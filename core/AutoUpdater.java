@@ -19,7 +19,28 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Automatic update checker and installer for AudioManager.
- * Checks a remote manifest for new versions and downloads updates.
+ *
+ * <p>This class handles:
+ * <ul>
+ *   <li>Checking for new versions via a remote manifest</li>
+ *   <li>Downloading updates with progress tracking</li>
+ *   <li>Installing updates by replacing the current JAR</li>
+ *   <li>Backing up the current version before installation</li>
+ *   <li>Fallback to local version file when the server is unavailable</li>
+ * </ul>
+ *
+ * <p>The update manifest is fetched from:
+ * <pre>
+ * https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/updates/latest.json
+ * </pre>
+ *
+ * <p><b>Security note:</b> The update system verifies checksums of downloaded
+ * files when provided in the manifest.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see UpdateInfo
+ * @see UpdateCheckCallback
  */
 public class AutoUpdater {
     
@@ -33,14 +54,50 @@ public class AutoUpdater {
     private UpdateInfo latestUpdate;
     private UpdateCheckCallback callback;
     
+    /**
+     * Callback interface for update check events.
+     *
+     * <p>Implementations receive notifications about update availability,
+     * download progress, and installation status.</p>
+     */
     public interface UpdateCheckCallback {
+        /**
+         * Called when an update is available.
+         *
+         * @param update the {@link UpdateInfo} describing the available update
+         */
         void onUpdateAvailable(UpdateInfo update);
+        
+        /**
+         * Called when no update is available (current version is up to date).
+         */
         void onNoUpdateAvailable();
+        
+        /**
+         * Called when the update check fails.
+         *
+         * @param error a description of the error
+         */
         void onCheckFailed(String error);
+        
+        /**
+         * Called periodically during download to report progress.
+         *
+         * @param progress the download progress as a fraction of total (0.0 to 1.0)
+         */
         void onDownloadProgress(double progress);
+        
+        /**
+         * Called when the update has been successfully installed.
+         */
         void onUpdateInstalled();
     }
     
+    /**
+     * Information about an available update.
+     *
+     * <p>This class is deserialized from the update manifest JSON.</p>
+     */
     public static class UpdateInfo {
         public String version;
         public String releaseDate;
@@ -51,10 +108,24 @@ public class AutoUpdater {
         public boolean isCritical;
         public String minimumVersion;
         
+        /**
+         * Compares this version with the current version to check if it is newer.
+         *
+         * @param currentVersion the current version string (e.g., "4.0.0")
+         * @return {@code true} if this version is newer than the current version
+         */
         public boolean isNewerThan(String currentVersion) {
             return compareVersions(version, currentVersion) > 0;
         }
         
+        /**
+         * Compares two version strings in semantic version format.
+         *
+         * @param v1 the first version string
+         * @param v2 the second version string
+         * @return a negative integer if v1 is less than v2,
+         *         zero if equal, or a positive integer if v1 is greater
+         */
         private int compareVersions(String v1, String v2) {
             String[] parts1 = v1.split("\\.");
             String[] parts2 = v2.split("\\.");
@@ -68,12 +139,29 @@ public class AutoUpdater {
         }
     }
     
+    /**
+     * Sets the callback for update events.
+     *
+     * @param callback the callback to receive update events
+     */
     public void setCallback(UpdateCheckCallback callback) {
         this.callback = callback;
     }
     
     /**
-     * Check for updates - with local fallback when server is unavailable.
+     * Checks for updates asynchronously.
+     *
+     * <p>This method:
+     * <ol>
+     *   <li>Fetches the remote manifest from the update server</li>
+     *   <li>If the server is unavailable, checks a local version file</li>
+     *   <li>Compares the latest version with the current version</li>
+     *   <li>Notifies the callback with the result</li>
+     * </ol>
+     *
+     * @param currentVersion the current application version string
+     * @return a {@link CompletableFuture} containing the update info,
+     *         or {@code null} if no update is available
      */
     public CompletableFuture<UpdateInfo> checkForUpdates(String currentVersion) {
         return CompletableFuture.supplyAsync(() -> {
@@ -117,7 +205,20 @@ public class AutoUpdater {
     }
     
     /**
-     * Download and install the update.
+     * Downloads and installs the update asynchronously.
+     *
+     * <p>This method:
+     * <ol>
+     *   <li>Downloads the update file from the specified URL</li>
+     *   <li>Reports download progress via the callback</li>
+     *   <li>Verifies the checksum if provided</li>
+     *   <li>Installs the update by replacing the current JAR</li>
+     *   <li>Creates a backup of the current version</li>
+     * </ol>
+     *
+     * @param update the {@link UpdateInfo} describing the update to install
+     * @return a {@link CompletableFuture} containing {@code true} if successful,
+     *         or {@code false} if installation failed
      */
     public CompletableFuture<Boolean> downloadAndInstallUpdate(UpdateInfo update) {
         return CompletableFuture.supplyAsync(() -> {
@@ -181,7 +282,18 @@ public class AutoUpdater {
     }
     
     /**
-     * Install the update by replacing the current JAR.
+     * Installs the update by replacing the current JAR.
+     *
+     * <p>This method:
+     * <ol>
+     *   <li>Locates the current JAR file</li>
+     *   <li>Creates a backup with a {@code .bak} extension</li>
+     *   <li>Replaces the current JAR with the downloaded update</li>
+     *   <li>Creates a restart flag for the next startup</li>
+     * </ol>
+     *
+     * @param downloadedFile the path to the downloaded update file
+     * @throws IOException if the installation fails
      */
     private void installUpdate(Path downloadedFile) throws IOException {
         // Get the current JAR location
@@ -206,7 +318,11 @@ public class AutoUpdater {
     }
     
     /**
-     * Calculate SHA-256 checksum of a file.
+     * Calculates the SHA-256 checksum of a file.
+     *
+     * @param file the file to checksum
+     * @return the checksum as a hexadecimal string
+     * @throws Exception if the file cannot be read or the digest algorithm is not available
      */
     private String calculateChecksum(Path file) throws Exception {
         java.security.MessageDigest digest = 
@@ -227,7 +343,11 @@ public class AutoUpdater {
     }
     
     /**
-     * Check if a restart is needed after update.
+     * Checks whether a restart is needed after an update.
+     *
+     * <p>This method checks for a restart flag file and deletes it if found.</p>
+     *
+     * @return {@code true} if a restart is needed
      */
     public static boolean isRestartRequired() {
         try {
@@ -244,7 +364,14 @@ public class AutoUpdater {
     }
 
     /**
-     * Check a local version file for updates (development fallback).
+     * Checks a local version file for updates (development fallback).
+     *
+     * <p>This method is used when the remote server is unavailable,
+     * allowing development/testing without a network connection.</p>
+     *
+     * @param currentVersion the current application version
+     * @return an {@link UpdateInfo} if a newer version is available locally,
+     *         or {@code null} otherwise
      */
     private UpdateInfo checkLocalVersionFile(String currentVersion) {
         try {
@@ -263,6 +390,13 @@ public class AutoUpdater {
         return null;
     }
 
+    /**
+     * Processes the update result and notifies the callback.
+     *
+     * @param update the update information
+     * @param currentVersion the current application version
+     * @return the update info if an update is available, or {@code null} otherwise
+     */
     private UpdateInfo processUpdateResult(UpdateInfo update, String currentVersion) {
         if (update.isNewerThan(currentVersion)) {
             LOGGER.info("Update available: {} (current: {})", update.version, currentVersion);

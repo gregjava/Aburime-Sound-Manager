@@ -1122,11 +1122,27 @@ public class TimeLeftEstimator {
     }
 
     /**
-     * Get learned pattern count (called from BatchProcessor)
-     */
-    public int getLearnedPatternCount() {
-        return getProcessCountWithData();
-    }
+    * Get learned pattern count - returns the number of processes with real learned data.
+    * Excludes placeholder samples (fileSizeMB=0) used for persistence.
+    */
+   public int getLearnedPatternCount() {
+       return (int) processTimingData.values().stream()
+               .filter(data -> {
+                   // Check if there are any real samples (fileSizeMB > 0.1)
+                   return data.historicalSamples.stream()
+                           .anyMatch(sample -> sample.fileSizeMB > 0.1);
+               })
+               .count();
+   }
+   
+   /**
+    * Get the current speed multiplier.
+    * Values > 1.0 mean the system is faster than expected,
+    * Values < 1.0 mean the system is slower than expected.
+    */
+   public double getSpeedMultiplier() {
+       return currentSpeedMultiplier;
+   }
 
     /**
      * Clear learned data (called from BatchProcessor)

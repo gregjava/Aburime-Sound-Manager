@@ -14,23 +14,54 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * Writes ID3 tags to audio files after transcription.
- * This is a lightweight implementation that creates a sidecar file
- * with metadata, as the project currently has no MP3 tagging library.
+ * Writes ID3 tags and metadata to audio files after transcription.
+ *
+ * <p>This class provides a lightweight metadata writing implementation that
+ * creates sidecar metadata files (with a {@code .meta} extension) containing
+ * information about the transcription. This approach is used because the
+ * project currently has no MP3 tagging library dependency.</p>
+ *
+ * <p><b>Metadata written:</b>
+ * <ul>
+ *   <li>File name</li>
+ *   <li>Title (derived from file name)</li>
+ *   <li>Artist (default: "AudioManager")</li>
+ *   <li>Album (default: "Transcriptions")</li>
+ *   <li>Language (from transcription result)</li>
+ *   <li>Date of generation</li>
+ *   <li>Software version</li>
+ * </ul>
+ *
+ * <p><b>Future enhancement:</b> When a proper ID3 library (e.g., jaudiotagger)
+ * is added to the project, this class can be extended to write actual
+ * ID3 tags into audio files directly.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see TranscriptionResult
  */
 public class ID3TagWriter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ID3TagWriter.class);
 
     /**
-     * Write ID3 tags to an audio file.
-     * Since we don't have a proper ID3 library, this creates a sidecar
-     * metadata file (.meta) that can be read by audio players.
+     * Writes ID3 tags to an audio file as a sidecar metadata file.
+     *
+     * <p>Since a proper ID3 library is not available, this method creates
+     * a sidecar metadata file ({@code .meta}) that can be read by audio
+     * players or used for reference.</p>
+     *
+     * @param audioFile the audio file to tag
+     * @param title the title of the audio (may be {@code null})
+     * @param artist the artist name (may be {@code null})
+     * @param album the album name (may be {@code null})
+     * @param language the language code (may be {@code null})
+     * @throws IOException if the metadata file cannot be written
      */
-    public static void writeTags(File audioFile, String title, String artist, 
+    public static void writeTags(File audioFile, String title, String artist,
                                   String album, String language) throws IOException {
         Path metaPath = Paths.get(audioFile.getAbsolutePath() + ".meta");
-        
+
         StringBuilder content = new StringBuilder();
         content.append("[ID3 Metadata]\n");
         content.append("File: ").append(audioFile.getName()).append("\n");
@@ -47,10 +78,17 @@ public class ID3TagWriter {
     }
 
     /**
-     * Write tags from a TranscriptionResult.
+     * Writes metadata from a transcription result to an audio file.
+     *
+     * <p>This convenience method extracts the title from the audio file name
+     * and the language from the transcription result.</p>
+     *
+     * @param audioFile the audio file to tag
+     * @param result the transcription result containing language information
+     * @throws IOException if the metadata file cannot be written
      */
-    public static void writeTagsFromTranscription(File audioFile, 
-                                                   audiomanager.model.TranscriptionResult result) 
+    public static void writeTagsFromTranscription(File audioFile,
+                                                   audiomanager.model.TranscriptionResult result)
             throws IOException {
         String title = audioFile.getName().replaceFirst("\\.[^.]+$", "");
         String artist = "AudioManager";

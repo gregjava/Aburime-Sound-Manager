@@ -21,11 +21,25 @@ import java.util.regex.Pattern;
 /**
  * Handles audio file processing using FFmpeg.
  *
+ * <p>This class provides comprehensive audio processing capabilities including:
+ * <ul>
+ *   <li>Conversion to Whisper-compatible WAV format (16kHz, mono, 16-bit PCM)</li>
+ *   <li>Volume analysis and optimization with dynamic amplification</li>
+ *   <li>Audio filtering (noise reduction, silence removal, loudness normalization)</li>
+ *   <li>Duration probing using FFprobe</li>
+ *   <li>Progress reporting during long-running operations</li>
+ * </ul>
+ *
  * <p><b>Thread-safety note:</b> Each call to {@link #processAudioToWav} or
  * {@link #processAudioWithVolumeOptimization} is fully stateless — audio
- * duration is returned from the method rather than cached as a field, so the
- * same {@code AudioProcessor} instance can be safely shared across parallel
- * worker threads.</p>
+ * duration is returned via the {@link ProcessingResult} wrapper rather than
+ * cached as a field. The same {@code AudioProcessor} instance can therefore
+ * be safely shared across parallel worker threads without synchronization.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ProcessingResult
+ * @see VolumeAnalysis
  */
 public class AudioProcessor {
 
@@ -36,6 +50,12 @@ public class AudioProcessor {
     private final DependencyManager dependencyManager;
     private ErrorReporter errorReporter;
 
+    /**
+     * Constructs a new AudioProcessor with the specified dependencies.
+     *
+     * @param dependencyManager the dependency manager for resolving FFmpeg/FFprobe paths
+     * @param errorReporter the error reporter for logging and reporting errors; may be {@code null}
+     */
     public AudioProcessor(DependencyManager dependencyManager, ErrorReporter errorReporter) {
         this.dependencyManager = dependencyManager;
         this.errorReporter = errorReporter;
@@ -46,17 +66,21 @@ public class AudioProcessor {
     // =========================================================================
 
     /**
-     * Convert {@code inputFile} to 16 kHz / mono / PCM-s16le WAV suitable for
-     * Whisper.  The audio duration (seconds) is returned via the
-     * {@link ProcessingResult} wrapper so that callers running in parallel
-     * threads do not share any mutable state.
+     * Converts an audio file to Whisper-compatible WAV format (16 kHz, mono, PCM-s16le).
      *
-     * @param inputFile        source audio file
-     * @param config           processing configuration
-     * @param progressCallback optional progress listener (may be {@code null})
-     * @return a {@link ProcessingResult} containing the temp WAV path and the
-     *         measured audio duration in seconds
-     * @throws Exception on FFmpeg failure or interruption
+     * <p>This method performs the following operations:
+     * <ol>
+     *   <li>Probes the audio duration using FFprobe</li>
+     *   <li>If the input is already a WAV file, copies it to a temp location</li>
+     *   <li>Otherwise, converts using FFmpeg with the configured audio filters</li>
+     *   <li>Reports progress via the provided callback</li>
+     * </ol>
+     *
+     * @param inputFile        the source audio file to process
+     * @param config           the processing configuration (filters, sample rate, etc.)
+     * @param progressCallback optional progress listener; may be {@code null}
+     * @return a {@link ProcessingResult} containing the temporary WAV path and audio duration
+     * @throws Exception if FFmpeg fails or the operation is interrupted
      */
     public ProcessingResult processAudioToWav(File inputFile,
                                               ProcessingConfig config,
@@ -95,8 +119,16 @@ public class AudioProcessor {
     }
 
     /**
-     * Convert to final user-selected format.  Returns the output file and the
-     * measured audio duration.
+     * Converts an audio file to the user's selected final format (MP3, OGG, etc.).
+     *
+     * <p>This method applies the final conversion with the specified output format,
+     * bitrate, and volume settings from the configuration.</p>
+     *
+     * @param inputFile        the source audio file
+     * @param config           the processing configuration (output format, bitrate, etc.)
+     * @param progressCallback optional progress listener; may be {@code null}
+     * @return a {@link ProcessingResult} containing the output file path and audio duration
+     * @throws Exception if FFmpeg fails or the operation is interrupted
      */
     public ProcessingResult processAudioToFinal(File inputFile,
                                                 ProcessingConfig config,
@@ -118,15 +150,19 @@ public class AudioProcessor {
     }
 
     /**
-     * Probe the exact playback duration of {@code inputFile} using
-     * <em>FFprobe</em> (not FFmpeg).
+     * Probes the exact playback duration of an audio file using FFprobe.
      *
-     * @param inputFile audio file to measure
-     * @return duration in seconds, or {@code 0.0} if the probe fails
+     * <p>This method uses FFprobe (not FFmpeg) to extract the duration metadata
+     * from the audio file, providing accurate duration information.</p>
+     *
+     * @param inputFile the audio file to measure
+     * @return the duration in seconds, or {@code 0.0} if the probe fails
+     * @throws IOException if the FFprobe process cannot be started
+     * @throws InterruptedException if the process is interrupted
      */
     public double getDurationForFile(File inputFile) throws IOException, InterruptedException {
         List<String> command = Arrays.asList(
-                dependencyManager.getFFprobePath(),   // FIX: was incorrectly using getFFmpegPath()
+                dependencyManager.getFFprobePath(),
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
@@ -147,8 +183,21 @@ public class AudioProcessor {
     }
 
     /**
-     * Two-pass volume optimisation: convert → analyse → conditionally amplify.
-     * Returns the path to the (possibly amplified) WAV and the audio duration.
+     * Performs two-pass volume optimisation: convert → analyse → conditionally amplify.
+     *
+     * <p>This method:
+     * <ol>
+     *   <li>Converts the audio to WAV format</li>
+     *   <li>Analyses volume levels using FFmpeg's volumedetect</li>
+     *   <li>Applies amplification if needed based on the analysis</li>
+     *   <li>Returns the path to the (possibly amplified) WAV file</li>
+     * </ol>
+     *
+     * @param inputFile        the source audio file
+     * @param config           the processing configuration
+     * @param progressCallback optional progress listener; may be {@code null}
+     * @return a {@link ProcessingResult} containing the processed WAV path and audio duration
+     * @throws Exception if any processing step fails
      */
     public ProcessingResult processAudioWithVolumeOptimization(File inputFile,
                                                                ProcessingConfig config,
@@ -177,13 +226,11 @@ public class AudioProcessor {
 
         String audioToProcess = wavFile;
         if (analysis.needsAmplification()) {
-            // FIX: was using Python-style {:.1f} format in logger call — now uses SLF4J {}
             LOGGER.info("Amplifying audio by {}dB…",
                     String.format("%.1f", analysis.getRecommendedGain()));
             if (progressCallback != null) progressCallback.updateProgress(0.6);
             audioToProcess = amplifyAudio(wavFile, analysis.getRecommendedGain());
             VolumeAnalysis postAnalysis = analyzeVolume(audioToProcess);
-            // FIX: was using Python-style {:.1f}
             LOGGER.info("Post-amplification max volume: {}dB",
                     String.format("%.1f", postAnalysis.getMaxVolume()));
         }
@@ -193,13 +240,15 @@ public class AudioProcessor {
     }
 
     /**
-     * Analyse volume statistics using {@code ffmpeg -af volumedetect}.
+     * Analyses volume statistics using FFmpeg's {@code volumedetect} filter.
      *
-     * FIX: previously threw a generic {@code IOException} on FFmpeg failure,
-     * forcing every caller (see {@code MainWindow.analyzeSelectedFileVolume})
-     * to catch a bare {@code Exception} with no way to distinguish "FFmpeg
-     * rejected this file" from any other failure. Now throws
-     * {@link FfmpegException}, carrying the real exit code and stderr tail.
+     * <p>This method runs FFmpeg with the volumedetect audio filter and parses
+     * the output to extract max, mean, and min volume levels in decibels.</p>
+     *
+     * @param audioFilePath the path to the audio file to analyse
+     * @return a {@link VolumeAnalysis} object containing the volume statistics
+     * @throws FfmpegException if FFmpeg fails (exit code non-zero or command timeout)
+     * @throws IllegalArgumentException if the audio file does not exist
      */
     public VolumeAnalysis analyzeVolume(String audioFilePath) throws FfmpegException {
         File inputFile = new File(audioFilePath);
@@ -238,11 +287,16 @@ public class AudioProcessor {
     }
 
     /**
-     * Apply a fixed gain (dB) using FFmpeg and return the path to the
-     * amplified file.
+     * Applies a fixed gain (dB) to an audio file using FFmpeg.
      *
-     * FIX: same change as {@link #analyzeVolume} — throws {@link FfmpegException}
-     * instead of a generic {@code IOException}/{@code Exception}.
+     * <p>This method amplifies the audio by the specified gain and returns
+     * the path to the amplified file. The output is saved as a WAV file
+     * with the suffix "_amplified".</p>
+     *
+     * @param inputFilePath the path to the audio file to amplify
+     * @param gainDb the gain in decibels to apply (positive values amplify)
+     * @return the path to the amplified audio file
+     * @throws FfmpegException if FFmpeg fails (exit code non-zero or command timeout)
      */
     public String amplifyAudio(String inputFilePath, double gainDb) throws FfmpegException {
         LOGGER.info("Amplifying audio by {}dB: {}", gainDb, inputFilePath);
@@ -282,12 +336,22 @@ public class AudioProcessor {
         return outputPath.toString();
     }
 
-    /** Last ~500 chars of FFmpeg output, for a "show details" expander — avoids dumping a huge log into a dialog. */
+    /**
+     * Returns the last ~500 characters of FFmpeg output for display in error dialogs.
+     *
+     * @param s the full output string
+     * @return the last 500 characters, prefixed with "..." if truncated
+     */
     private String tail(String s) {
         return s.length() > 500 ? "..." + s.substring(s.length() - 500) : s;
     }
 
-    /** Format a {@link VolumeAnalysis} for human-readable display. */
+    /**
+     * Formats a {@link VolumeAnalysis} for human-readable display.
+     *
+     * @param analysis the volume analysis to format
+     * @return a formatted string containing the analysis results and recommendations
+     */
     public String formatVolumeAnalysis(VolumeAnalysis analysis) {
         return String.format(
                 "%n📊 Audio Volume Analysis:%n"
@@ -309,10 +373,24 @@ public class AudioProcessor {
     //  Private helpers
     // =========================================================================
 
+    /**
+     * Checks if the input file is already a WAV file based on its extension.
+     *
+     * @param file the file to check
+     * @return {@code true} if the file has a ".wav" extension (case-insensitive)
+     */
     private boolean isAlreadyWav(File file) {
         return file.getName().toLowerCase().endsWith(".wav");
     }
 
+    /**
+     * Builds the FFmpeg command for converting audio to Whisper-compatible WAV.
+     *
+     * @param input the input file
+     * @param output the output file
+     * @param config the processing configuration
+     * @return a list of command arguments for FFmpeg
+     */
     private List<String> buildWavConversionCommand(File input, File output, ProcessingConfig config) {
         List<String> command = new ArrayList<>();
         command.add(dependencyManager.getFFmpegPath());
@@ -337,6 +415,14 @@ public class AudioProcessor {
         return command;
     }
 
+    /**
+     * Builds the FFmpeg command for converting audio to the user's final format.
+     *
+     * @param input the input file
+     * @param output the output file
+     * @param config the processing configuration
+     * @return a list of command arguments for FFmpeg
+     */
     private List<String> buildFinalConversionCommand(File input, File output, ProcessingConfig config) {
         List<String> command = new ArrayList<>();
         command.add(dependencyManager.getFFmpegPath());
@@ -358,18 +444,18 @@ public class AudioProcessor {
     }
 
     /**
-     * Build the FFmpeg audio filter chain.
+     * Builds the FFmpeg audio filter chain from the processing configuration.
      *
-     * <p>Key fixes vs. original:</p>
+     * <p>Supported filters:
      * <ul>
-     *   <li>Noise reduction now uses {@code afftdn} (actual spectral denoiser,
-     *       available since FFmpeg 4.0) with a version-gated fallback to the
-     *       old bandpass chain.  The bandpass chain ({@code highpass,lowpass})
-     *       was not noise reduction — it was frequency restriction.</li>
-     *   <li>{@code loudnorm} and {@code volume} are now mutually exclusive:
-     *       when normalisation is enabled the {@code volume} boost is skipped
-     *       to prevent double-gain and clipping.</li>
+     *   <li><b>Silence removal:</b> {@code silenceremove} with configurable threshold</li>
+     *   <li><b>Noise reduction:</b> {@code afftdn} (FFmpeg ≥ 4.0) or bandpass fallback</li>
+     *   <li><b>Loudness normalization:</b> {@code loudnorm} targeting -16 LUFS</li>
+     *   <li><b>Volume boost:</b> {@code volume} gain (only when normalization is disabled)</li>
      * </ul>
+     *
+     * @param config the processing configuration
+     * @return a comma-separated filter string, or an empty string if no filters are configured
      */
     private String buildAudioFilter(ProcessingConfig config) {
         List<String> filters = new ArrayList<>();
@@ -381,8 +467,6 @@ public class AudioProcessor {
         }
 
         if (config.isNoiseReduction()) {
-            // FIX: use real spectral denoiser (afftdn) when FFmpeg >= 4.0;
-            // fall back to bandpass only on ancient builds.
             if (getFfmpegMajorVersion() >= 4) {
                 filters.add("afftdn=nf=-25");
             } else {
@@ -391,11 +475,9 @@ public class AudioProcessor {
             }
         }
 
-        // FIX: loudnorm and volume are mutually exclusive — applying both
-        // double-processes gain and can clip the output.
+        // loudnorm and volume are mutually exclusive — applying both double-processes gain
         if (config.isNormalize()) {
             filters.add("loudnorm=I=-16:TP=-1.5:LRA=11");
-            // Skip the volume boost; loudnorm already targets -16 LUFS.
         } else if (config.getVolumeBoost() > 0) {
             filters.add(String.format(Locale.US, "volume=%.1fdB", config.getVolumeBoost()));
         }
@@ -404,10 +486,12 @@ public class AudioProcessor {
     }
 
     /**
-     * Lazy-resolve and cache the FFmpeg major version number.
+     * Lazy-resolves and caches the FFmpeg major version number.
      *
-     * <p>FIX: original code did a literal string search for {@code "ffmpeg
-     * version 4."} which returns {@code false} for v5, v6, v7, etc.</p>
+     * <p>This method runs {@code ffmpeg -version} once and caches the result
+     * for subsequent calls.</p>
+     *
+     * @return the FFmpeg major version number, or {@code 0} if it cannot be determined
      */
     private int getFfmpegMajorVersion() {
         if (cachedFfmpegMajor >= 0) return cachedFfmpegMajor;
@@ -415,7 +499,6 @@ public class AudioProcessor {
             List<String> cmd = Arrays.asList(dependencyManager.getFFmpegPath(), "-version");
             String out = ProcessRunner.readCommandOutput(cmd, 10, TimeUnit.SECONDS);
             if (out != null) {
-                // e.g. "ffmpeg version 6.1.1 ..."
                 Matcher m = Pattern.compile("ffmpeg version (\\d+)").matcher(out);
                 if (m.find()) {
                     cachedFfmpegMajor = Integer.parseInt(m.group(1));
@@ -431,16 +514,15 @@ public class AudioProcessor {
     }
 
     /**
-     * Run an FFmpeg command and report progress via {@code callback}.
+     * Executes an FFmpeg command with progress reporting and timeout handling.
      *
-     * <p>Key fixes vs. original:</p>
-     * <ul>
-     *   <li>Progress cap removed — the bar now reaches 1.0 as the process
-     *       finishes instead of stalling at 0.99 before snapping to 100%.</li>
-     *   <li>The {@code InterruptedException} path in the {@code finally} block
-     *       no longer swallows the interrupt flag — {@link Thread#interrupt()}
-     *       is re-set before the method returns.</li>
-     * </ul>
+     * <p>This method parses FFmpeg's stderr output to extract the current
+     * processing time and reports progress to the callback.</p>
+     *
+     * @param command the FFmpeg command to execute
+     * @param callback the progress callback; may be {@code null}
+     * @param duration the total audio duration in seconds for progress calculation
+     * @throws Exception if FFmpeg fails, times out, or the operation is interrupted
      */
     private void executeFFmpegWithProgress(List<String> command,
                                            ProgressCallback callback,
@@ -468,7 +550,6 @@ public class AudioProcessor {
 
                     double currentTime = parseTimeFromFFmpegOutput(line);
                     if (duration > 0 && currentTime > 0 && callback != null) {
-                        // FIX: removed the 0.99 cap so progress can reach 1.0 naturally
                         double progress = Math.min(1.0, currentTime / duration);
                         if (progress - lastProgress > 0.01) {
                             lastProgress = progress;
@@ -482,10 +563,6 @@ public class AudioProcessor {
             if (!exited) {
                 process.destroyForcibly();
                 LOGGER.error("FFmpeg timeout. Output:\n{}", outputLog);
-                // FIX: matches analyzeVolume()/amplifyAudio() — a timeout is
-                // still an FfmpegException (recoverable: skip this file,
-                // don't abort the whole batch), not a raw TimeoutException
-                // the caller has no FFmpeg-specific context to act on.
                 throw new FfmpegException(
                         "FFmpeg process timed out after " + AppConstants.FFMPEG_TIMEOUT_HOURS + "h",
                         "Processing this file is taking far longer than expected and was stopped. "
@@ -520,14 +597,18 @@ public class AudioProcessor {
                     interrupted = true;
                 }
             }
-            // FIX: restore the interrupt flag if we consumed it above
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
     }
 
-    /** Parse {@code time=HH:MM:SS.ms} from an FFmpeg stderr line. */
+    /**
+     * Parses the {@code time=HH:MM:SS.ms} string from an FFmpeg stderr line.
+     *
+     * @param line the FFmpeg output line to parse
+     * @return the time in seconds, or {@code 0.0} if the line does not contain a valid time
+     */
     static double parseTimeFromFFmpegOutput(String line) {
         int timeIndex = line.indexOf("time=");
         if (timeIndex == -1) return 0.0;
@@ -546,6 +627,12 @@ public class AudioProcessor {
         return 0.0;
     }
 
+    /**
+     * Parses FFmpeg volumedetect output into a {@link VolumeAnalysis} object.
+     *
+     * @param ffmpegOutput the FFmpeg output containing volumedetect results
+     * @return a {@link VolumeAnalysis} object with the parsed statistics
+     */
     private VolumeAnalysis parseVolumeAnalysis(String ffmpegOutput) {
         Pattern maxPat = Pattern.compile("max_volume: ([\\-\\d.]+) dB");
         Pattern meanPat = Pattern.compile("mean_volume: ([\\-\\d.]+) dB");
@@ -559,6 +646,14 @@ public class AudioProcessor {
         return new VolumeAnalysis(maxVol, avgVol, minVol);
     }
 
+    /**
+     * Parses a pattern from text and returns the first matching value.
+     *
+     * @param pattern the pattern to match
+     * @param text the text to search
+     * @param defaultValue the default value if the pattern is not found
+     * @return the parsed value or the default value
+     */
     private double parseFirst(Pattern pattern, String text, double defaultValue) {
         Matcher m = pattern.matcher(text);
         if (m.find()) {
@@ -567,6 +662,14 @@ public class AudioProcessor {
         return defaultValue;
     }
 
+    /**
+     * Generates a unique file path by appending a counter if the file already exists.
+     *
+     * @param dir the target directory
+     * @param baseName the base file name without extension
+     * @param extension the file extension including the dot
+     * @return a unique path that does not already exist
+     */
     private Path generateUniqueFilePath(Path dir, String baseName, String extension) {
         Path path = dir.resolve(baseName + extension);
         int counter = 1;
@@ -576,6 +679,12 @@ public class AudioProcessor {
         return path;
     }
 
+    /**
+     * Extracts the file name without its extension.
+     *
+     * @param fileName the full file name
+     * @return the file name without the extension
+     */
     private String getFileNameWithoutExtension(String fileName) {
         int lastDot = fileName.lastIndexOf('.');
         return lastDot > 0 ? fileName.substring(0, lastDot) : fileName;
@@ -586,24 +695,39 @@ public class AudioProcessor {
     // =========================================================================
 
     /**
-     * Immutable result returned by processing methods.  Replaces the old
-     * {@code audioDurationSeconds} instance field, eliminating the data race
-     * that occurred when multiple worker threads called
-     * {@link #processAudioToWav} concurrently on the same instance.
+     * Immutable result returned by audio processing methods.
+     *
+     * <p>This class replaces the old {@code audioDurationSeconds} instance field,
+     * eliminating the data race that occurred when multiple worker threads called
+     * {@link #processAudioToWav} concurrently on the same instance.</p>
      */
     public static final class ProcessingResult {
         private final String outputPath;
         private final double audioDurationSeconds;
 
+        /**
+         * Constructs a new processing result.
+         *
+         * @param outputPath the absolute path of the output file
+         * @param audioDurationSeconds the duration of the audio in seconds
+         */
         public ProcessingResult(String outputPath, double audioDurationSeconds) {
             this.outputPath = outputPath;
             this.audioDurationSeconds = audioDurationSeconds;
         }
 
-        /** Absolute path of the output (temp WAV or final format) file. */
+        /**
+         * Returns the absolute path of the output file.
+         *
+         * @return the output file path
+         */
         public String getOutputPath() { return outputPath; }
 
-        /** Duration of the audio in seconds, as measured by FFprobe. */
+        /**
+         * Returns the duration of the audio in seconds.
+         *
+         * @return the audio duration in seconds
+         */
         public double getAudioDurationSeconds() { return audioDurationSeconds; }
     }
 
@@ -611,13 +735,34 @@ public class AudioProcessor {
     //  Callbacks
     // =========================================================================
 
-    /** Callback for coarse-grained progress updates (value in [0, 1]). */
+    /**
+     * Callback for coarse-grained progress updates.
+     *
+     * <p>Implementations should update the UI or other progress consumers
+     * with the provided progress value (in the range [0, 1]).</p>
+     */
     public interface ProgressCallback {
+        /**
+         * Called to report progress of an ongoing operation.
+         *
+         * @param progress the current progress value, between 0.0 and 1.0 inclusive
+         */
         void updateProgress(double progress);
     }
 
-    /** Extended callback that also receives stage-start notifications. */
+    /**
+     * Extended callback that also receives stage-start notifications.
+     *
+     * <p>This interface adds the ability to notify consumers when a new
+     * processing stage begins, along with an estimated duration.</p>
+     */
     public interface StageAwareCallback extends ProgressCallback {
+        /**
+         * Called when a new processing stage begins.
+         *
+         * @param stageName the name of the stage (e.g., "Conversion", "Transcription")
+         * @param estimatedDurationSeconds the estimated duration of this stage in seconds
+         */
         void onStageStart(String stageName, double estimatedDurationSeconds);
     }
 
@@ -627,6 +772,9 @@ public class AudioProcessor {
 
     /**
      * Holds FFmpeg volumedetect results and derives the recommended gain.
+     *
+     * <p>This class analyses volume statistics and determines whether amplification
+     * is needed based on configurable thresholds.</p>
      */
     public static final class VolumeAnalysis {
         private static final double TARGET_MAX_DB      = -1.0;
@@ -642,6 +790,13 @@ public class AudioProcessor {
         private final boolean needsAmplification;
         private final String recommendation;
 
+        /**
+         * Constructs a new volume analysis from FFmpeg volumedetect results.
+         *
+         * @param maxVolume the maximum volume in dB
+         * @param avgVolume the average (RMS) volume in dB
+         * @param minVolume the minimum volume in dB
+         */
         public VolumeAnalysis(double maxVolume, double avgVolume, double minVolume) {
             this.maxVolume    = maxVolume;
             this.avgVolume    = avgVolume;
@@ -674,13 +829,60 @@ public class AudioProcessor {
             this.recommendation      = rec;
         }
 
+        /**
+         * Returns the maximum volume in dB.
+         *
+         * @return the maximum volume
+         */
         public double getMaxVolume()        { return maxVolume; }
+
+        /**
+         * Returns the average (RMS) volume in dB.
+         *
+         * @return the average volume
+         */
         public double getAvgVolume()        { return avgVolume; }
+
+        /**
+         * Returns the minimum volume in dB.
+         *
+         * @return the minimum volume
+         */
         public double getMinVolume()        { return minVolume; }
+
+        /**
+         * Returns the dynamic range in dB (max - min).
+         *
+         * @return the dynamic range
+         */
         public double getDynamicRange()     { return dynamicRange; }
+
+        /**
+         * Returns the recommended gain in dB.
+         *
+         * @return the recommended gain
+         */
         public double getRecommendedGain()  { return recommendedGain; }
+
+        /**
+         * Indicates whether amplification is needed.
+         *
+         * @return {@code true} if amplification is recommended
+         */
         public boolean needsAmplification() { return needsAmplification; }
+
+        /**
+         * Returns the recommendation text.
+         *
+         * @return a human-readable recommendation
+         */
         public String getRecommendation()   { return recommendation; }
+
+        /**
+         * Returns the amplification factor (linear, not dB).
+         *
+         * @return the amplification factor
+         */
         public double getAmplificationFactor() { return Math.pow(10, recommendedGain / 20.0); }
 
         @Override

@@ -20,23 +20,55 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
+/**
+ * Manages model caching, verification, and download tracking for WhisperX models.
+ *
+ * <p>This class provides comprehensive model management for the application,
+ * including:
+ * <ul>
+ *   <li><b>Model caching:</b> Stores models in a platform-appropriate cache directory</li>
+ *   <li><b>Model verification:</b> Validates model integrity using size and hash checking</li>
+ *   <li><b>HuggingFace integration:</b> Finds models in HuggingFace's cache</li>
+ *   <li><b>Resumable downloads:</b> Tracks partial downloads for resumption</li>
+ *   <li><b>Integrity metadata:</b> Persists model verification status across sessions</li>
+ *   <li><b>Cache cleanup:</b> Removes corrupted or outdated model files</li>
+ * </ul>
+ *
+ * <p><b>Cache locations:</b>
+ * <ul>
+ *   <li>Windows: {@code %LOCALAPPDATA%\AudioManager\models}</li>
+ *   <li>macOS: {@code ~/Library/Caches/AudioManager/models}</li>
+ *   <li>Linux: {@code ~/.cache/audiomanager/models}</li>
+ * </ul>
+ *
+ * <p><b>Model metadata:</b> Model integrity information is stored in
+ * {@code model_integrity.json} within the cache directory.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see HuggingFaceCacheResolver
+ * @see PartialDownloadProgress
+ */
 public class ModelManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(ModelManager.class);
-    
+
     private final Path cacheDir;
     private final Path modelIntegrityFile;
     private final Map<String, ModelMetadata> modelMetadata;
     private final Set<String> verifiedModels;
     private final Gson gson;
-    
+
+    /**
+     * Internal model metadata structure for persistence.
+     */
     private static class ModelMetadata {
         String modelName;
         String expectedHash;
         long expectedSize;
         boolean verified;
         long lastVerified;
-        String modelType; // "whisper" or "whisperx" or "pyannote"
-        
+        String modelType;
+
         ModelMetadata(String modelName, String expectedHash, long expectedSize, String modelType) {
             this.modelName = modelName;
             this.expectedHash = expectedHash;
@@ -46,30 +78,37 @@ public class ModelManager {
             this.modelType = modelType;
         }
     }
-    
+
+    /**
+     * Constructs a new ModelManager and initialises the cache directory.
+     */
     public ModelManager() {
         this.gson = new Gson();
         this.cacheDir = getStableCacheDir();
         this.modelIntegrityFile = cacheDir.resolve("model_integrity.json");
         this.modelMetadata = Collections.synchronizedMap(new HashMap<>());
         this.verifiedModels = Collections.newSetFromMap(new ConcurrentHashMap<>());
-        
+
         try {
             Files.createDirectories(cacheDir);
             LOGGER.info("Model cache directory: {}", cacheDir.toAbsolutePath());
-            
+
             // Load existing metadata
             loadModelMetadata();
         } catch (IOException e) {
             LOGGER.error("Failed to create cache directory", e);
         }
     }
-    
+
+    /**
+     * Returns the platform-appropriate cache directory.
+     *
+     * @return the cache directory path
+     */
     public Path getStableCacheDir() {
-        // Use system-appropriate cache directory
         String os = System.getProperty("os.name").toLowerCase();
         Path baseCacheDir;
-        
+
         if (os.contains("win")) {
             baseCacheDir = Paths.get(System.getenv("LOCALAPPDATA"), "AudioManager", "models");
         } else if (os.contains("mac")) {
@@ -77,53 +116,28 @@ public class ModelManager {
         } else {
             baseCacheDir = Paths.get(System.getProperty("user.home"), ".cache", "audiomanager", "models");
         }
-        
+
         return baseCacheDir;
     }
-    
+
+    // ========================================================================
+    //  Model Validation
+    // ========================================================================
+
     /**
-     * Check if a model exists directly in the main cache directory
-     * (i.e., under cacheDir/modelName), not inside the nested "models" folder.
-     */
-    private boolean isModelInManagedCacheRoot(String modelName, String modelType) {
-        Path modelPath = cacheDir.resolve(modelName);
-        if (Files.exists(modelPath) && Files.isDirectory(modelPath)) {
-            try {
-                long fileCount = Files.list(modelPath)
-                    .filter(Files::isRegularFile)
-                    .count();
-                if (fileCount > 0) {
-                    LOGGER.info("Found model in managed cache root: {}", modelPath);
-                    return true;
-                }
-            } catch (IOException e) {
-                LOGGER.debug("Error checking root cache for {}: {}", modelName, e.getMessage());
-            }
-        }
-        return false;
-    }
-    
-    /**
-     * Get total size of files in the model folder under the root cache.
-     */
-    private long getModelSizeFromManagedCacheRoot(String modelName, String modelType) {
-        Path modelPath = cacheDir.resolve(modelName);
-        if (!Files.exists(modelPath)) return 0;
-        try {
-            return Files.walk(modelPath)
-                .filter(Files::isRegularFile)
-                .mapToLong(p -> {
-                    try { return Files.size(p); } catch (IOException e) { return 0; }
-                })
-                .sum();
-        } catch (IOException e) {
-            LOGGER.warn("Error calculating size for root cache model {}: {}", modelName, e.getMessage());
-            return 0;
-        }
-    }
-    
-    /**
-     * Check if a model exists and is valid in cache
+     * Checks if a model is valid and available in the cache.
+     *
+     * <p>This method checks:
+     * <ol>
+     *   <li>Already verified in metadata</li>
+     *   <li>Integrity verification of cached model</li>
+     *   <li>Presence in HuggingFace cache</li>
+     *   <li>Presence in the managed cache root</li>
+     * </ol>
+     *
+     * @param modelName the model name (e.g., "base", "small")
+     * @param modelType the model type (e.g., "whisper", "whisperx")
+     * @return {@code true} if the model is valid and available
      */
     public boolean isModelValid(String modelName, String modelType) {
         String key = createModelKey(modelName, modelType);
@@ -154,8 +168,6 @@ public class ModelManager {
         // Third check: check if model exists in HuggingFace cache
         if (isModelInHuggingFaceCache(modelName, modelType)) {
             LOGGER.info("✓ Model '{}' found in HuggingFace cache", modelName);
-
-            // Add to our metadata
             long size = getModelSizeFromHuggingFaceCache(modelName, modelType);
             metadata = new ModelMetadata(modelName, null, size, modelType);
             metadata.verified = true;
@@ -163,15 +175,12 @@ public class ModelManager {
             modelMetadata.put(key, metadata);
             verifiedModels.add(key);
             saveModelMetadata();
-
             return true;
         }
 
-        // NEW: Fourth check: check if model exists directly in our managed cache root
+        // Fourth check: check if model exists directly in our managed cache root
         if (isModelInManagedCacheRoot(modelName, modelType)) {
             LOGGER.info("✓ Model '{}' found in managed cache root", modelName);
-
-            // Add metadata for this model so it will be recognised in future runs
             long size = getModelSizeFromManagedCacheRoot(modelName, modelType);
             metadata = new ModelMetadata(modelName, null, size, modelType);
             metadata.verified = true;
@@ -179,119 +188,67 @@ public class ModelManager {
             modelMetadata.put(key, metadata);
             verifiedModels.add(key);
             saveModelMetadata();
-
             return true;
         }
 
-        // If none of the checks succeeded
         LOGGER.debug("Model {} not found in any cache", modelName);
         return false;
     }
 
     /**
-     * FIX: previously three separate hand-rolled implementations of "guess
-     * where HuggingFace put this model" lived in this class, and two of them
-     * (this method and {@code getModelSizeFromHuggingFaceCache}) built
-     * {@code Paths.get(System.getenv("LOCALAPPDATA"), ...)} unconditionally —
-     * {@code LOCALAPPDATA} is {@code null} on Linux/macOS, so
-     * {@code Paths.get(null, ...)} threw an uncaught {@code
-     * NullPointerException} on every non-Windows model lookup that reached
-     * this method. Now delegates to {@link HuggingFaceCacheResolver}, a
-     * single null-safe implementation shared by every lookup path in this
-     * class.
-     */
-    private boolean isModelInHuggingFaceCache(String modelName, String modelType) {
-        return HuggingFaceCacheResolver.resolve(modelName).isPresent();
-    }
-
-    /**
-     * Get model size from HuggingFace cache.
-     * FIX: see {@link #isModelInHuggingFaceCache} — delegates to the shared,
-     * null-safe resolver instead of a duplicated, LOCALAPPDATA-crashing path list.
-     */
-    private long getModelSizeFromHuggingFaceCache(String modelName, String modelType) {
-        return HuggingFaceCacheResolver.sizeOf(modelName);
-    }
-    
-    /**
-     * Check if model exists in cache (even if not verified)
+     * Checks if a model is cached (even if not verified).
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return {@code true} if the model is in the cache
      */
     public boolean isModelCached(String modelName, String modelType) {
         String key = createModelKey(modelName, modelType);
         Path modelPath = getModelCachePath(key);
         return Files.exists(modelPath);
     }
-    
+
     /**
-     * Get the expected size of a model for resumable downloads
+     * Returns the expected size of a model for resumable downloads.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return the expected size in bytes, or {@code -1} if unknown
      */
     public long getModelExpectedSize(String modelName, String modelType) {
         String key = createModelKey(modelName, modelType);
         ModelMetadata metadata = modelMetadata.get(key);
         return metadata != null ? metadata.expectedSize : -1;
     }
-    
+
+    // ========================================================================
+    //  Download Management
+    // ========================================================================
+
     /**
-     * Get the current downloaded size for resumable downloads
-     */
-    public long getCurrentDownloadSize(String modelName, String modelType) {
-        try {
-            // First check our managed cache
-            String key = createModelKey(modelName, modelType);
-            Path modelDir = getModelCachePath(key);
-
-            long totalSize = 0;
-
-            if (Files.exists(modelDir)) {
-                totalSize = Files.walk(modelDir)
-                    .filter(Files::isRegularFile)
-                    .mapToLong(path -> {
-                        try {
-                            return Files.size(path);
-                        } catch (IOException e) {
-                            return 0;
-                        }
-                    })
-                    .sum();
-            }
-
-            // Also check HuggingFace cache and add to total
-            Path hfPath = findModelPath(modelName, modelType);
-            if (hfPath != null && !hfPath.equals(modelDir)) {
-                long hfSize = Files.walk(hfPath)
-                    .filter(Files::isRegularFile)
-                    .mapToLong(path -> {
-                        try {
-                            return Files.size(path);
-                        } catch (IOException e) {
-                            return 0;
-                        }
-                    })
-                    .sum();
-                totalSize += hfSize;
-            }
-
-            return totalSize;
-
-        } catch (IOException e) {
-            return 0;
-        }
-    }
-    
-    /**
-     * Register a model that will be downloaded
+     * Registers a model that will be downloaded.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @param expectedHash the expected SHA-256 hash (may be {@code null})
+     * @param expectedSize the expected size in bytes
      */
     public void registerModel(String modelName, String modelType, String expectedHash, long expectedSize) {
         String key = createModelKey(modelName, modelType);
         ModelMetadata metadata = new ModelMetadata(modelName, expectedHash, expectedSize, modelType);
         modelMetadata.put(key, metadata);
         saveModelMetadata();
-        LOGGER.info("Registered model {} (type: {}) for download. Expected size: {} bytes", 
+        LOGGER.info("Registered model {} (type: {}) for download. Expected size: {} bytes",
                    modelName, modelType, expectedSize);
     }
-    
+
     /**
-     * Update model metadata after successful download
+     * Marks a model as successfully downloaded and verified.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @param actualHash the actual SHA-256 hash (may be {@code null})
+     * @param actualSize the actual size in bytes
      */
     public void markModelDownloaded(String modelName, String modelType, String actualHash, long actualSize) {
         String key = createModelKey(modelName, modelType);
@@ -303,316 +260,9 @@ public class ModelManager {
             metadata.lastVerified = System.currentTimeMillis();
             verifiedModels.add(key);
             saveModelMetadata();
-            LOGGER.info("Model {} (type: {}) marked as successfully downloaded and verified. Size: {} bytes", 
+            LOGGER.info("Model {} (type: {}) marked as successfully downloaded and verified. Size: {} bytes",
                        modelName, modelType, actualSize);
         }
-    }
-    
-    /**
-	 * Set up environment variables for resumable downloads with progress tracking
-	 */
-	public Map<String, String> getResumableDownloadEnv(String modelName, String modelType, Consumer<Double> progressCallback) {
-		Map<String, String> env = new HashMap<>();
-		
-		String key = createModelKey(modelName, modelType);
-		
-		// Check for partial download
-		PartialDownloadProgress partialProgress = getPartialDownloadProgress(modelName, modelType);
-		long currentSize = getCurrentDownloadSize(modelName, modelType);
-		
-		if (partialProgress != null && !partialProgress.isComplete()) {
-			LOGGER.info("Resuming partial download for {}: {}/{} bytes ({:.1f}%)", 
-					   key, partialProgress.getDownloadedBytes(), 
-					   partialProgress.getTotalBytes(),
-					   partialProgress.getPercentage());
-			
-			// Notify progress callback of current progress
-			if (progressCallback != null) {
-				progressCallback.accept(partialProgress.getPercentage());
-			}
-		} else if (currentSize > 0) {
-			LOGGER.info("Found existing download for {}: {} bytes", key, currentSize);
-		}
-		
-		// Set environment variables for resumable download
-		env.put("HF_RESUME_DOWNLOAD", "true");
-		env.put("HF_HUB_RESUME_DOWNLOAD", "true");
-		env.put("WHISPERX_RESUME_DOWNLOAD", "true");
-		env.put("TRANSFORMERS_RESUME_DOWNLOAD", "true");
-		
-		// Always set cache directories
-		env.put("HF_HOME", cacheDir.toString());
-		env.put("TORCH_HOME", cacheDir.toString());
-		env.put("PYANNOTE_CACHE", cacheDir.toString());
-		env.put("PYTHONUTF8", "1");
-		env.put("PYTHONIOENCODING", "UTF-8");
-		env.put("HF_HUB_DISABLE_TELEMETRY", "1");
-		
-		// Add progress tracking
-		env.put("HF_HUB_DISABLE_PROGRESS_BARS", "false"); // Enable for parsing
-		env.put("HF_HUB_SHOW_PROGRESS_BARS", "true");
-		
-		return env;
-	}
-    
-    /**
-     * Verify model integrity using hash checking
-     */
-    private boolean verifyModelIntegrity(String modelKey, ModelMetadata metadata) throws Exception {
-        Path modelDir = getModelCachePath(modelKey);
-        
-        // Check if directory exists
-        if (!Files.exists(modelDir) || !Files.isDirectory(modelDir)) {
-            LOGGER.debug("Model directory does not exist: {}", modelDir);
-            return false;
-        }
-        
-        // Check if we have expected size metadata
-        if (metadata.expectedSize <= 0) {
-            LOGGER.warn("No expected size metadata for model: {}", modelKey);
-            return false;
-        }
-        
-        // Calculate total size
-        long totalSize = Files.walk(modelDir)
-            .filter(Files::isRegularFile)
-            .mapToLong(path -> {
-                try {
-                    return Files.size(path);
-                } catch (IOException e) {
-                    return 0;
-                }
-            })
-            .sum();
-        
-        // Check size match (allow 1% tolerance for compression differences)
-        double sizeTolerance = 0.01;
-        long minSize = (long) (metadata.expectedSize * (1 - sizeTolerance));
-        long maxSize = (long) (metadata.expectedSize * (1 + sizeTolerance));
-        
-        if (totalSize < minSize || totalSize > maxSize) {
-            LOGGER.warn("Model size mismatch for {}: expected {}, got {} (tolerance: {}%)", 
-                       modelKey, metadata.expectedSize, totalSize, (int)(sizeTolerance * 100));
-            return false;
-        }
-        
-        // Calculate hash if we have one
-        if (metadata.expectedHash != null && !metadata.expectedHash.isEmpty()) {
-            String actualHash = calculateModelHash(modelDir);
-            if (!actualHash.equalsIgnoreCase(metadata.expectedHash)) {
-                LOGGER.warn("Model hash mismatch for {}: expected {}, got {}", 
-                           modelKey, metadata.expectedHash, actualHash);
-                return false;
-            }
-        }
-        
-        LOGGER.debug("Model {} integrity check passed", modelKey);
-        return true;
-    }
-    
-    /**
-     * Calculate SHA-256 hash of model directory
-     */
-    private String calculateModelHash(Path modelDir) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        List<Path> files = new ArrayList<>();
-        
-        Files.walk(modelDir)
-            .filter(Files::isRegularFile)
-            .sorted()
-            .forEach(files::add);
-        
-        for (Path file : files) {
-            try (InputStream fis = Files.newInputStream(file)) {
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = fis.read(buffer)) != -1) {
-                    digest.update(buffer, 0, bytesRead);
-                }
-            }
-            // Include file path in hash to detect file structure changes
-            digest.update(file.getFileName().toString().getBytes());
-        }
-        
-        byte[] hashBytes = digest.digest();
-        StringBuilder hexString = new StringBuilder();
-        for (byte b : hashBytes) {
-            hexString.append(String.format("%02x", b));
-        }
-        
-        return hexString.toString();
-    }
-    
-    /**
-     * Clear corrupted cache entries
-     */
-    public void clearCorruptedCache() {
-        LOGGER.info("Clearing corrupted cache entries");
-        
-        List<String> toRemove = new ArrayList<>();
-        for (Map.Entry<String, ModelMetadata> entry : modelMetadata.entrySet()) {
-            String modelKey = entry.getKey();
-            ModelMetadata metadata = entry.getValue();
-            
-            if (!metadata.verified || 
-                (System.currentTimeMillis() - metadata.lastVerified) > 7 * 24 * 60 * 60 * 1000L) {
-                // Not verified or not verified in last 7 days
-                try {
-                    Path modelDir = getModelCachePath(modelKey);
-                    if (Files.exists(modelDir)) {
-                        deleteDirectory(modelDir);
-                        LOGGER.info("Removed potentially corrupted model: {}", modelKey);
-                    }
-                } catch (IOException e) {
-                    LOGGER.warn("Failed to remove model {}: {}", modelKey, e.getMessage());
-                }
-                toRemove.add(modelKey);
-            }
-        }
-        
-        // Remove from metadata
-        toRemove.forEach(modelMetadata::remove);
-        toRemove.forEach(verifiedModels::remove);
-        saveModelMetadata();
-        
-        // Also clear traditional cache directories
-        clearTraditionalCacheDirs();
-    }
-    
-    private void clearTraditionalCacheDirs() {
-        try {
-            Path[] cacheDirs = {
-                Paths.get(System.getProperty("user.home"), ".cache", "whisperx"),
-                Paths.get(System.getProperty("user.home"), ".cache", "torch"),
-                Paths.get(System.getProperty("user.home"), ".cache", "huggingface"),
-                Paths.get(System.getProperty("user.home"), ".cache", "pyannote"),
-                Paths.get(System.getProperty("user.home"), ".cache", "transformers")
-            };
-            
-            for (Path cacheDir : cacheDirs) {
-                if (Files.exists(cacheDir)) {
-                    deleteDirectory(cacheDir);
-                    LOGGER.info("Cleared traditional cache: {}", cacheDir);
-                }
-            }
-        } catch (Exception e) {
-            LOGGER.error("Error clearing traditional cache: {}", e.getMessage());
-        }
-    }
-    
-    /**
-     * Get model cache path
-     */
-    public Path getModelCachePath(String modelKey) {
-        return cacheDir.resolve("models").resolve(modelKey);
-    }
-    
-    /**
-     * Get list of verified models
-     */
-    public List<String> getVerifiedModels() {
-        return new ArrayList<>(verifiedModels);
-    }
-    
-    /**
-     * Helper method to create model key
-     */
-    private String createModelKey(String modelName, String modelType) {
-        return modelType + "_" + modelName.replace("/", "_").replace(":", "_");
-    }
-    
-    /**
-     * Save model metadata to file
-     */
-    private void saveModelMetadata() {
-        try {
-            Map<String, Map<String, Object>> data = new HashMap<>();
-            for (Map.Entry<String, ModelMetadata> entry : modelMetadata.entrySet()) {
-                ModelMetadata metadata = entry.getValue();
-                Map<String, Object> metaMap = new HashMap<>();
-                metaMap.put("expectedHash", metadata.expectedHash);
-                metaMap.put("expectedSize", metadata.expectedSize);
-                metaMap.put("verified", metadata.verified);
-                metaMap.put("lastVerified", metadata.lastVerified);
-                metaMap.put("modelType", metadata.modelType);
-                metaMap.put("modelName", metadata.modelName);
-                data.put(entry.getKey(), metaMap);
-            }
-            
-            String json = gson.toJson(data);
-            Files.writeString(modelIntegrityFile, json, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-            
-        } catch (Exception e) {
-            LOGGER.error("Failed to save model metadata", e);
-        }
-    }
-    
-    /**
-     * Load model metadata from file
-     */
-    private void loadModelMetadata() {
-        if (!Files.exists(modelIntegrityFile)) {
-            LOGGER.info("No existing model metadata found, starting fresh");
-            return;
-        }
-        
-        try {
-            String json = Files.readString(modelIntegrityFile, StandardCharsets.UTF_8);
-            Map<String, Map<String, Object>> data = gson.fromJson(
-                json, 
-                new TypeToken<Map<String, Map<String, Object>>>(){}.getType()
-            );
-            
-            if (data != null) {
-                for (Map.Entry<String, Map<String, Object>> entry : data.entrySet()) {
-                    Map<String, Object> metaMap = entry.getValue();
-                    String modelKey = entry.getKey();
-                    String modelName = (String) metaMap.getOrDefault("modelName", modelKey);
-                    String hash = (String) metaMap.get("expectedHash");
-                    long size = ((Number) metaMap.getOrDefault("expectedSize", 0L)).longValue();
-                    boolean verified = (Boolean) metaMap.getOrDefault("verified", false);
-                    long lastVerified = ((Number) metaMap.getOrDefault("lastVerified", 0L)).longValue();
-                    String modelType = (String) metaMap.getOrDefault("modelType", "whisper");
-                    
-                    ModelMetadata modelMetadataObj = new ModelMetadata(modelName, hash, size, modelType);
-                    modelMetadataObj.verified = verified;
-                    modelMetadataObj.lastVerified = lastVerified;
-                    
-                    modelMetadata.put(modelKey, modelMetadataObj);
-                    if (verified) {
-                        verifiedModels.add(modelKey);
-                    }
-                }
-                
-                LOGGER.info("Loaded metadata for {} models", modelMetadata.size());
-            }
-        } catch (Exception e) {
-            LOGGER.warn("Failed to load model metadata, starting fresh", e);
-        }
-    }
-    
-    /**
-     * Helper method to delete directory recursively
-     */
-    private void deleteDirectory(Path directory) throws IOException {
-        if (!Files.exists(directory)) {
-            return;
-        }
-        
-        Files.walkFileTree(directory, new SimpleFileVisitor<Path>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Files.delete(file);
-                return FileVisitResult.CONTINUE;
-            }
-            
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                Files.delete(dir);
-                return FileVisitResult.CONTINUE;
-            }
-        });
     }
     
     /**
@@ -622,17 +272,25 @@ public class ModelManager {
         // Check if we have at least one valid model
         return !verifiedModels.isEmpty() || isModelValid("base", "whisper");
     }
-	
+
+    // ========================================================================
+    //  Partial Download Progress
+    // ========================================================================
+
     /**
-     * Track partial download progress
+     * Tracks partial download progress for resumable downloads.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @param downloadedBytes the number of bytes downloaded so far
+     * @param totalBytes the total expected size
      */
-    public void trackPartialDownload(String modelName, String modelType, 
+    public void trackPartialDownload(String modelName, String modelType,
                                         long downloadedBytes, long totalBytes) {
         String key = createModelKey(modelName, modelType);
         ModelMetadata metadata = modelMetadata.get(key);
 
         if (metadata == null) {
-            // Create metadata if it doesn't exist
             metadata = new ModelMetadata(modelName, null, totalBytes, modelType);
             modelMetadata.put(key, metadata);
         }
@@ -640,7 +298,6 @@ public class ModelManager {
         metadata.expectedSize = totalBytes;
         metadata.verified = false;
 
-        // Save partial progress
         try {
             Path progressFile = getPartialProgressFile(modelName, modelType);
             Map<String, Object> progressData = new HashMap<>();
@@ -662,7 +319,11 @@ public class ModelManager {
     }
 
     /**
-     * Get partial download progress
+     * Returns the partial download progress for a model.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return the partial download progress, or {@code null} if none exists
      */
     public PartialDownloadProgress getPartialDownloadProgress(String modelName, String modelType) {
         try {
@@ -672,7 +333,7 @@ public class ModelManager {
             }
 
             String json = Files.readString(progressFile, StandardCharsets.UTF_8);
-            Map<String, Object> data = gson.fromJson(json, 
+            Map<String, Object> data = gson.fromJson(json,
                     new TypeToken<Map<String, Object>>(){}.getType());
 
             long downloadedBytes = ((Number) data.get("downloadedBytes")).longValue();
@@ -695,7 +356,10 @@ public class ModelManager {
     }
 
     /**
-     * Clear partial download tracking
+     * Clears partial download tracking for a model.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
      */
     public void clearPartialDownload(String modelName, String modelType) {
         try {
@@ -707,90 +371,16 @@ public class ModelManager {
         }
     }
 
-    /**
-     * Get partial progress file path
-     */
-    private Path getPartialProgressFile(String modelName, String modelType) {
-        String key = createModelKey(modelName, modelType);
-        return cacheDir.resolve("partial_" + key + ".progress");
-    }
+    // ========================================================================
+    //  Model Path Resolution
+    // ========================================================================
 
     /**
-     * Data class for partial download progress
-     */
-    public static class PartialDownloadProgress {
-        private final long downloadedBytes;
-        private final long totalBytes;
-        private final long lastUpdated;
-
-        public PartialDownloadProgress(long downloadedBytes, long totalBytes, long lastUpdated) {
-            this.downloadedBytes = downloadedBytes;
-            this.totalBytes = totalBytes;
-            this.lastUpdated = lastUpdated;
-        }
-
-        public long getDownloadedBytes() { return downloadedBytes; }
-        public long getTotalBytes() { return totalBytes; }
-        public long getLastUpdated() { return lastUpdated; }
-
-        public double getPercentage() {
-            return totalBytes > 0 ? (downloadedBytes * 100.0 / totalBytes) : 0.0;
-        }
-
-        public boolean isComplete() {
-            return totalBytes > 0 && downloadedBytes >= totalBytes;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("%.1f%% (%s/%s)", 
-                    getPercentage(),
-                    formatBytes(downloadedBytes),
-                    formatBytes(totalBytes));
-        }
-
-        private String formatBytes(long bytes) {
-            if (bytes < 1024) return bytes + " B";
-            if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-            if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
-            return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-        }
-    }
-    /**
-     * Check if model exists in any cache location (HuggingFace cache or our managed cache)
-     */
-    public boolean isModelCachedAnywhere(String modelName, String modelType) {
-        // First check our managed cache
-        String key = createModelKey(modelName, modelType);
-        Path ourCachePath = getModelCachePath(key);
-        if (Files.exists(ourCachePath)) {
-            try {
-                long fileCount = Files.walk(ourCachePath)
-                    .filter(Files::isRegularFile)
-                    .count();
-                if (fileCount > 0) {
-                    LOGGER.debug("Model found in managed cache: {}", ourCachePath);
-                    return true;
-                }
-            } catch (IOException e) {
-                // Ignore
-            }
-        }
-
-        // FIX: previously built Paths.get(System.getenv("LOCALAPPDATA"), ...)
-        // unconditionally, throwing an uncaught NullPointerException on every
-        // non-Windows machine (LOCALAPPDATA is null there). Delegates to the
-        // shared, null-safe HuggingFaceCacheResolver instead.
-        if (HuggingFaceCacheResolver.resolve(modelName).isPresent()) {
-            LOGGER.info("✓ Found model '{}' in HuggingFace cache", modelName);
-            return true;
-        }
-
-        return false;
-    }
-    
-    /**
-     * Find the actual path where a model is cached
+     * Finds the actual path where a model is cached.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return the model path, or {@code null} if not found
      */
     public Path findModelPath(String modelName, String modelType) {
         String key = createModelKey(modelName, modelType);
@@ -804,34 +394,20 @@ public class ModelManager {
         if (hasModelFilesRecursive(nestedPath)) return nestedPath;
 
         // 3. Check our own cacheDir directly under the HF folder-name pattern
-        //    (kept as a distinct check since cacheDir isn't a real HF root).
         Path ownCacheHfStyle = cacheDir.resolve(HuggingFaceCacheResolver.folderNameFor(modelName));
         if (hasModelFilesRecursive(ownCacheHfStyle)) return ownCacheHfStyle;
 
-        // 4. Delegate to the shared, null-safe HuggingFace cache resolver
-        //    (this was previously its own third copy of the candidate-path
-        //    list — now consolidated, see HuggingFaceCacheResolver).
+        // 4. Delegate to the shared HuggingFace cache resolver
         return HuggingFaceCacheResolver.resolve(modelName).orElse(null);
     }
 
     /**
-     * Same lookup as {@link #findModelPath}, but fails loudly with a typed,
-     * actionable exception instead of returning {@code null}.
+     * Finds a model path or throws a typed exception if not found.
      *
-     * <p>{@code findModelPath} returning {@code null} on a cache miss is kept
-     * for backward compatibility with existing callers, but a {@code null}
-     * return is easy to forget to check — exactly the kind of thing that lets
-     * a "model missing" condition surface later as a confusing
-     * {@code NullPointerException} deep inside {@code WhisperXTranscriptionService}
-     * instead of a clear, catchable error at the point of lookup. New call
-     * sites should prefer this method.
-     *
-     * @param modelName
-     * @param modelType
-     * @return 
-     * @throws audiomanager.exceptions.ModelNotFoundException 
-     * @throws audiomanager.exceptions.ModelNotFoundException 
-     * @throws ModelNotFoundException if the model isn't in any known cache location
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return the model path
+     * @throws ModelNotFoundException if the model is not found in any cache location
      */
     public Path requireModelPath(String modelName, String modelType) throws ModelNotFoundException {
         Path path = findModelPath(modelName, modelType);
@@ -843,24 +419,49 @@ public class ModelManager {
         return path;
     }
 
+    // ========================================================================
+    //  Cache Cleanup
+    // ========================================================================
+
     /**
-     * Recursively check if a directory contains any model file (.bin, .safetensors, .pt)
+     * Clears corrupted cache entries and outdated models.
      */
-    private boolean hasModelFilesRecursive(Path dir) {
-        if (dir == null || !Files.isDirectory(dir)) return false;
-        try (var stream = Files.walk(dir, FileVisitOption.FOLLOW_LINKS)) {
-            return stream.anyMatch(p -> {
-                String name = p.getFileName().toString().toLowerCase();
-                return name.endsWith(".bin") || name.endsWith(".safetensors") || name.endsWith(".pt");
-            });
-        } catch (IOException e) {
-            LOGGER.debug("Error walking {}: {}", dir, e.getMessage());
-            return false;
+    public void clearCorruptedCache() {
+        LOGGER.info("Clearing corrupted cache entries");
+
+        List<String> toRemove = new ArrayList<>();
+        for (Map.Entry<String, ModelMetadata> entry : modelMetadata.entrySet()) {
+            String modelKey = entry.getKey();
+            ModelMetadata metadata = entry.getValue();
+
+            if (!metadata.verified ||
+                (System.currentTimeMillis() - metadata.lastVerified) > 7 * 24 * 60 * 60 * 1000L) {
+                // Not verified or not verified in last 7 days
+                try {
+                    Path modelDir = getModelCachePath(modelKey);
+                    if (Files.exists(modelDir)) {
+                        deleteDirectory(modelDir);
+                        LOGGER.info("Removed potentially corrupted model: {}", modelKey);
+                    }
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to remove model {}: {}", modelKey, e.getMessage());
+                }
+                toRemove.add(modelKey);
+            }
         }
+
+        toRemove.forEach(modelMetadata::remove);
+        toRemove.forEach(verifiedModels::remove);
+        saveModelMetadata();
+        clearTraditionalCacheDirs();
     }
-    
+
+    // ========================================================================
+    //  Debugging
+    // ========================================================================
+
     /**
-     * Debug: Print all cache locations and their contents
+     * Prints cache contents for debugging purposes.
      */
     public void debugCacheContents() {
         LOGGER.info("🔍 Debugging cache contents:");
@@ -919,10 +520,435 @@ public class ModelManager {
         }
     }
 
+    // ========================================================================
+    //  Private Helpers
+    // ========================================================================
+
+    /**
+     * Gets the current downloaded size for resumable downloads.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @return the current download size in bytes
+     */
+    public long getCurrentDownloadSize(String modelName, String modelType) {
+        try {
+            String key = createModelKey(modelName, modelType);
+            Path modelDir = getModelCachePath(key);
+            long totalSize = 0;
+
+            if (Files.exists(modelDir)) {
+                totalSize = Files.walk(modelDir)
+                    .filter(Files::isRegularFile)
+                    .mapToLong(path -> {
+                        try { return Files.size(path); } catch (IOException e) { return 0; }
+                    })
+                    .sum();
+            }
+
+            Path hfPath = findModelPath(modelName, modelType);
+            if (hfPath != null && !hfPath.equals(modelDir)) {
+                long hfSize = Files.walk(hfPath)
+                    .filter(Files::isRegularFile)
+                    .mapToLong(path -> {
+                        try { return Files.size(path); } catch (IOException e) { return 0; }
+                    })
+                    .sum();
+                totalSize += hfSize;
+            }
+
+            return totalSize;
+        } catch (IOException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Gets the model cache path for a model key.
+     *
+     * @param modelKey the model key
+     * @return the cache path
+     */
+    public Path getModelCachePath(String modelKey) {
+        return cacheDir.resolve("models").resolve(modelKey);
+    }
+
+    /**
+     * Helper to create a model key from name and type.
+     */
+    private String createModelKey(String modelName, String modelType) {
+        return modelType + "_" + modelName.replace("/", "_").replace(":", "_");
+    }
+
+    /**
+     * Checks if a model exists in the managed cache root.
+     */
+    private boolean isModelInManagedCacheRoot(String modelName, String modelType) {
+        Path modelPath = cacheDir.resolve(modelName);
+        if (Files.exists(modelPath) && Files.isDirectory(modelPath)) {
+            try {
+                long fileCount = Files.list(modelPath)
+                    .filter(Files::isRegularFile)
+                    .count();
+                if (fileCount > 0) {
+                    LOGGER.info("Found model in managed cache root: {}", modelPath);
+                    return true;
+                }
+            } catch (IOException e) {
+                LOGGER.debug("Error checking root cache for {}: {}", modelName, e.getMessage());
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Gets the model size from the managed cache root.
+     */
+    private long getModelSizeFromManagedCacheRoot(String modelName, String modelType) {
+        Path modelPath = cacheDir.resolve(modelName);
+        if (!Files.exists(modelPath)) return 0;
+        try {
+            return Files.walk(modelPath)
+                .filter(Files::isRegularFile)
+                .mapToLong(p -> { try { return Files.size(p); } catch (IOException e) { return 0; } })
+                .sum();
+        } catch (IOException e) {
+            LOGGER.warn("Error calculating size for root cache model {}: {}", modelName, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * Checks if a model exists in the HuggingFace cache.
+     */
+    private boolean isModelInHuggingFaceCache(String modelName, String modelType) {
+        return HuggingFaceCacheResolver.resolve(modelName).isPresent();
+    }
+
+    /**
+     * Gets the model size from the HuggingFace cache.
+     */
+    private long getModelSizeFromHuggingFaceCache(String modelName, String modelType) {
+        return HuggingFaceCacheResolver.sizeOf(modelName);
+    }
+
+    /**
+     * Verifies model integrity using size and optional hash checking.
+     */
+    private boolean verifyModelIntegrity(String modelKey, ModelMetadata metadata) throws Exception {
+        Path modelDir = getModelCachePath(modelKey);
+
+        if (!Files.exists(modelDir) || !Files.isDirectory(modelDir)) {
+            LOGGER.debug("Model directory does not exist: {}", modelDir);
+            return false;
+        }
+
+        if (metadata.expectedSize <= 0) {
+            LOGGER.warn("No expected size metadata for model: {}", modelKey);
+            return false;
+        }
+
+        long totalSize = Files.walk(modelDir)
+            .filter(Files::isRegularFile)
+            .mapToLong(path -> { try { return Files.size(path); } catch (IOException e) { return 0; } })
+            .sum();
+
+        double sizeTolerance = 0.01;
+        long minSize = (long) (metadata.expectedSize * (1 - sizeTolerance));
+        long maxSize = (long) (metadata.expectedSize * (1 + sizeTolerance));
+
+        if (totalSize < minSize || totalSize > maxSize) {
+            LOGGER.warn("Model size mismatch for {}: expected {}, got {} (tolerance: {}%)",
+                       modelKey, metadata.expectedSize, totalSize, (int)(sizeTolerance * 100));
+            return false;
+        }
+
+        if (metadata.expectedHash != null && !metadata.expectedHash.isEmpty()) {
+            String actualHash = calculateModelHash(modelDir);
+            if (!actualHash.equalsIgnoreCase(metadata.expectedHash)) {
+                LOGGER.warn("Model hash mismatch for {}: expected {}, got {}",
+                           modelKey, metadata.expectedHash, actualHash);
+                return false;
+            }
+        }
+
+        LOGGER.debug("Model {} integrity check passed", modelKey);
+        return true;
+    }
+
+    /**
+     * Calculates SHA-256 hash of a model directory.
+     */
+    private String calculateModelHash(Path modelDir) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        List<Path> files = new ArrayList<>();
+
+        Files.walk(modelDir)
+            .filter(Files::isRegularFile)
+            .sorted()
+            .forEach(files::add);
+
+        for (Path file : files) {
+            try (InputStream fis = Files.newInputStream(file)) {
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    digest.update(buffer, 0, bytesRead);
+                }
+            }
+            digest.update(file.getFileName().toString().getBytes());
+        }
+
+        byte[] hashBytes = digest.digest();
+        StringBuilder hexString = new StringBuilder();
+        for (byte b : hashBytes) {
+            hexString.append(String.format("%02x", b));
+        }
+        return hexString.toString();
+    }
+
+    /**
+     * Sets up environment variables for resumable downloads.
+     *
+     * @param modelName the model name
+     * @param modelType the model type
+     * @param progressCallback the progress callback
+     * @return a map of environment variables
+     */
+    public Map<String, String> getResumableDownloadEnv(String modelName, String modelType, Consumer<Double> progressCallback) {
+        Map<String, String> env = new HashMap<>();
+
+        String key = createModelKey(modelName, modelType);
+
+        PartialDownloadProgress partialProgress = getPartialDownloadProgress(modelName, modelType);
+        long currentSize = getCurrentDownloadSize(modelName, modelType);
+
+        if (partialProgress != null && !partialProgress.isComplete()) {
+            LOGGER.info("Resuming partial download for {}: {}/{} bytes ({:.1f}%)",
+                       key, partialProgress.getDownloadedBytes(),
+                       partialProgress.getTotalBytes(),
+                       partialProgress.getPercentage());
+
+            if (progressCallback != null) {
+                progressCallback.accept(partialProgress.getPercentage());
+            }
+        } else if (currentSize > 0) {
+            LOGGER.info("Found existing download for {}: {} bytes", key, currentSize);
+        }
+
+        env.put("HF_RESUME_DOWNLOAD", "true");
+        env.put("HF_HUB_RESUME_DOWNLOAD", "true");
+        env.put("WHISPERX_RESUME_DOWNLOAD", "true");
+        env.put("TRANSFORMERS_RESUME_DOWNLOAD", "true");
+
+        env.put("HF_HOME", cacheDir.toString());
+        env.put("TORCH_HOME", cacheDir.toString());
+        env.put("PYANNOTE_CACHE", cacheDir.toString());
+        env.put("PYTHONUTF8", "1");
+        env.put("PYTHONIOENCODING", "UTF-8");
+        env.put("HF_HUB_DISABLE_TELEMETRY", "1");
+
+        env.put("HF_HUB_DISABLE_PROGRESS_BARS", "false");
+        env.put("HF_HUB_SHOW_PROGRESS_BARS", "true");
+
+        return env;
+    }
+
+    /**
+     * Saves model metadata to disk.
+     */
+    private void saveModelMetadata() {
+        try {
+            Map<String, Map<String, Object>> data = new HashMap<>();
+            for (Map.Entry<String, ModelMetadata> entry : modelMetadata.entrySet()) {
+                ModelMetadata metadata = entry.getValue();
+                Map<String, Object> metaMap = new HashMap<>();
+                metaMap.put("expectedHash", metadata.expectedHash);
+                metaMap.put("expectedSize", metadata.expectedSize);
+                metaMap.put("verified", metadata.verified);
+                metaMap.put("lastVerified", metadata.lastVerified);
+                metaMap.put("modelType", metadata.modelType);
+                metaMap.put("modelName", metadata.modelName);
+                data.put(entry.getKey(), metaMap);
+            }
+
+            String json = gson.toJson(data);
+            Files.writeString(modelIntegrityFile, json, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        } catch (Exception e) {
+            LOGGER.error("Failed to save model metadata", e);
+        }
+    }
+
+    /**
+     * Loads model metadata from disk.
+     */
+    private void loadModelMetadata() {
+        if (!Files.exists(modelIntegrityFile)) {
+            LOGGER.info("No existing model metadata found, starting fresh");
+            return;
+        }
+
+        try {
+            String json = Files.readString(modelIntegrityFile, StandardCharsets.UTF_8);
+            Map<String, Map<String, Object>> data = gson.fromJson(
+                json,
+                new TypeToken<Map<String, Map<String, Object>>>(){}.getType()
+            );
+
+            if (data != null) {
+                for (Map.Entry<String, Map<String, Object>> entry : data.entrySet()) {
+                    Map<String, Object> metaMap = entry.getValue();
+                    String modelKey = entry.getKey();
+                    String modelName = (String) metaMap.getOrDefault("modelName", modelKey);
+                    String hash = (String) metaMap.get("expectedHash");
+                    long size = ((Number) metaMap.getOrDefault("expectedSize", 0L)).longValue();
+                    boolean verified = (Boolean) metaMap.getOrDefault("verified", false);
+                    long lastVerified = ((Number) metaMap.getOrDefault("lastVerified", 0L)).longValue();
+                    String modelType = (String) metaMap.getOrDefault("modelType", "whisper");
+
+                    ModelMetadata modelMetadataObj = new ModelMetadata(modelName, hash, size, modelType);
+                    modelMetadataObj.verified = verified;
+                    modelMetadataObj.lastVerified = lastVerified;
+
+                    modelMetadata.put(modelKey, modelMetadataObj);
+                    if (verified) {
+                        verifiedModels.add(modelKey);
+                    }
+                }
+
+                LOGGER.info("Loaded metadata for {} models", modelMetadata.size());
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Failed to load model metadata, starting fresh", e);
+        }
+    }
+
+    /**
+     * Deletes a directory recursively.
+     */
+    private void deleteDirectory(Path directory) throws IOException {
+        if (!Files.exists(directory)) {
+            return;
+        }
+
+        Files.walkFileTree(directory, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    /**
+     * Clears traditional cache directories.
+     */
+    private void clearTraditionalCacheDirs() {
+        try {
+            Path[] cacheDirs = {
+                Paths.get(System.getProperty("user.home"), ".cache", "whisperx"),
+                Paths.get(System.getProperty("user.home"), ".cache", "torch"),
+                Paths.get(System.getProperty("user.home"), ".cache", "huggingface"),
+                Paths.get(System.getProperty("user.home"), ".cache", "pyannote"),
+                Paths.get(System.getProperty("user.home"), ".cache", "transformers")
+            };
+
+            for (Path cacheDir : cacheDirs) {
+                if (Files.exists(cacheDir)) {
+                    deleteDirectory(cacheDir);
+                    LOGGER.info("Cleared traditional cache: {}", cacheDir);
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("Error clearing traditional cache: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Recursively checks if a directory contains any model files.
+     */
+    private boolean hasModelFilesRecursive(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) return false;
+        try (var stream = Files.walk(dir, FileVisitOption.FOLLOW_LINKS)) {
+            return stream.anyMatch(p -> {
+                String name = p.getFileName().toString().toLowerCase();
+                return name.endsWith(".bin") || name.endsWith(".safetensors") || name.endsWith(".pt");
+            });
+        } catch (IOException e) {
+            LOGGER.debug("Error walking {}: {}", dir, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Formats bytes to a human-readable string.
+     */
     private String formatBytes(long bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
         if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
         return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    /**
+     * Gets the partial progress file path for a model.
+     */
+    private Path getPartialProgressFile(String modelName, String modelType) {
+        String key = createModelKey(modelName, modelType);
+        return cacheDir.resolve("partial_" + key + ".progress");
+    }
+
+    // ========================================================================
+    //  Inner Class: PartialDownloadProgress
+    // ========================================================================
+
+    /**
+     * Data class for partial download progress.
+     */
+    public static class PartialDownloadProgress {
+        private final long downloadedBytes;
+        private final long totalBytes;
+        private final long lastUpdated;
+
+        public PartialDownloadProgress(long downloadedBytes, long totalBytes, long lastUpdated) {
+            this.downloadedBytes = downloadedBytes;
+            this.totalBytes = totalBytes;
+            this.lastUpdated = lastUpdated;
+        }
+
+        public long getDownloadedBytes() { return downloadedBytes; }
+        public long getTotalBytes() { return totalBytes; }
+        public long getLastUpdated() { return lastUpdated; }
+
+        public double getPercentage() {
+            return totalBytes > 0 ? (downloadedBytes * 100.0 / totalBytes) : 0.0;
+        }
+
+        public boolean isComplete() {
+            return totalBytes > 0 && downloadedBytes >= totalBytes;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%.1f%% (%s/%s)",
+                    getPercentage(),
+                    formatBytes(downloadedBytes),
+                    formatBytes(totalBytes));
+        }
+
+        private String formatBytes(long bytes) {
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+            if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+            return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+        }
     }
 }

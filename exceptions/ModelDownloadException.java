@@ -5,32 +5,83 @@
 package audiomanager.exceptions;
 
 /**
- * Custom exception for model download failures with helpful messages
+ * Custom exception for model download failures with helpful messages.
+ *
+ * <p>This exception is thrown when a Whisper model cannot be downloaded
+ * from HuggingFace or other model repositories. It provides category-specific
+ * user-friendly messages based on the type of error encountered.</p>
+ *
+ * <p><b>Error types:</b>
+ * <ul>
+ *   <li>{@code dns}/{@code network} - Network connectivity issues</li>
+ *   <li>{@code proxy} - Proxy configuration issues</li>
+ *   <li>{@code timeout} - Download timeout</li>
+ *   <li>{@code auth} - Authentication issues (invalid HF_TOKEN)</li>
+ *   <li>{@code corrupted} - Corrupted download (checksum mismatch)</li>
+ *   <li>{@code not_installed_locally} - Model not found locally</li>
+ * </ul>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ModelManager
  */
 public class ModelDownloadException extends Exception {
     private final String modelName;
     private final String errorType;
-    
+
+    /**
+     * Constructs a new ModelDownloadException.
+     *
+     * @param modelName the name of the model that failed to download
+     * @param message the error message
+     * @param errorType the type of error (e.g., "network", "timeout", "auth")
+     */
     public ModelDownloadException(String modelName, String message, String errorType) {
         super(String.format("Failed to download model '%s': %s", modelName, message));
         this.modelName = modelName;
         this.errorType = errorType;
     }
-    
+
+    /**
+     * Constructs a new ModelDownloadException with a cause.
+     *
+     * @param modelName the name of the model that failed to download
+     * @param message the error message
+     * @param errorType the type of error
+     * @param cause the underlying cause
+     */
     public ModelDownloadException(String modelName, String message, String errorType, Throwable cause) {
         super(String.format("Failed to download model '%s': %s", modelName, message), cause);
         this.modelName = modelName;
         this.errorType = errorType;
     }
-    
+
+    /**
+     * Returns the name of the model that failed to download.
+     *
+     * @return the model name
+     */
     public String getModelName() {
         return modelName;
     }
-    
+
+    /**
+     * Returns the type of error that occurred.
+     *
+     * @return the error type
+     */
     public String getErrorType() {
         return errorType;
     }
-    
+
+    /**
+     * Returns a user-friendly message specific to the error type.
+     *
+     * <p>This method provides tailored messages with actionable advice
+     * based on the category of error encountered.</p>
+     *
+     * @return a user-friendly error message
+     */
     public String getUserFriendlyMessage() {
         switch (errorType.toLowerCase()) {
             case "dns":
@@ -64,7 +115,7 @@ public class ModelDownloadException extends Exception {
                     "   Error: %s",
                     modelName, getMessage()
                 );
-                
+
             case "auth":
                 return String.format(
                     "❌ Model '%s' download failed due to authentication issue.\n" +
@@ -72,7 +123,7 @@ public class ModelDownloadException extends Exception {
                     "   Error: %s",
                     modelName, getMessage()
                 );
-                
+
             case "corrupted":
                 return String.format(
                     "❌ Model '%s' appears to be corrupted.\n" +
@@ -80,7 +131,7 @@ public class ModelDownloadException extends Exception {
                     "   Error: %s",
                     modelName, getMessage()
                 );
-                
+
             default:
                 return String.format(
                     "❌ Failed to download model '%s'.\n" +

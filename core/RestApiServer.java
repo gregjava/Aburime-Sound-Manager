@@ -29,43 +29,32 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Supplier;
 
 /**
- * A minimal REST API for headless/scripted operation — "REST API for
- * headless operation" from the commercial-competitiveness review, never
- * previously built.
+ * A minimal REST API for headless/scripted operation.
  *
- * <h2>Scope, honestly stated</h2>
- * This submits jobs using the exact same settings currently configured in
- * the desktop UI (model, language, diarization, output directory —
- * pulled live via the supplier lambdas passed to the constructor) rather
- * than accepting per-request overrides. That's a deliberate simplification:
- * building a safe way to construct a one-off {@link TranscriptionConfig}/
- * {@link ProcessingConfig} from arbitrary JSON without validating against
- * those classes' actual constraints would risk creating configs the rest
- * of the app has never had to handle. "Uses whatever the UI has open" is a
- * real, useful headless-automation story (point a script at a file, let it
- * transcribe with your normal settings) without that risk.
+ * <p>This API provides endpoints for submitting transcription jobs
+ * programmatically, enabling integration with scripts and automation tools.</p>
  *
- * <p>Because {@link BatchProcessor#processBatch} only supports one batch at
- * a time (throws if already processing), REST-submitted jobs run through
- * their own internal single-worker queue, one file at a time, only when
- * the shared {@code BatchProcessor} isn't already busy with a UI-initiated
- * batch or another REST job. This means a REST job can queue behind either.
- * </p>
+ * <p><b>Security note:</b> This server binds to localhost only by design —
+ * there is no authentication. Do not change the bind address to 0.0.0.0
+ * without adding authentication first.</p>
  *
  * <h2>Endpoints</h2>
- * <ul>
- *   <li>{@code GET /api/health} — {"status":"ok"}</li>
- *   <li>{@code POST /api/jobs} — body {"filePath": "/absolute/path.mp3"} → {"jobId": "...", "status": "queued"}</li>
- *   <li>{@code GET /api/jobs} — list all jobs this server has seen (in-memory only, cleared on restart)</li>
- *   <li>{@code GET /api/jobs/{id}} — one job's status/result path/error</li>
- * </ul>
+ * <table border="1">
+ *   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+ *   <tr><td>GET</td><td>{@code /api/health}</td><td>Health check — returns {@code {"status":"ok"}}</td></tr>
+ *   <tr><td>POST</td><td>{@code /api/jobs}</td><td>Submit a job — body: {@code {"filePath": "/absolute/path.mp3"}}</td></tr>
+ *   <tr><td>GET</td><td>{@code /api/jobs}</td><td>List all jobs</td></tr>
+ *   <tr><td>GET</td><td>{@code /api/jobs/{id}}</td><td>Get job status</td></tr>
+ * </table>
  *
- * <h2>Security note</h2>
- * This binds to localhost only, by design — there's no authentication, and
- * it accepts arbitrary local file paths to transcribe. Do not change the
- * bind address to 0.0.0.0 without adding authentication first; doing so
- * would let anything on the network submit arbitrary local files for this
- * process to read.
+ * <p><b>Job lifecycle:</b> Submitted jobs run through an internal queue,
+ * one file at a time, only when the shared {@link BatchProcessor} isn't
+ * already processing a UI-initiated batch or another REST job.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see BatchProcessor
+ * @see RestJob
  */
 public class RestApiServer {
 
@@ -83,6 +72,13 @@ public class RestApiServer {
     private Thread workerThread;
     private volatile boolean running = false;
 
+    /**
+     * Constructs a new REST API server.
+     *
+     * @param batchProcessor the batch processor for executing jobs
+     * @param processingConfigSupplier supplier for the current processing configuration
+     * @param transcriptionConfigSupplier supplier for the current transcription configuration
+     */
     public RestApiServer(BatchProcessor batchProcessor,
                           Supplier<ProcessingConfig> processingConfigSupplier,
                           Supplier<TranscriptionConfig> transcriptionConfigSupplier) {
@@ -91,11 +87,17 @@ public class RestApiServer {
         this.transcriptionConfigSupplier = transcriptionConfigSupplier;
     }
 
+    /**
+     * Starts the REST API server on the specified port.
+     *
+     * @param port the port to bind to (localhost only)
+     * @throws IOException if the server cannot be started
+     */
     public void start(int port) throws IOException {
         httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         httpServer.createContext("/api/health", this::handleHealth);
         httpServer.createContext("/api/jobs", this::handleJobs);
-        httpServer.setExecutor(null); // default executor is fine for a low-traffic local API
+        httpServer.setExecutor(null);
         httpServer.start();
 
         running = true;
@@ -106,6 +108,9 @@ public class RestApiServer {
         LOGGER.info("REST API listening on http://127.0.0.1:{} (localhost only)", port);
     }
 
+    /**
+     * Stops the REST API server.
+     */
     public void stop() {
         running = false;
         if (workerThread != null) workerThread.interrupt();
@@ -113,6 +118,11 @@ public class RestApiServer {
         LOGGER.info("REST API stopped");
     }
 
+    /**
+     * Returns whether the server is running.
+     *
+     * @return {@code true} if the server is running
+     */
     public boolean isRunning() {
         return running;
     }
@@ -121,8 +131,14 @@ public class RestApiServer {
     //  Job model
     // -------------------------------------------------------------------------
 
+    /**
+     * Job status enumeration.
+     */
     public enum JobStatus { QUEUED, PROCESSING, COMPLETED, FAILED }
 
+    /**
+     * REST job representation.
+     */
     public static class RestJob {
         public final String id;
         public final String filePath;
@@ -137,9 +153,12 @@ public class RestApiServer {
     }
 
     // -------------------------------------------------------------------------
-    //  Worker loop — drains the internal queue one file at a time
+    //  Worker loop
     // -------------------------------------------------------------------------
 
+    /**
+     * Worker loop that drains the internal queue one file at a time.
+     */
     private void workerLoop() {
         while (running) {
             try {
@@ -151,8 +170,6 @@ public class RestApiServer {
                 RestJob job = jobs.get(jobId);
                 if (job == null) continue;
 
-                // Don't step on a UI-initiated batch (or another REST job) —
-                // processBatch() throws if one's already running.
                 while (batchProcessor.isProcessing()) {
                     Thread.sleep(1000);
                 }
@@ -167,6 +184,11 @@ public class RestApiServer {
         }
     }
 
+    /**
+     * Executes a single REST job.
+     *
+     * @param job the job to execute
+     */
     private void runJob(RestJob job) {
         job.status = JobStatus.PROCESSING;
         File file = new File(job.filePath);
@@ -181,15 +203,9 @@ public class RestApiServer {
         TranscriptionConfig transcriptionConfig = transcriptionConfigSupplier.get();
 
         try {
-            // processBatch's internal callbacks use Platform.runLater — the
-            // JavaFX toolkit must already be running (it is, since this
-            // server only ever runs alongside the desktop app), but this
-            // worker thread itself is not the JavaFX thread, which is fine:
-            // processBatch() is designed to be called from any thread and
-            // returns a CompletableFuture.
             BatchProcessor.BatchResult result = batchProcessor
                     .processBatch(singleItemQueue, processingConfig, transcriptionConfig, 1)
-                    .get(); // block this worker thread until the single job finishes
+                    .get();
 
             if (result.getCompleted() >= 1) {
                 job.status = JobStatus.COMPLETED;
@@ -200,9 +216,6 @@ public class RestApiServer {
             }
         } catch (Exception e) {
             job.status = JobStatus.FAILED;
-            // Classify against the typed exception hierarchy where the
-            // underlying cause is one we recognise, so API consumers get a
-            // specific reason instead of always seeing a generic message.
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             if (cause instanceof audiomanager.exceptions.DependencyException de) {
                 job.errorMessage = "Dependency problem: " + de.getUserMessage();
@@ -223,10 +236,16 @@ public class RestApiServer {
     //  HTTP handlers
     // -------------------------------------------------------------------------
 
+    /**
+     * Handles health check requests.
+     */
     private void handleHealth(HttpExchange exchange) throws IOException {
         writeJson(exchange, 200, Map.of("status", "ok"));
     }
 
+    /**
+     * Handles job-related requests (POST, GET).
+     */
     private void handleJobs(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod();
         String path = exchange.getRequestURI().getPath();
@@ -248,6 +267,9 @@ public class RestApiServer {
         }
     }
 
+    /**
+     * Handles job creation (POST /api/jobs).
+     */
     private void handleCreateJob(HttpExchange exchange) throws IOException {
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<?, ?> parsed;
@@ -274,6 +296,9 @@ public class RestApiServer {
         writeJson(exchange, 202, response);
     }
 
+    /**
+     * Handles job status requests (GET /api/jobs/{id}).
+     */
     private void handleGetJob(HttpExchange exchange, String jobId) throws IOException {
         RestJob job = jobs.get(jobId);
         if (job == null) {
@@ -283,10 +308,16 @@ public class RestApiServer {
         writeJson(exchange, 200, jobToMap(job));
     }
 
+    /**
+     * Handles job listing requests (GET /api/jobs).
+     */
     private void handleListJobs(HttpExchange exchange) throws IOException {
         writeJson(exchange, 200, Map.of("jobs", jobs.values().stream().map(this::jobToMap).toList()));
     }
 
+    /**
+     * Converts a job to a map for JSON serialisation.
+     */
     private Map<String, Object> jobToMap(RestJob job) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("jobId", job.id);
@@ -297,6 +328,9 @@ public class RestApiServer {
         return m;
     }
 
+    /**
+     * Writes a JSON response to the HTTP exchange.
+     */
     private void writeJson(HttpExchange exchange, int statusCode, Object body) throws IOException {
         byte[] bytes = GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");

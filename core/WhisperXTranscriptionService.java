@@ -33,216 +33,119 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.HashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * WhisperX-backed transcription service with GPU acceleration support.
  *
- * <h2>GPU Support</h2>
- * Automatically detects NVIDIA GPUs via nvidia-smi and configures WhisperX
- * to use CUDA acceleration when available. Users can enable/disable GPU
- * usage via preferences.
+ * <p>This is the core transcription service that uses WhisperX for speech-to-text
+ * processing. Features include:
+ * <ul>
+ *   <li><b>GPU acceleration:</b> Automatically detects NVIDIA GPUs and uses CUDA</li>
+ *   <li><b>Model caching:</b> Downloads and caches models locally</li>
+ *   <li><b>Streaming for large files:</b> Splits files larger than 100MB into chunks</li>
+ *   <li><b>Speaker diarisation:</b> Identifies different speakers when enabled</li>
+ *   <li><b>Timing and resource reporting:</b> Captures per-stage timing and resource usage</li>
+ *   <li><b>Retry with model fallback:</b> Tries smaller models on OOM errors</li>
+ *   <li><b>Segmentation:</b> Splits long files into segments for processing</li>
+ * </ul>
  *
- * <h2>Security note</h2>
- * The HuggingFace token is <b>never</b> embedded in source code.  It is read
- * at construction time from, in priority order:
+ * <p><b>Token security:</b> The HuggingFace token is <b>never</b> embedded in source code.
+ * It is read from (in priority order):
  * <ol>
- *   <li>The {@code HF_TOKEN} environment variable.</li>
- *   <li>The {@code hf.token} Java system property.</li>
- *   <li>The file {@code ~/.audiomanager/hf_token} (plain text, one line).</li>
+ *   <li>The {@code HF_TOKEN} environment variable</li>
+ *   <li>The {@code hf.token} Java system property</li>
+ *   <li>The file {@code ~/.audiomanager/hf_token} (plain text, one line)</li>
  * </ol>
- * If none of the sources supply a token the service starts without one;
- * speaker diarisation will be disabled and a warning is logged.
  *
- * <h2>Thread safety</h2>
- * {@link #setSegmentListener} is a {@code volatile} write, which is safe as
- * long as the listener is set before {@link #transcribe} is called (documented
- * contract).
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see TranscriptionService
+ * @see ModelManager
+ * @see SegmentProcessor
+ * @see GpuConfig
  */
 public class WhisperXTranscriptionService implements TranscriptionService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WhisperXTranscriptionService.class);
 
-    /**
-     * Per-stage wall-clock time (milliseconds) reported by the Python
-     * script's {@code STAGE_TIMING:<stage>:<seconds>} log lines for the
-     * most recently completed {@link #transcribe} call on this instance.
-     * Populated live as output streams in, read by the caller immediately
-     * after {@link #transcribe} returns — safe because
-     * {@code ModelInstancePool} guarantees exclusive use of a given
-     * instance between {@code borrow()} and {@code release()}, so there's
-     * no cross-file interference despite this being instance state rather
-     * than a return value (changing {@code transcribe}'s return type would
-     * ripple through every caller for comparatively little benefit).
-     */
-    private final Map<String, Long> lastPythonStageTimingsMs = new java.util.concurrent.ConcurrentHashMap<>();
+    // Configuration constants
+    private static final long LARGE_FILE_THRESHOLD_MB = 100;
+    private static final int CHUNK_DURATION_SECONDS = 30;
+    private static final int BUFFER_SIZE = 64 * 1024; // 64KB
+    private static final int MAX_RETRIES = 3;
 
-    // FIX: peak_memory_mb and avg_cpu_percent are the two STAGE_TIMING keys
-    // that are NOT second-valued durations (they're megabytes and a
-    // percentage respectively) — parseStageTimingLine() was previously
-    // dumping every matched key into lastPythonStageTimingsMs via
-    // Math.round(value * 1000), which is correct for turning seconds into
-    // milliseconds but silently corrupts these two: a real peak of 412.3MB
-    // was being stored as "412300" (as if it were 412.3 *seconds*, i.e.
-    // ~6.9 minutes), and an average CPU of 23.4% became "23400". Anything
-    // that later rendered these two keys via the generic ms-stage path
-    // would have shown wildly wrong numbers. They're captured here instead,
-    // at their real scale, with their own accessors.
+    private final DependencyManager dependencyManager;
+    private final TimeLeftEstimator timeEstimator;
+    private final ErrorReporter errorReporter;
+    private final AtomicLong totalSegmentsProcessed = new AtomicLong(0);
+    private final AtomicLong totalProcessingTimeMs = new AtomicLong(0);
+
+    // Per-stage timing data from the most recent transcription
+    private final Map<String, Long> lastPythonStageTimingsMs = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile double lastPythonPeakMemoryMb = -1;
     private volatile double lastPythonAvgCpuPercent = -1;
 
     private static final java.util.regex.Pattern STAGE_TIMING_PATTERN =
             java.util.regex.Pattern.compile("STAGE_TIMING:([a-zA-Z_]+):(-?[0-9.]+)");
-    private static final String ALIGNMENT_MODEL_URL = 
+    private static final String ALIGNMENT_MODEL_URL =
         "https://download.pytorch.org/torchaudio/models/wav2vec2_fairseq_base_ls960_asr_ls960.pth";
     private static final long ALIGNMENT_MODEL_MIN_SIZE = 300_000_000L; // 300 MB minimum
-    private static final String ALIGNMENT_MODEL_FILENAME = 
+    private static final String ALIGNMENT_MODEL_FILENAME =
         "wav2vec2_fairseq_base_ls960_asr_ls960.pth";
-    private ErrorReporter errorReporter;
 
-    // ===== GPU Support =====
+    // GPU Support
     private final GpuConfig gpuConfig = GpuConfig.getInstance();
     private volatile boolean gpuInitialized = false;
 
-    private void parseStageTimingLine(String line) {
-        java.util.regex.Matcher m = STAGE_TIMING_PATTERN.matcher(line);
-        if (m.find()) {
-            try {
-                String stage = m.group(1);
-                double value = Double.parseDouble(m.group(2));
-                if ("peak_memory_mb".equals(stage)) {
-                    lastPythonPeakMemoryMb = value;
-                } else if ("avg_cpu_percent".equals(stage)) {
-                    lastPythonAvgCpuPercent = value;
-                } else {
-                    lastPythonStageTimingsMs.put(stage, Math.round(value * 1000));
-                }
-            } catch (NumberFormatException e) {
-                LOGGER.debug("Could not parse STAGE_TIMING line: {}", line);
-            }
-        }
-    }
-
-    /** Peak RSS memory (MB) of the Python process (+ any children) during the most recent {@link #transcribe} call, or -1 if psutil wasn't available in that venv. */
-    public double getLastPythonPeakMemoryMb() {
-        return lastPythonPeakMemoryMb;
-    }
-
-    /** Average CPU utilisation (%) of the Python process (+ any children) during the most recent {@link #transcribe} call, or -1 if psutil wasn't available in that venv. */
-    public double getLastPythonAvgCpuPercent() {
-        return lastPythonAvgCpuPercent;
-    }
-
-    /**
-     * Stage timings (milliseconds) from the most recently completed
-     * {@link #transcribe} call on this instance — e.g. keys
-     * {@code model_load}, {@code audio_load}, {@code transcription},
-     * {@code alignment}, {@code diarization}, {@code total}. Empty if the
-     * Python script didn't emit any (e.g. an older script without this
-     * instrumentation, or the call failed before any stage completed).
-     */
-    public Map<String, Long> getLastPythonStageTimingsMs() {
-        return new java.util.LinkedHashMap<>(lastPythonStageTimingsMs);
-    }
-
-    private final DependencyManager dependencyManager;
     private final Gson gson;
     private final boolean useGPU;
     private final String hfToken;
 
     private final ModelManager modelManager;
-    private final TimeLeftEstimator timeEstimator;
     private volatile SegmentProgressListener segmentListener;
     private final String pythonExecutable;
-
-    // ===== GPU Methods =====
-
-    /**
-     * Initialize GPU detection and configuration.
-     * Called once during construction or first use.
-     */
-    private synchronized void initGpu() {
-        if (gpuInitialized) {
-            return;
-        }
-        gpuConfig.detectGpu();
-        gpuInitialized = true;
-        
-        if (gpuConfig.isGpuAvailable()) {
-            LOGGER.info("✅ GPU detected: {}", gpuConfig.getGpuSummary());
-        } else {
-            LOGGER.info("ℹ️ No GPU detected — running on CPU mode");
-        }
-    }
-
-    /**
-     * Returns the device string for WhisperX ("cuda" or "cpu").
-     * Checks user preference before enabling GPU.
-     */
-    private String getDeviceString() {
-        initGpu();
-        // Check if user has enabled GPU in preferences
-        boolean userEnabled = java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
-            .getBoolean("gpu.enabled", true);
-        if (gpuConfig.isGpuAvailable() && userEnabled) {
-            return "cuda";
-        }
-        return "cpu";
-    }
-
-    /**
-     * Returns the compute type for WhisperX.
-     * float16 for CUDA, int8 for CPU.
-     */
-    private String getComputeType() {
-        String device = getDeviceString();
-        return "cuda".equals(device) ? "float16" : "int8";
-    }
-
-    /**
-     * Returns true if GPU acceleration is enabled and available.
-     */
-    public boolean isGpuEnabled() {
-        initGpu();
-        boolean userEnabled = java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
-            .getBoolean("gpu.enabled", true);
-        return gpuConfig.isGpuAvailable() && userEnabled;
-    }
-
-    /**
-     * Returns a summary of GPU configuration for display.
-     */
-    public String getGpuSummary() {
-        initGpu();
-        return gpuConfig.getGpuSummary();
-    }
-
-    /**
-     * Toggle GPU acceleration on/off.
-     */
-    public void setGpuEnabled(boolean enabled) {
-        java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
-            .putBoolean("gpu.enabled", enabled);
-        LOGGER.info("GPU acceleration {}", enabled ? "enabled" : "disabled");
-    }
 
     // ========================================================================
     //  Constructors
     // ========================================================================
 
-    public WhisperXTranscriptionService(DependencyManager dependencyManager, 
+    /**
+     * Constructs a new WhisperXTranscriptionService.
+     *
+     * @param dependencyManager the dependency manager for resolving executables
+     * @param errorReporter the error reporter for diagnostics (may be {@code null})
+     */
+    public WhisperXTranscriptionService(DependencyManager dependencyManager,
                           ErrorReporter errorReporter) {
         this(dependencyManager, null, errorReporter);
     }
 
-    public WhisperXTranscriptionService(DependencyManager dependencyManager,
-                                        TimeLeftEstimator timeEstimator, 
-                          ErrorReporter errorReporter) {
-        this(dependencyManager, timeEstimator, null,  errorReporter);
-    }
-
+    /**
+     * Constructs a new WhisperXTranscriptionService.
+     *
+     * @param dependencyManager the dependency manager for resolving executables
+     * @param timeEstimator the time estimator for progress tracking (may be {@code null})
+     * @param errorReporter the error reporter for diagnostics (may be {@code null})
+     */
     public WhisperXTranscriptionService(DependencyManager dependencyManager,
                                         TimeLeftEstimator timeEstimator,
-                                        SegmentProgressListener listener, 
+                          ErrorReporter errorReporter) {
+        this(dependencyManager, timeEstimator, null, errorReporter);
+    }
+
+    /**
+     * Constructs a new WhisperXTranscriptionService.
+     *
+     * @param dependencyManager the dependency manager for resolving executables
+     * @param timeEstimator the time estimator for progress tracking (may be {@code null})
+     * @param listener the segment progress listener (may be {@code null})
+     * @param errorReporter the error reporter for diagnostics (may be {@code null})
+     */
+    public WhisperXTranscriptionService(DependencyManager dependencyManager,
+                                        TimeLeftEstimator timeEstimator,
+                                        SegmentProgressListener listener,
                           ErrorReporter errorReporter) {
         this.dependencyManager = dependencyManager;
         this.timeEstimator     = timeEstimator;
@@ -253,10 +156,10 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         // Initialize GPU detection
         initGpu();
 
-        // Determine if GPU should be used (for compatibility with existing code)
+        // Determine if GPU should be used
         this.useGPU = isGpuEnabled();
 
-        // FIX: token is resolved from environment / system-property / file — never hard-coded.
+        // Resolve HF token (never hard-coded)
         this.hfToken = resolveHfToken();
 
         if (hfToken == null || hfToken.isBlank()) {
@@ -275,66 +178,335 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     }
 
     // ========================================================================
-    //  Token resolution (unchanged)
+    //  GPU Methods
     // ========================================================================
 
     /**
-     * Resolve the HuggingFace token from the environment, a system property,
-     * or a per-user token file.  Returns {@code null} if no token is found.
+     * Initializes GPU detection and configuration.
      */
-    private static String resolveHfToken() {
-        if (System.getProperty("HF_TOKEN") != null) {
-            LOGGER.warn("=============================================================");
-            LOGGER.warn("A -DHF_TOKEN system property is set but is NOT used by this");
-            LOGGER.warn("app (it has no effect on token resolution) — it exists only to");
-            LOGGER.warn("be dumped in plaintext into this run's console/build log every");
-            LOGGER.warn("time the app starts. Remove -DHF_TOKEN=... from the run/launch");
-            LOGGER.warn("configuration and set a real HF_TOKEN environment variable");
-            LOGGER.warn("instead. If that token has ever been logged or committed");
-            LOGGER.warn("anywhere, rotate it on huggingface.co/settings/tokens.");
-            LOGGER.warn("=============================================================");
+    private synchronized void initGpu() {
+        if (gpuInitialized) {
+            return;
+        }
+        gpuConfig.detectGpu();
+        gpuInitialized = true;
+
+        if (gpuConfig.isGpuAvailable()) {
+            LOGGER.info("✅ GPU detected: {}", gpuConfig.getGpuSummary());
+        } else {
+            LOGGER.info("ℹ️ No GPU detected — running on CPU mode");
+        }
+    }
+
+    /**
+     * Returns the device string for WhisperX ("cuda" or "cpu").
+     *
+     * @return "cuda" if GPU is available and enabled, otherwise "cpu"
+     */
+    private String getDeviceString() {
+        initGpu();
+        boolean userEnabled = java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
+            .getBoolean("gpu.enabled", true);
+        if (gpuConfig.isGpuAvailable() && userEnabled) {
+            return "cuda";
+        }
+        return "cpu";
+    }
+
+    /**
+     * Returns the compute type for WhisperX.
+     *
+     * @return "float16" for CUDA, "int8" for CPU
+     */
+    private String getComputeType() {
+        String device = getDeviceString();
+        return "cuda".equals(device) ? "float16" : "int8";
+    }
+
+    /**
+     * Returns whether GPU acceleration is enabled and available.
+     *
+     * @return {@code true} if GPU is enabled
+     */
+    public boolean isGpuEnabled() {
+        initGpu();
+        boolean userEnabled = java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
+            .getBoolean("gpu.enabled", true);
+        return gpuConfig.isGpuAvailable() && userEnabled;
+    }
+
+    /**
+     * Returns a summary of GPU configuration for display.
+     *
+     * @return a human-readable GPU summary
+     */
+    public String getGpuSummary() {
+        initGpu();
+        return gpuConfig.getGpuSummary();
+    }
+
+    /**
+     * Toggles GPU acceleration on/off.
+     *
+     * @param enabled {@code true} to enable GPU acceleration
+     */
+    public void setGpuEnabled(boolean enabled) {
+        java.util.prefs.Preferences.userNodeForPackage(WhisperXTranscriptionService.class)
+            .putBoolean("gpu.enabled", enabled);
+        LOGGER.info("GPU acceleration {}", enabled ? "enabled" : "disabled");
+    }
+
+    // ========================================================================
+    //  Timing Data Access
+    // ========================================================================
+
+    /**
+     * Returns stage timings from the most recent transcription.
+     *
+     * @return a map of stage names to durations in milliseconds
+     */
+    public Map<String, Long> getLastPythonStageTimingsMs() {
+        return new java.util.LinkedHashMap<>(lastPythonStageTimingsMs);
+    }
+
+    /**
+     * Returns the peak memory usage from the most recent transcription.
+     *
+     * @return the peak memory in MB, or {@code -1} if unavailable
+     */
+    public double getLastPythonPeakMemoryMb() {
+        return lastPythonPeakMemoryMb;
+    }
+
+    /**
+     * Returns the average CPU usage from the most recent transcription.
+     *
+     * @return the average CPU percentage, or {@code -1} if unavailable
+     */
+    public double getLastPythonAvgCpuPercent() {
+        return lastPythonAvgCpuPercent;
+    }
+
+    /**
+     * Sets the segment progress listener.
+     *
+     * @param listener the segment progress listener
+     */
+    public void setSegmentListener(SegmentProgressListener listener) {
+        this.segmentListener = listener;
+    }
+
+    // ========================================================================
+    //  Main Transcription Method
+    // ========================================================================
+
+    /**
+     * Transcribes an audio file using WhisperX.
+     *
+     * <p>This method handles:
+     * <ul>
+     *   <li>Large files (>100MB) via streaming/chunking</li>
+     *   <li>Large models (large-v2, large-v3) via segmentation</li>
+     *   <li>Diarisation via alignment model download</li>
+     *   <li>Retry with model fallback on OOM errors</li>
+     * </ul>
+     *
+     * @param audioFilePath the path to the audio file
+     * @param config the transcription configuration
+     * @param progressCallback the progress callback (may be {@code null})
+     * @param audioDuration the total audio duration in seconds
+     * @return the transcription result
+     * @throws Exception if transcription fails
+     */
+    @Override
+    public TranscriptionResult transcribe(String audioFilePath,
+                                          TranscriptionConfig config,
+                                          AudioProcessor.ProgressCallback progressCallback,
+                                          double audioDuration) throws Exception {
+        LOGGER.info("Starting WhisperX transcription: {}", audioFilePath);
+
+        initGpu();
+
+        String model = normaliseModelName(config.getModel());
+        File audioFile = new File(audioFilePath);
+        long fileSizeMB = audioFile.length() / (1024 * 1024);
+
+        boolean useStreaming = fileSizeMB > LARGE_FILE_THRESHOLD_MB;
+
+        if (useStreaming && !config.isSkipSegmentation()) {
+            LOGGER.info("Using streaming transcription for large file: {} ({} MB)",
+                       audioFile.getName(), fileSizeMB);
+            return transcribeWithStreaming(audioFile, config);
         }
 
-        String token = System.getenv("HF_TOKEN");
-        if (token != null && !token.isBlank()) {
-            LOGGER.debug("HF token loaded from environment variable HF_TOKEN.");
-            return token.trim();
-        }
-
-        token = System.getProperty("hf.token");
-        if (token != null && !token.isBlank()) {
-            LOGGER.warn("HF token loaded from -Dhf.token system property — this is also");
-            LOGGER.warn("visible in process arguments and run-console logs. Prefer an");
-            LOGGER.warn("HF_TOKEN environment variable or the ~/.audiomanager/hf_token file.");
-            return token.trim();
-        }
-
-        Path tokenFile = Paths.get(System.getProperty("user.home"), ".audiomanager", "hf_token");
-        if (Files.exists(tokenFile)) {
+        if (config.isDiarizeEnabled()) {
+            LOGGER.info("Diarization enabled - ensuring alignment model is available");
             try {
-                token = Files.readString(tokenFile, StandardCharsets.UTF_8).strip();
-                if (!token.isBlank()) {
-                    LOGGER.debug("HF token loaded from file: {}", tokenFile);
-                    return token;
-                }
-            } catch (IOException e) {
-                LOGGER.warn("Could not read HF token file {}: {}", tokenFile, e.getMessage());
+                AudioProcessor.ProgressCallback alignmentProgress =
+                    wrapAlignmentProgress(progressCallback, 0.05);
+                ensureAlignmentModelAvailable(alignmentProgress);
+                LOGGER.info("Alignment model is ready");
+            } catch (Exception e) {
+                LOGGER.warn("Failed to ensure alignment model: {}", e.getMessage());
+                LOGGER.warn("Diarization will be disabled for this transcription");
+                config = createFallbackConfig(config);
             }
         }
 
-        return null;
+        if (model.contains("large") && !config.isSkipSegmentation()) {
+            LOGGER.info("Using segmentation for large model: {}", model);
+            SegmentProcessor processor = new SegmentProcessor(
+                    this, dependencyManager, timeEstimator, segmentListener, errorReporter);
+            return processor.processWithSegments(audioFilePath, config, progressCallback, audioDuration);
+        }
+
+        showModelCacheStatus();
+
+        String whisperxModel = model;
+
+        try {
+            ensureModelAvailable(whisperxModel, "whisperx", progressCallback);
+        } catch (ModelDownloadException e) {
+            if ("paused".equals(e.getErrorType())) {
+                throw new Exception("Download paused by user");
+            }
+            throw new Exception("Model error: " + e.getUserFriendlyMessage(), e);
+        }
+
+        if (hfToken != null && config.isDiarizeEnabled()) {
+            if (!modelManager.isModelValid("pyannote/speaker-diarization", "pyannote")
+                    && !isModelLocallyAvailable("pyannote/speaker-diarization", "pyannote")) {
+                LOGGER.warn("PyAnnote diarisation model not available. Diarisation may fail.");
+            }
+        }
+
+        if (progressCallback instanceof AudioProcessor.StageAwareCallback stageAware) {
+            stageAware.onStageStart("Transcription", calculateEstimatedTime(audioDuration, config));
+        }
+
+        File audioFileHandle = new File(audioFilePath);
+        boolean isSegmentSubCall = config.isSkipSegmentation()
+                && isInsideSegmentWorkDir(audioFileHandle.getParentFile());
+        String fileName = audioFileHandle.getName();
+
+        if (timeEstimator != null && !isSegmentSubCall) {
+            double fileSizeMB2 = audioFileHandle.length() / (1024.0 * 1024.0);
+            timeEstimator.startFileProcessing(fileName, fileSizeMB2, model,
+                    List.of("transcription_" + model));
+        }
+        try {
+            TranscriptionResult result =
+                    transcribeWithRetry(audioFilePath, config, progressCallback, audioDuration);
+            if (timeEstimator != null && !isSegmentSubCall) timeEstimator.completeFileProcessing(fileName);
+            return result;
+        } catch (Exception e) {
+            if (timeEstimator != null && !isSegmentSubCall) timeEstimator.completeFileProcessing(fileName);
+            throw e;
+        }
     }
-    
+
     // ========================================================================
-    //  Alignment Model (unchanged)
+    //  Public Methods
     // ========================================================================
 
-    private void ensureAlignmentModelAvailable(AudioProcessor.ProgressCallback progressCallback) 
+    /**
+     * Returns the performance statistics for the service.
+     *
+     * @return a {@link PerformanceStats} object
+     */
+    public PerformanceStats getPerformanceStats() {
+        return new PerformanceStats(
+            totalSegmentsProcessed.get(),
+            totalProcessingTimeMs.get()
+        );
+    }
+
+    /**
+     * Returns a detailed performance report.
+     *
+     * @return a formatted performance report string
+     */
+    public String getPerformanceReport() {
+        StringBuilder report = new StringBuilder();
+        report.append("=== WhisperX Performance Report ===\n");
+        report.append("Total segments processed: ").append(totalSegmentsProcessed.get()).append("\n");
+        report.append("Total processing time: ").append(formatDuration(totalProcessingTimeMs.get())).append("\n");
+        report.append("GPU enabled: ").append(isGpuEnabled()).append("\n");
+
+        if (totalSegmentsProcessed.get() > 0) {
+            double avgTime = (double) totalProcessingTimeMs.get() / totalSegmentsProcessed.get();
+            report.append("Average time per segment: ").append(formatDuration((long) avgTime)).append("\n");
+        }
+
+        if (gpuConfig.isGpuAvailable()) {
+            report.append("GPU: ").append(gpuConfig.getGpuName()).append("\n");
+            report.append("GPU Memory: ").append(gpuConfig.getGpuMemoryMB()).append(" MB\n");
+        }
+
+        return report.toString();
+    }
+
+    // ========================================================================
+    //  Inner Class: PerformanceStats
+    // ========================================================================
+
+    /**
+     * Performance statistics record.
+     */
+    public static class PerformanceStats {
+        public final long segmentsProcessed;
+        public final long totalProcessingTimeMs;
+
+        /**
+         * Constructs a new PerformanceStats.
+         *
+         * @param segments the number of segments processed
+         * @param time the total processing time in milliseconds
+         */
+        public PerformanceStats(long segments, long time) {
+            this.segmentsProcessed = segments;
+            this.totalProcessingTimeMs = time;
+        }
+
+        /**
+         * Returns the average time per segment.
+         *
+         * @return the average time in milliseconds
+         */
+        public double getAverageTimePerSegmentMs() {
+            return segmentsProcessed > 0 ? (double) totalProcessingTimeMs / segmentsProcessed : 0;
+        }
+    }
+
+    // ========================================================================
+    //  Private Helpers (Documented)
+    // ========================================================================
+
+    /**
+     * Wraps a callback for alignment model download progress.
+     *
+     * @param parentCallback the parent callback
+     * @param weight the weight of this stage in overall progress
+     * @return the wrapped callback
+     */
+    private AudioProcessor.ProgressCallback wrapAlignmentProgress(
+            AudioProcessor.ProgressCallback parentCallback, double weight) {
+        if (parentCallback == null) return null;
+        return p -> parentCallback.updateProgress(Math.min(1.0, p * weight));
+    }
+
+    /**
+     * Ensures the alignment model is available for diarisation.
+     *
+     * @param progressCallback the progress callback (may be {@code null})
+     * @throws Exception if the model cannot be downloaded
+     */
+    private void ensureAlignmentModelAvailable(AudioProcessor.ProgressCallback progressCallback)
             throws Exception {
         Path modelPath = getAlignmentModelPath();
 
         if (Files.exists(modelPath) && Files.size(modelPath) >= ALIGNMENT_MODEL_MIN_SIZE) {
-            LOGGER.info("Alignment model found at: {} ({} MB)", 
+            LOGGER.info("Alignment model found at: {} ({} MB)",
                 modelPath, Files.size(modelPath) / (1024 * 1024));
             return;
         }
@@ -404,7 +576,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
                     actualSize, ALIGNMENT_MODEL_MIN_SIZE));
             }
 
-            LOGGER.info("Alignment model downloaded successfully: {} MB", 
+            LOGGER.info("Alignment model downloaded successfully: {} MB",
                 actualSize / (1024 * 1024));
 
             if (progressCallback != null) {
@@ -422,55 +594,60 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             throw new Exception("Failed to download alignment model: " + e.getMessage(), e);
         }
     }
-    
-    private AudioProcessor.ProgressCallback wrapAlignmentProgress(
-            AudioProcessor.ProgressCallback parentCallback, double weight) {
-        if (parentCallback == null) return null;
-        return p -> parentCallback.updateProgress(Math.min(1.0, p * weight));
-    }
 
-    private Path getAlignmentModelPath() {
-        String os = System.getProperty("os.name").toLowerCase();
-        Path basePath;
-
-        if (os.contains("win")) {
-            String appData = System.getenv("APPDATA");
-            if (appData != null && !appData.isBlank()) {
-                basePath = Paths.get(appData, ".cache", "torch", "hub", "checkpoints");
-            } else {
-                basePath = Paths.get(System.getProperty("user.home"), ".cache", "torch", "hub", "checkpoints");
-            }
-        } else if (os.contains("mac")) {
-            basePath = Paths.get(System.getProperty("user.home"), 
-                "Library", "Caches", "torch", "hub", "checkpoints");
-        } else {
-            basePath = Paths.get(System.getProperty("user.home"), 
-                ".cache", "torch", "hub", "checkpoints");
+    /**
+     * Resolves the HuggingFace token from environment, system property, or file.
+     *
+     * @return the token, or {@code null} if not found
+     */
+    private static String resolveHfToken() {
+        String token = System.getenv("HF_TOKEN");
+        if (token != null && !token.isBlank()) {
+            LOGGER.debug("HF token loaded from environment variable HF_TOKEN.");
+            return token.trim();
         }
 
-        return basePath.resolve(ALIGNMENT_MODEL_FILENAME);
+        token = System.getProperty("hf.token");
+        if (token != null && !token.isBlank()) {
+            LOGGER.warn("HF token loaded from -Dhf.token system property — this is also");
+            LOGGER.warn("visible in process arguments and run-console logs. Prefer an");
+            LOGGER.warn("HF_TOKEN environment variable or the ~/.audiomanager/hf_token file.");
+            return token.trim();
+        }
+
+        Path tokenFile = Paths.get(System.getProperty("user.home"), ".audiomanager", "hf_token");
+        if (Files.exists(tokenFile)) {
+            try {
+                token = Files.readString(tokenFile, StandardCharsets.UTF_8).strip();
+                if (!token.isBlank()) {
+                    LOGGER.debug("HF token loaded from file: {}", tokenFile);
+                    return token;
+                }
+            } catch (IOException e) {
+                LOGGER.warn("Could not read HF token file {}: {}", tokenFile, e.getMessage());
+            }
+        }
+
+        return null;
     }
 
-    // ========================================================================
-    //  Python interpreter resolution (unchanged)
-    // ========================================================================
-
+    /**
+     * Resolves the Python executable for WhisperX.
+     *
+     * @return the Python executable path
+     */
     public static String resolvePythonExecutable() {
         final boolean isWindows =
                 System.getProperty("os.name", "").toLowerCase().contains("win");
 
         String override = System.getenv("WHISPERX_PYTHON");
-
         if (override != null && !override.isBlank()) {
             Path overridePath = Paths.get(override.trim());
-
             if (Files.exists(overridePath)) {
                 LOGGER.info("Using Python from WHISPERX_PYTHON: {}", overridePath);
-
                 if (isWhisperXInstalled(overridePath.toString())) {
                     return overridePath.toAbsolutePath().toString();
                 }
-
                 LOGGER.warn("Python specified by WHISPERX_PYTHON exists but WhisperX is not installed.");
             }
         }
@@ -482,17 +659,13 @@ public class WhisperXTranscriptionService implements TranscriptionService {
                 LOGGER.info("Using bundled WhisperX Python: {}", bundledPython);
                 return bundledPython;
             }
-            LOGGER.warn("Studio reports a bundled Python at {} but WhisperX is not installed there — "
-                    + "falling back to PATH search.", bundledPython);
         }
 
         String locateCommand = isWindows ? "where" : "which";
-
         try {
             Process process = new ProcessBuilder(locateCommand, "whisperx")
                     .redirectErrorStream(true)
                     .start();
-
             process.waitFor(5, TimeUnit.SECONDS);
 
             String output = new String(
@@ -501,23 +674,16 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
             for (String line : output.split("\\R")) {
                 line = line.trim();
-
-                if (line.isBlank()) {
-                    continue;
-                }
+                if (line.isBlank()) continue;
 
                 Path whisperxExecutable;
-
                 try {
                     whisperxExecutable = Paths.get(line);
-                }
-                catch (InvalidPathException ex) {
+                } catch (InvalidPathException ex) {
                     continue;
                 }
 
-                if (!Files.exists(whisperxExecutable)) {
-                    continue;
-                }
+                if (!Files.exists(whisperxExecutable)) continue;
 
                 Path python = isWindows
                         ? whisperxExecutable.getParent().resolve("python.exe")
@@ -525,23 +691,18 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
                 if (Files.exists(python)) {
                     LOGGER.info("Python derived from WhisperX executable: {}", python);
-
                     if (isWhisperXInstalled(python.toString())) {
                         return python.toAbsolutePath().toString();
                     }
                 }
             }
-
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            LOGGER.debug("Interrupted while locating WhisperX.", ex);
-        }
-        catch (IOException ex) {
+        } catch (IOException ex) {
             LOGGER.debug("Unable to locate WhisperX executable.", ex);
         }
 
         List<Path> candidates = new ArrayList<>();
-
         String userHome = System.getProperty("user.home");
 
         if (isWindows) {
@@ -553,12 +714,8 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
 
         for (Path python : candidates) {
-            if (!Files.exists(python)) {
-                continue;
-            }
-
+            if (!Files.exists(python)) continue;
             LOGGER.info("Testing Python interpreter: {}", python);
-
             if (isWhisperXInstalled(python.toString())) {
                 LOGGER.info("WhisperX found using {}", python);
                 return python.toAbsolutePath().toString();
@@ -584,6 +741,12 @@ public class WhisperXTranscriptionService implements TranscriptionService {
                 + "C:\\AI\\whisperx_env\\Scripts\\python.exe\n");
     }
 
+    /**
+     * Checks if WhisperX is installed for a given Python interpreter.
+     *
+     * @param pythonExecutable the Python executable path
+     * @return {@code true} if WhisperX is installed
+     */
     private static boolean isWhisperXInstalled(String pythonExecutable) {
         try {
             Process process = new ProcessBuilder(
@@ -608,7 +771,6 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             }
 
             int exitCode = process.exitValue();
-
             if (exitCode == 0) {
                 LOGGER.debug("WhisperX check succeeded (exit 0).");
             } else {
@@ -624,101 +786,16 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
-    public void setSegmentListener(SegmentProgressListener listener) {
-        this.segmentListener = listener;
-    }
-
     // ========================================================================
-    //  Transcription (with GPU support)
+    //  Private Helper Methods
     // ========================================================================
 
-    @Override
-    public TranscriptionResult transcribe(String audioFilePath,
-                                          TranscriptionConfig config,
-                                          AudioProcessor.ProgressCallback progressCallback,
-                                          double audioDuration) throws Exception {
-        LOGGER.info("Starting WhisperX transcription: {}", audioFilePath);
-
-        // Initialize GPU if not already done
-        initGpu();
-
-        String model = normaliseModelName(config.getModel());
-
-        if (config.isDiarizeEnabled()) {
-            LOGGER.info("Diarization enabled - ensuring alignment model is available");
-            try {
-                AudioProcessor.ProgressCallback alignmentProgress = 
-                    wrapAlignmentProgress(progressCallback, 0.05);
-                ensureAlignmentModelAvailable(alignmentProgress);
-                LOGGER.info("Alignment model is ready");
-            } catch (Exception e) {
-                LOGGER.warn("Failed to ensure alignment model: {}", e.getMessage());
-                LOGGER.warn("Diarization will be disabled for this transcription");
-                config = createFallbackConfig(config);
-            }
-        }
-
-        if (model.contains("large") && !config.isSkipSegmentation()) {
-            LOGGER.info("Using segmentation for large model: {}", model);
-            SegmentProcessor processor = new SegmentProcessor(
-                    this, dependencyManager, timeEstimator, segmentListener, errorReporter);
-            return processor.processWithSegments(audioFilePath, config, progressCallback, audioDuration);
-        }
-
-        showModelCacheStatus();
-
-        String whisperxModel = model;
-
-        try {
-            ensureModelAvailable(whisperxModel, "whisperx", progressCallback);
-        } catch (ModelDownloadException e) {
-            if ("paused".equals(e.getErrorType())) {
-                throw new Exception("Download paused by user");
-            }
-            throw new Exception("Model error: " + e.getUserFriendlyMessage(), e);
-        }
-
-        if (hfToken != null && config.isDiarizeEnabled()) {
-            if (!modelManager.isModelValid("pyannote/speaker-diarization", "pyannote")
-                    && !isModelLocallyAvailable("pyannote/speaker-diarization", "pyannote")) {
-                LOGGER.warn("PyAnnote diarisation model not available. Diarisation may fail.");
-            }
-        }
-
-        if (progressCallback instanceof AudioProcessor.StageAwareCallback stageAware) {
-            stageAware.onStageStart("Transcription", calculateEstimatedTime(audioDuration, config));
-        }
-
-        File audioFileHandle = new File(audioFilePath);
-        boolean isSegmentSubCall = config.isSkipSegmentation()
-                && isInsideSegmentWorkDir(audioFileHandle.getParentFile());
-        String fileName = audioFileHandle.getName();
-
-        if (timeEstimator != null && !isSegmentSubCall) {
-            double fileSizeMB = new File(audioFilePath).length() / (1024.0 * 1024.0);
-            timeEstimator.startFileProcessing(fileName, fileSizeMB, model,
-                    List.of("transcription_" + model));
-        }
-        try {
-            // Pass GPU info to the transcription call
-            TranscriptionResult result =
-                    transcribeWithRetry(audioFilePath, config, progressCallback, audioDuration);
-            if (timeEstimator != null && !isSegmentSubCall) timeEstimator.completeFileProcessing(fileName);
-            return result;
-        } catch (Exception e) {
-            if (timeEstimator != null && !isSegmentSubCall) timeEstimator.completeFileProcessing(fileName);
-            throw e;
-        }
-    }
-
-    // ========================================================================
-    //  Model management (unchanged except for GPU logging)
-    // ========================================================================
-
+    /**
+     * Ensures a model is available in the cache.
+     */
     private void ensureModelAvailable(String modelName, String modelType,
                                       AudioProcessor.ProgressCallback progressCallback)
             throws ModelDownloadException, Exception {
-
         if (modelManager.isModelValid(modelName, modelType)) {
             LOGGER.info("✓ Model '{}' already validated.", modelName);
             return;
@@ -752,17 +829,190 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         throw new ModelDownloadException(modelName, message, "not_installed_locally");
     }
 
-    // ========================================================================
-    //  Timeout calculation (unchanged)
-    // ========================================================================
+    /**
+     * Checks if a model is available locally.
+     */
+    private boolean isModelLocallyAvailable(String modelName, String modelType) {
+        if (modelManager.isModelValid(modelName, modelType)) return true;
+        if (isModelInHuggingFaceCache(modelName, modelType)) return true;
+        return modelManager.findModelPath(modelName, modelType) != null;
+    }
 
+    /**
+     * Checks if a model exists in the HuggingFace cache.
+     */
+    private boolean isModelInHuggingFaceCache(String modelName, String modelType) {
+        return HuggingFaceCacheResolver.resolve(modelName).isPresent();
+    }
+
+    /**
+     * Validates a locally available model.
+     */
+    private boolean validateLocalModel(String modelName, String modelType) {
+        LOGGER.info("Validating local model '{}'…", modelName);
+
+        Path modelPath = modelManager.findModelPath(modelName, modelType);
+        if (modelPath != null && hasModelFilesRecursive(modelPath)) {
+            LOGGER.info("✓ Model '{}' validated at: {}", modelName, modelPath);
+
+            long size = getModelSizeFromPath(modelPath);
+            modelManager.registerModel(modelName, modelType, null, size);
+            modelManager.markModelDownloaded(modelName, modelType, null, size);
+            return true;
+        }
+
+        LOGGER.warn("Local model '{}' could not be validated – required files missing.", modelName);
+        return false;
+    }
+
+    /**
+     * Checks if a directory contains model files.
+     */
+    private boolean hasModelFilesRecursive(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) return false;
+        try (var stream = Files.walk(dir, FileVisitOption.FOLLOW_LINKS)) {
+            return stream.anyMatch(p -> {
+                String name = p.getFileName().toString().toLowerCase();
+                return name.endsWith(".bin") || name.endsWith(".safetensors") || name.endsWith(".pt");
+            });
+        } catch (IOException e) {
+            LOGGER.debug("Error walking {}: {}", dir, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Gets the size of a model directory.
+     */
+    private long getModelSizeFromPath(Path modelPath) {
+        try {
+            return Files.walk(modelPath, FileVisitOption.FOLLOW_LINKS)
+                .filter(Files::isRegularFile)
+                .mapToLong(p -> { try { return Files.size(p); } catch(IOException e){ return 0; } })
+                .sum();
+        } catch (IOException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Returns the path to the alignment model.
+     */
+    private Path getAlignmentModelPath() {
+        String os = System.getProperty("os.name").toLowerCase();
+        Path basePath;
+
+        if (os.contains("win")) {
+            String appData = System.getenv("APPDATA");
+            if (appData != null && !appData.isBlank()) {
+                basePath = Paths.get(appData, ".cache", "torch", "hub", "checkpoints");
+            } else {
+                basePath = Paths.get(System.getProperty("user.home"), ".cache", "torch", "hub", "checkpoints");
+            }
+        } else if (os.contains("mac")) {
+            basePath = Paths.get(System.getProperty("user.home"),
+                "Library", "Caches", "torch", "hub", "checkpoints");
+        } else {
+            basePath = Paths.get(System.getProperty("user.home"),
+                ".cache", "torch", "hub", "checkpoints");
+        }
+
+        return basePath.resolve(ALIGNMENT_MODEL_FILENAME);
+    }
+
+    /**
+     * Parses stage timing lines from the Python script output.
+     */
+    private void parseStageTimingLine(String line) {
+        java.util.regex.Matcher m = STAGE_TIMING_PATTERN.matcher(line);
+        if (m.find()) {
+            try {
+                String stage = m.group(1);
+                double value = Double.parseDouble(m.group(2));
+                if ("peak_memory_mb".equals(stage)) {
+                    lastPythonPeakMemoryMb = value;
+                } else if ("avg_cpu_percent".equals(stage)) {
+                    lastPythonAvgCpuPercent = value;
+                } else {
+                    lastPythonStageTimingsMs.put(stage, Math.round(value * 1000));
+                }
+            } catch (NumberFormatException e) {
+                LOGGER.debug("Could not parse STAGE_TIMING line: {}", line);
+            }
+        }
+    }
+
+    /**
+     * Shows model cache status.
+     */
+    private void showModelCacheStatus() {
+        LOGGER.info("Model cache status check — see full cache details in debug log.");
+    }
+
+    /**
+     * Normalises the model name.
+     */
+    private String normaliseModelName(String model) {
+        if (model == null || model.isBlank()) return "base";
+        String m = model.toLowerCase().trim();
+        if ("large".equals(m)) {
+            LOGGER.info("Normalising model alias 'large' → 'large-v2'.");
+            return "large-v2";
+        }
+        return m;
+    }
+
+    /**
+     * Creates a fallback configuration with diarisation disabled.
+     */
+    private TranscriptionConfig createFallbackConfig(TranscriptionConfig original) {
+        return TranscriptionConfig.builder()
+            .model(original.getModel())
+            .language(original.getLanguage())
+            .timestampsEnabled(original.isTimestampsEnabled())
+            .confidenceEnabled(original.isConfidenceEnabled())
+            .outputFormat(original.getOutputFormat())
+            .volumeBoost(original.getVolumeBoost())
+            .silenceThreshold(original.getSilenceThreshold())
+            .silenceDuration(original.getSilenceDuration())
+            .noiseReduction(original.isNoiseReduction())
+            .srtMaxChars(original.getSrtMaxChars())
+            .srtMaxLines(original.getSrtMaxLines())
+            .diarizeEnabled(false)
+            .hfToken(original.getHfToken())
+            .maxSegmentDuration(original.getMaxSegmentDuration())
+            .enabled(original.isEnabled())
+            .skipSegmentation(original.isSkipSegmentation())
+            .build();
+    }
+
+    /**
+     * Checks if a file is inside a segment work directory.
+     */
+    private boolean isInsideSegmentWorkDir(File dir) {
+        while (dir != null) {
+            if (dir.getName().startsWith("segment_work_")) return true;
+            dir = dir.getParentFile();
+        }
+        return false;
+    }
+
+    /**
+     * Calculates the estimated time for transcription.
+     */
+    private double calculateEstimatedTime(double audioDuration, TranscriptionConfig config) {
+        return calculateTimeout(audioDuration, config.getModel()) * 0.7;
+    }
+
+    /**
+     * Calculates the timeout for a transcription.
+     */
     private int calculateTimeout(double audioDuration, String model) {
-        // GPU mode is faster, so we can use shorter timeouts
         boolean gpuMode = isGpuEnabled();
-        double gpuSpeedup = gpuMode ? 0.4 : 1.0; // 2.5x speedup on GPU
+        double gpuSpeedup = gpuMode ? 0.4 : 1.0;
 
         if (!useGPU && (model.contains("large") || model.equals("large-v2") || model.equals("large-v3"))) {
-            return (int) (4 * 3600 * gpuSpeedup); // 14400 seconds * speedup
+            return (int) (4 * 3600 * gpuSpeedup);
         }
 
         double factor;
@@ -788,7 +1038,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         timeout         = Math.max(timeout, minimum);
         timeout         = Math.min(timeout, 48 * 3600L);
 
-        LOGGER.info("Timeout for model={} audioDuration={}s → {}s (GPU: {})", 
+        LOGGER.info("Timeout for model={} audioDuration={}s → {}s (GPU: {})",
             model, audioDuration, timeout, gpuMode);
 
         if (timeout > Integer.MAX_VALUE) {
@@ -798,10 +1048,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         return (int) timeout;
     }
 
-    // ========================================================================
-    //  Core transcription
-    // ========================================================================
-
+    /**
+     * Transcribes with retry and model fallback.
+     */
     private TranscriptionResult transcribeWithRetry(String audioFilePath,
                                                     TranscriptionConfig config,
                                                     AudioProcessor.ProgressCallback progressCallback,
@@ -811,7 +1060,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
 
         for (String modelName : modelFallbacks) {
             try {
-                LOGGER.info("Attempting transcription with model: {} (GPU: {})", 
+                LOGGER.info("Attempting transcription with model: {} (GPU: {})",
                     modelName, isGpuEnabled() ? "enabled" : "disabled");
                 return executeWhisperX(audioFilePath, config, progressCallback, audioDuration, modelName);
             } catch (Exception e) {
@@ -830,6 +1079,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         throw new Exception("All model fallbacks exhausted.", lastException);
     }
 
+    /**
+     * Builds the model fallback chain.
+     */
     private List<String> buildModelFallbackChain(String requestedModel) {
         List<String> chain = new ArrayList<>();
         String normalized = normaliseModelName(requestedModel);
@@ -845,10 +1097,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         return chain;
     }
 
-    // ========================================================================
-    //  Execute WhisperX (with GPU support)
-    // ========================================================================
-
+    /**
+     * Executes WhisperX on a file.
+     */
     private TranscriptionResult executeWhisperX(String audioFilePath,
                                                 TranscriptionConfig config,
                                                 AudioProcessor.ProgressCallback progressCallback,
@@ -862,7 +1113,7 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             List<String> command = buildWhisperXCommand(scriptFile, audioFilePath, outputDir, config, modelName);
             int timeoutSeconds = calculateTimeout(audioDuration, modelName);
 
-            LOGGER.info("Running WhisperX — timeout: {}s, output: {}, GPU: {}", 
+            LOGGER.info("Running WhisperX — timeout: {}s, output: {}, GPU: {}",
                 timeoutSeconds, outputDir, isGpuEnabled() ? "enabled" : "disabled");
 
             StringBuilder combinedLog = new StringBuilder();
@@ -929,251 +1180,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
-    // ========================================================================
-    //  WhisperX environment (with GPU support)
-    // ========================================================================
-
-    private Map<String, String> buildWhisperXEnv(TranscriptionConfig config) {
-        Map<String, String> env = new HashMap<>();
-
-        audiomanager.Studio studio = audiomanager.Studio.getInstance();
-        if (studio != null && studio.getWhisperEnvPath() != null) {
-            java.nio.file.Path envPath = java.nio.file.Paths.get(studio.getWhisperEnvPath());
-            if (java.nio.file.Files.exists(envPath)) {
-                String scriptsDir = envPath.resolve("Scripts").toString();
-                String existingPath = System.getenv("PATH");
-                env.put("PATH", scriptsDir + java.io.File.pathSeparator
-                        + (existingPath != null ? existingPath : ""));
-            }
-        }
-
-        if (hfToken != null && !hfToken.isBlank() && config.isDiarizeEnabled()) {
-            env.put("HF_TOKEN", hfToken);
-        }
-
-        // GPU-specific environment variables
-        if (isGpuEnabled()) {
-            env.put("CUDA_VISIBLE_DEVICES", "0");
-            env.put("TF_CPP_MIN_LOG_LEVEL", "2");
-            env.put("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128");
-            LOGGER.debug("GPU environment variables set for WhisperX");
-        }
-
-        env.put("MKL_NUM_THREADS", "1");
-        env.put("OMP_NUM_THREADS", "1");
-
-        env.put("HF_HUB_DISABLE_PROGRESS_BARS", "false");
-        env.put("HF_HUB_DISABLE_TELEMETRY", "1");
-        env.put("HF_HUB_LOCAL_FILES_ONLY", "1");
-
-        String httpProxyHost = System.getProperty("http.proxyHost");
-        String httpProxyPort = System.getProperty("http.proxyPort");
-        if (httpProxyHost != null && !httpProxyHost.isEmpty()) {
-            String proxyUrl = "http://" + httpProxyHost;
-            if (httpProxyPort != null && !httpProxyPort.isEmpty()) {
-                proxyUrl += ":" + httpProxyPort;
-            }
-            env.put("HTTP_PROXY", proxyUrl);
-            env.put("http_proxy", proxyUrl);
-        }
-
-        String httpsProxyHost = System.getProperty("https.proxyHost");
-        String httpsProxyPort = System.getProperty("https.proxyPort");
-        if (httpsProxyHost != null && !httpsProxyHost.isEmpty()) {
-            String proxyUrl = "http://" + httpsProxyHost;
-            if (httpsProxyPort != null && !httpsProxyPort.isEmpty()) {
-                proxyUrl += ":" + httpsProxyPort;
-            }
-            env.put("HTTPS_PROXY", proxyUrl);
-            env.put("https_proxy", proxyUrl);
-        }
-
-        String nonProxyHosts = System.getProperty("http.nonProxyHosts");
-        if (nonProxyHosts != null && !nonProxyHosts.isEmpty()) {
-            String noProxy = nonProxyHosts.replace("|", ",");
-            env.put("NO_PROXY", noProxy);
-            env.put("no_proxy", noProxy);
-        }
-
-        env.put("PYTHONUTF8", "1");
-        env.put("PYTHONIOENCODING", "UTF-8");
-
-        env = dependencyManager.withFfmpegOnPath(env);
-
-        return env;
-    }
-
-    // ========================================================================
-    //  Progress parsing (unchanged)
-    // ========================================================================
-
-    private double parseWhisperXProgress(String line) {
-        if (line.contains("|") && line.contains("%")) {
-            try {
-                String pctStr = line.strip().replaceFirst("^(\\d+)%.*", "$1");
-                int pct = Integer.parseInt(pctStr);
-                return pct / 100.0;
-            } catch (NumberFormatException ignored) { }
-        }
-        return -1.0;
-    }
-
-    // ========================================================================
-    //  Helpers (with GPU support)
-    // ========================================================================
-
-    private boolean isInsideSegmentWorkDir(File dir) {
-        while (dir != null) {
-            if (dir.getName().startsWith("segment_work_")) return true;
-            dir = dir.getParentFile();
-        }
-        return false;
-    }
-
-    private boolean checkGPUAvailability() {
-        // Now handled by GpuConfig
-        return isGpuEnabled();
-    }
-
-    private Path createTempOutputDir(Path audioPath) throws IOException {
-        Path tempDir = audioPath.getParent().resolve(
-                "whisperx_output_" + UUID.randomUUID().toString().substring(0, 8));
-        Files.createDirectories(tempDir);
-        return tempDir;
-    }
-
-    private void cleanupTempDir(Path tempDir) {
-        try {
-            if (Files.exists(tempDir)) {
-                Files.walk(tempDir)
-                        .sorted(Comparator.reverseOrder())
-                        .forEach(path -> {
-                            try {
-                                Files.delete(path);
-                            } catch (IOException e) {
-                                LOGGER.warn("Could not delete temp file: {} — {}", path, e.getMessage());
-                            }
-                        });
-            }
-        } catch (IOException e) {
-            LOGGER.warn("Failed to cleanup temp directory: {}", tempDir);
-        }
-    }
-
-    private double calculateDuration(List<TranscriptionSegment> segments) {
-        return segments.stream().mapToDouble(TranscriptionSegment::getEnd).max().orElse(0.0);
-    }
-
-    private double calculateEstimatedTime(double audioDuration, TranscriptionConfig config) {
-        return calculateTimeout(audioDuration, config.getModel()) * 0.7;
-    }
-
-    private String normaliseModelName(String model) {
-        if (model == null || model.isBlank()) return "base";
-        String m = model.toLowerCase().trim();
-        if ("large".equals(m)) {
-            LOGGER.info("Normalising model alias 'large' → 'large-v2'.");
-            return "large-v2";
-        }
-        return m;
-    }
-
-    // ========================================================================
-    //  Model location methods (unchanged)
-    // ========================================================================
-
-    private boolean isModelLocallyAvailable(String modelName, String modelType) {
-        if (modelManager.isModelValid(modelName, modelType)) return true;
-        if (isModelInHuggingFaceCache(modelName, modelType)) return true;
-        return modelManager.findModelPath(modelName, modelType) != null;
-    }
-
-    private boolean isModelInHuggingFaceCache(String modelName, String modelType) {
-        String userHome = System.getProperty("user.home");
-        String modelFolderName = "models--Systran--faster-whisper-" + modelName.replace("-", "--");
-
-        List<Path> possiblePaths = Arrays.asList(
-            Paths.get(userHome, ".cache", "huggingface", "hub", modelFolderName),
-            Paths.get(System.getenv("LOCALAPPDATA"), "huggingface", "hub", modelFolderName),
-            Paths.get(userHome, ".cache", "huggingface", modelFolderName),
-            Paths.get(userHome, ".cache", "huggingface", "hub", modelFolderName, "snapshots"),
-            Paths.get(System.getenv("LOCALAPPDATA"), "huggingface", "hub", modelFolderName, "snapshots"),
-            modelManager.getStableCacheDir().resolve(modelFolderName)
-        );
-
-        for (Path path : possiblePaths) {
-            if (path != null && Files.exists(path)) {
-                try {
-                    long fileCount = Files.walk(path, FileVisitOption.FOLLOW_LINKS)
-                        .filter(Files::isRegularFile)
-                        .filter(p -> {
-                            String name = p.getFileName().toString().toLowerCase();
-                            return name.endsWith(".bin") || 
-                                   name.endsWith(".safetensors") ||
-                                   name.endsWith(".json") ||
-                                   name.endsWith(".txt");
-                        })
-                        .count();
-
-                    if (fileCount > 3) {
-                        LOGGER.debug("Found model {} at {} with {} files", 
-                            modelName, path, fileCount);
-                        return true;
-                    }
-                } catch (IOException e) {
-                    LOGGER.warn("Error checking path {}: {}", path, e.getMessage());
-                }
-            }
-        }
-
-        return false;
-    }
-    
-    private boolean validateLocalModel(String modelName, String modelType) {
-        LOGGER.info("Validating local model '{}'…", modelName);
-
-        Path modelPath = modelManager.findModelPath(modelName, modelType);
-        if (modelPath != null && hasModelFilesRecursive(modelPath)) {
-            LOGGER.info("✓ Model '{}' validated at: {}", modelName, modelPath);
-
-            long size = getModelSizeFromPath(modelPath);
-            modelManager.registerModel(modelName, modelType, null, size);
-            modelManager.markModelDownloaded(modelName, modelType, null, size);
-            return true;
-        }
-
-        LOGGER.warn("Local model '{}' could not be validated – required files missing.", modelName);
-        return false;
-    }
-
-    private boolean hasModelFilesRecursive(Path dir) {
-        if (dir == null || !Files.isDirectory(dir)) return false;
-        try (var stream = Files.walk(dir, FileVisitOption.FOLLOW_LINKS)) {
-            return stream.anyMatch(p -> {
-                String name = p.getFileName().toString().toLowerCase();
-                return name.endsWith(".bin") || name.endsWith(".safetensors") || name.endsWith(".pt");
-            });
-        } catch (IOException e) {
-            LOGGER.debug("Error walking {}: {}", dir, e.getMessage());
-            return false;
-        }
-    }
-
-    private long getModelSizeFromPath(Path modelPath) {
-        try {
-            return Files.walk(modelPath, FileVisitOption.FOLLOW_LINKS)
-                .filter(Files::isRegularFile)
-                .mapToLong(p -> { try { return Files.size(p); } catch(IOException e){ return 0; } })
-                .sum();
-        } catch (IOException e) {
-            return 0;
-        }
-    }
-
-    // ========================================================================
-    //  Build WhisperX Command (with GPU support)
-    // ========================================================================
-
+    /**
+     * Builds the WhisperX command.
+     */
     private List<String> buildWhisperXCommand(Path scriptFile, String audioFilePath,
                                               Path outputDir, TranscriptionConfig config,
                                               String modelName) {
@@ -1188,9 +1197,6 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         cmd.add("--output-format");
         cmd.add("json");
 
-        // GPU device and compute type are now handled in the script itself
-        // via getDeviceString() and getComputeType()
-
         if (config.getLanguage() != null && !config.getLanguage().isBlank()
                 && !"auto".equalsIgnoreCase(config.getLanguage())) {
             cmd.add("--language");
@@ -1204,16 +1210,14 @@ public class WhisperXTranscriptionService implements TranscriptionService {
             cmd.add("--include-speakers");
         }
 
-        // Log GPU status
         LOGGER.info("WhisperX command built with GPU: {}", isGpuEnabled() ? "enabled" : "disabled");
 
         return cmd;
     }
 
-    // ========================================================================
-    //  Write Transcription Script (with GPU support)
-    // ========================================================================
-
+    /**
+     * Writes the transcription script.
+     */
     private Path writeTranscriptionScript(Path audioPath, Path outputDir,
                                           TranscriptionConfig config,
                                           String modelName) throws IOException {
@@ -1241,14 +1245,13 @@ public class WhisperXTranscriptionService implements TranscriptionService {
     }
 
     /**
-     * Build the fallback transcription script with GPU support.
-     * This is used when the classpath resource is not available.
+     * Builds a fallback transcription script.
      */
     private String buildFallbackTranscriptionScript(TranscriptionConfig config, String modelName) {
         String device = getDeviceString();
         String computeType = getComputeType();
         String modelArg = modelName;
-        
+
         return "import sys, json, os\n"
                 + "os.environ.setdefault('HF_HUB_OFFLINE', '1')\n"
                 + "os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')\n"
@@ -1268,10 +1271,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
                 + "print('DONE')\n";
     }
 
-    // ========================================================================
-    //  Output parsing and other helpers (unchanged)
-    // ========================================================================
-
+    /**
+     * Logs a warning about user script override.
+     */
     private void logUserScriptOverride(Path userScript) {
         String detail;
         try {
@@ -1292,6 +1294,97 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         LOGGER.warn("=============================================================");
     }
 
+    /**
+     * Creates a temporary output directory.
+     */
+    private Path createTempOutputDir(Path audioPath) throws IOException {
+        Path tempDir = audioPath.getParent().resolve(
+                "whisperx_output_" + UUID.randomUUID().toString().substring(0, 8));
+        Files.createDirectories(tempDir);
+        return tempDir;
+    }
+
+    /**
+     * Cleans up a temporary output directory.
+     */
+    private void cleanupTempDir(Path tempDir) {
+        try {
+            if (Files.exists(tempDir)) {
+                Files.walk(tempDir)
+                        .sorted(Comparator.reverseOrder())
+                        .forEach(path -> {
+                            try {
+                                Files.delete(path);
+                            } catch (IOException e) {
+                                LOGGER.warn("Could not delete temp file: {} — {}", path, e.getMessage());
+                            }
+                        });
+            }
+        } catch (IOException e) {
+            LOGGER.warn("Failed to cleanup temp directory: {}", tempDir);
+        }
+    }
+
+    /**
+     * Builds the environment for WhisperX.
+     */
+    private Map<String, String> buildWhisperXEnv(TranscriptionConfig config) {
+        Map<String, String> env = new HashMap<>();
+
+        audiomanager.Studio studio = audiomanager.Studio.getInstance();
+        if (studio != null && studio.getWhisperEnvPath() != null) {
+            java.nio.file.Path envPath = java.nio.file.Paths.get(studio.getWhisperEnvPath());
+            if (java.nio.file.Files.exists(envPath)) {
+                String scriptsDir = envPath.resolve("Scripts").toString();
+                String existingPath = System.getenv("PATH");
+                env.put("PATH", scriptsDir + java.io.File.pathSeparator
+                        + (existingPath != null ? existingPath : ""));
+            }
+        }
+
+        if (hfToken != null && !hfToken.isBlank() && config.isDiarizeEnabled()) {
+            env.put("HF_TOKEN", hfToken);
+        }
+
+        if (isGpuEnabled()) {
+            env.put("CUDA_VISIBLE_DEVICES", "0");
+            env.put("TF_CPP_MIN_LOG_LEVEL", "2");
+            env.put("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128");
+            LOGGER.debug("GPU environment variables set for WhisperX");
+        }
+
+        env.put("MKL_NUM_THREADS", "1");
+        env.put("OMP_NUM_THREADS", "1");
+
+        env.put("HF_HUB_DISABLE_PROGRESS_BARS", "false");
+        env.put("HF_HUB_DISABLE_TELEMETRY", "1");
+        env.put("HF_HUB_LOCAL_FILES_ONLY", "1");
+
+        env.put("PYTHONUTF8", "1");
+        env.put("PYTHONIOENCODING", "UTF-8");
+
+        env = dependencyManager.withFfmpegOnPath(env);
+
+        return env;
+    }
+
+    /**
+     * Parses progress from WhisperX output.
+     */
+    private double parseWhisperXProgress(String line) {
+        if (line.contains("|") && line.contains("%")) {
+            try {
+                String pctStr = line.strip().replaceFirst("^(\\d+)%.*", "$1");
+                int pct = Integer.parseInt(pctStr);
+                return pct / 100.0;
+            } catch (NumberFormatException ignored) { }
+        }
+        return -1.0;
+    }
+
+    /**
+     * Parses WhisperX output JSON.
+     */
     private TranscriptionResult parseWhisperXOutput(Path outputDir,
                                                     TranscriptionConfig config) throws Exception {
         Optional<Path> jsonFile;
@@ -1350,6 +1443,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
+    /**
+     * Checks download progress.
+     */
     private void checkDownloadProgress(String modelName, String modelType) {
         try {
             Path cacheDir = modelManager.getStableCacheDir();
@@ -1365,6 +1461,9 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
+    /**
+     * Lists output files in a directory.
+     */
     private void listOutputFiles(Path outputDir) {
         try {
             LOGGER.info("Files in WhisperX output dir {}:", outputDir);
@@ -1377,10 +1476,16 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         }
     }
 
-    private void showModelCacheStatus() {
-        LOGGER.info("Model cache status check — see full cache details in debug log.");
+    /**
+     * Calculates the duration from segments.
+     */
+    private double calculateDuration(List<TranscriptionSegment> segments) {
+        return segments.stream().mapToDouble(TranscriptionSegment::getEnd).max().orElse(0.0);
     }
 
+    /**
+     * Formats bytes to a human-readable string.
+     */
     private static String formatBytes(long bytes) {
         if (bytes < 1_024)       return bytes + " B";
         if (bytes < 1_048_576)   return String.format("%.1f KB", bytes / 1_024.0);
@@ -1388,24 +1493,333 @@ public class WhisperXTranscriptionService implements TranscriptionService {
         return String.format("%.2f GB", bytes / 1_073_741_824.0);
     }
 
-    private TranscriptionConfig createFallbackConfig(TranscriptionConfig original) {
+    /**
+     * Formats a duration in milliseconds to a human-readable string.
+     */
+    private String formatDuration(long millis) {
+        if (millis < 1000) return millis + "ms";
+        long seconds = millis / 1000;
+        if (seconds < 60) return seconds + "s";
+        long minutes = seconds / 60;
+        seconds = seconds % 60;
+        if (minutes < 60) return minutes + "m " + seconds + "s";
+        long hours = minutes / 60;
+        minutes = minutes % 60;
+        return hours + "h " + minutes + "m " + seconds + "s";
+    }
+
+    /**
+     * Transcribes with streaming for large files.
+     */
+    private TranscriptionResult transcribeWithStreaming(File audioFile, TranscriptionConfig config) throws Exception {
+        LOGGER.info("Using streaming transcription for large file: {}", audioFile.getName());
+
+        Path tempDir = Files.createTempDirectory("whisper_chunks_");
+        tempDir.toFile().deleteOnExit();
+
+        try {
+            double totalDuration = getAudioDuration(audioFile);
+            if (totalDuration <= 0) {
+                throw new IOException("Could not determine audio duration for: " + audioFile.getName());
+            }
+
+            int chunkDuration = CHUNK_DURATION_SECONDS;
+            int totalChunks = (int) Math.ceil(totalDuration / chunkDuration);
+
+            if (totalChunks > 50) {
+                chunkDuration = (int) Math.ceil(totalDuration / 50);
+                totalChunks = 50;
+                LOGGER.info("Adjusting chunk size to {} seconds to limit to {} chunks", chunkDuration, totalChunks);
+            }
+
+            final int finalChunkDuration = chunkDuration;
+
+            LOGGER.info("Splitting into {} chunks of {} seconds each", totalChunks, finalChunkDuration);
+
+            List<File> chunks = splitAudioIntoChunks(audioFile, tempDir, finalChunkDuration);
+
+            if (chunks.isEmpty()) {
+                throw new IOException("No chunks were created from the audio file");
+            }
+
+            LOGGER.info("Successfully created {} chunks", chunks.size());
+
+            int maxConcurrentChunks = Math.min(Runtime.getRuntime().availableProcessors(), 4);
+            if (isGpuEnabled()) {
+                maxConcurrentChunks = Math.min(maxConcurrentChunks, 2);
+            }
+
+            LOGGER.info("Processing chunks with {} concurrent workers", maxConcurrentChunks);
+
+            List<TranscriptionResult> chunkResults = Collections.synchronizedList(new ArrayList<>());
+            List<String> errors = Collections.synchronizedList(new ArrayList<>());
+            List<CompletableFuture<TranscriptionResult>> futures = new ArrayList<>();
+
+            for (int idx = 0; idx < chunks.size(); idx++) {
+                final File chunk = chunks.get(idx);
+                final int chunkIndex = idx;
+                final int totalChunksCount = chunks.size();
+                final int durationPerChunk = finalChunkDuration;
+
+                CompletableFuture<TranscriptionResult> future = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        LOGGER.debug("Processing chunk {}/{}", chunkIndex + 1, totalChunksCount);
+                        TranscriptionConfig chunkConfig = createChunkConfig(config);
+                        return executeWhisperX(
+                            chunk.getAbsolutePath(),
+                            chunkConfig,
+                            null,
+                            durationPerChunk,
+                            config.getModel()
+                        );
+                    } catch (Exception e) {
+                        LOGGER.error("Chunk {} failed: {}", chunkIndex + 1, e.getMessage());
+                        return new TranscriptionResult(
+                            "",
+                            "unknown",
+                            0,
+                            new ArrayList<>()
+                        );
+                    }
+                });
+                futures.add(future);
+
+                if (futures.size() >= maxConcurrentChunks) {
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                    for (CompletableFuture<TranscriptionResult> f : futures) {
+                        try {
+                            TranscriptionResult result = f.get();
+                            if (result != null && result.getText() != null && !result.getText().isBlank()) {
+                                chunkResults.add(result);
+                            }
+                        } catch (Exception e) {
+                            errors.add("Chunk processing error: " + e.getMessage());
+                        }
+                    }
+                    futures.clear();
+                }
+            }
+
+            if (!futures.isEmpty()) {
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                for (CompletableFuture<TranscriptionResult> f : futures) {
+                    try {
+                        TranscriptionResult result = f.get();
+                        if (result != null && result.getText() != null && !result.getText().isBlank()) {
+                            chunkResults.add(result);
+                        }
+                    } catch (Exception e) {
+                        errors.add("Chunk processing error: " + e.getMessage());
+                    }
+                }
+            }
+
+            if (!errors.isEmpty()) {
+                LOGGER.warn("Some chunks had errors: {}", String.join("; ", errors));
+            }
+
+            return combineChunkResults(chunkResults, tempDir, config, audioFile);
+
+        } finally {
+            cleanupTempFiles(tempDir);
+        }
+    }
+
+    /**
+     * Creates a configuration for a chunk.
+     */
+    private TranscriptionConfig createChunkConfig(TranscriptionConfig parent) {
         return TranscriptionConfig.builder()
-            .model(original.getModel())
-            .language(original.getLanguage())
-            .timestampsEnabled(original.isTimestampsEnabled())
-            .confidenceEnabled(original.isConfidenceEnabled())
-            .outputFormat(original.getOutputFormat())
-            .volumeBoost(original.getVolumeBoost())
-            .silenceThreshold(original.getSilenceThreshold())
-            .silenceDuration(original.getSilenceDuration())
-            .noiseReduction(original.isNoiseReduction())
-            .srtMaxChars(original.getSrtMaxChars())
-            .srtMaxLines(original.getSrtMaxLines())
+            .model(parent.getModel())
+            .language(parent.getLanguage())
+            .timestampsEnabled(parent.isTimestampsEnabled())
+            .confidenceEnabled(parent.isConfidenceEnabled())
+            .outputFormat(parent.getOutputFormat())
+            .volumeBoost(parent.getVolumeBoost())
+            .silenceThreshold(parent.getSilenceThreshold())
+            .silenceDuration(parent.getSilenceDuration())
+            .noiseReduction(parent.isNoiseReduction())
+            .srtMaxChars(parent.getSrtMaxChars())
+            .srtMaxLines(parent.getSrtMaxLines())
             .diarizeEnabled(false)
-            .hfToken(original.getHfToken())
-            .maxSegmentDuration(original.getMaxSegmentDuration())
-            .enabled(original.isEnabled())
-            .skipSegmentation(original.isSkipSegmentation())
+            .hfToken(parent.getHfToken())
+            .maxSegmentDuration(0)
+            .enabled(parent.isEnabled())
+            .skipSegmentation(true)
             .build();
+    }
+
+    /**
+     * Splits audio into chunks using FFmpeg.
+     */
+    private List<File> splitAudioIntoChunks(File audioFile, Path tempDir, int durationSeconds) throws Exception {
+        List<File> chunks = new ArrayList<>();
+        String ffmpegPath = dependencyManager.getFFmpegPath();
+
+        if (ffmpegPath == null || ffmpegPath.isBlank()) {
+            throw new IOException("FFmpeg path not resolved");
+        }
+
+        double totalDuration = getAudioDuration(audioFile);
+        int totalChunks = (int) Math.ceil(totalDuration / durationSeconds);
+
+        for (int i = 0; i < totalChunks; i++) {
+            double startTime = i * durationSeconds;
+            String chunkName = String.format("chunk_%04d_%s", i + 1, audioFile.getName());
+            File chunkFile = tempDir.resolve(chunkName).toFile();
+
+            List<String> command = new ArrayList<>();
+            command.add(ffmpegPath);
+            command.add("-i");
+            command.add(audioFile.getAbsolutePath());
+            command.add("-ss");
+            command.add(String.valueOf(startTime));
+            command.add("-t");
+            command.add(String.valueOf(durationSeconds));
+            command.add("-c");
+            command.add("copy");
+            command.add(chunkFile.getAbsolutePath());
+            command.add("-y");
+
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+
+            LOGGER.debug("Splitting chunk {}/{}: start={}s, duration={}s",
+                        i + 1, totalChunks, startTime, durationSeconds);
+
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+
+            if (exitCode != 0) {
+                String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                LOGGER.warn("FFmpeg chunk split failed for chunk {}: {}", i + 1, output);
+                continue;
+            }
+
+            if (chunkFile.exists() && chunkFile.length() > 0) {
+                chunks.add(chunkFile);
+                LOGGER.debug("Created chunk {}: {} ({} bytes)",
+                            i + 1, chunkFile.getName(), chunkFile.length());
+            } else {
+                LOGGER.warn("Chunk {} not created or empty", i + 1);
+            }
+        }
+
+        return chunks;
+    }
+
+    /**
+     * Gets the audio duration using FFprobe.
+     */
+    private double getAudioDuration(File audioFile) throws Exception {
+        String ffprobePath = dependencyManager.getFFprobePath();
+
+        if (ffprobePath == null || ffprobePath.isBlank()) {
+            throw new IOException("FFprobe path not resolved");
+        }
+
+        ProcessBuilder pb = new ProcessBuilder(
+            ffprobePath,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audioFile.getAbsolutePath()
+        );
+
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        int exitCode = process.waitFor();
+
+        if (exitCode == 0 && !output.isBlank()) {
+            return Double.parseDouble(output);
+        }
+        return 0;
+    }
+
+    /**
+     * Combines chunk results into a single transcription.
+     */
+    private TranscriptionResult combineChunkResults(List<TranscriptionResult> chunkResults,
+                                                    Path tempDir,
+                                                    TranscriptionConfig config,
+                                                    File originalFile) {
+        if (chunkResults.isEmpty()) {
+            return new TranscriptionResult("", "unknown", 0, new ArrayList<>());
+        }
+
+        StringBuilder combinedText = new StringBuilder();
+        List<TranscriptionSegment> combinedSegments = new ArrayList<>();
+
+        double timeOffset = 0.0;
+        int segmentCount = 0;
+
+        for (int i = 0; i < chunkResults.size(); i++) {
+            TranscriptionResult chunk = chunkResults.get(i);
+
+            if (chunk.getText() == null || chunk.getText().isBlank()) {
+                continue;
+            }
+
+            if (combinedText.length() > 0) {
+                combinedText.append("\n\n");
+            }
+            combinedText.append(chunk.getText());
+
+            if (chunk.getSegments() != null) {
+                for (TranscriptionSegment seg : chunk.getSegments()) {
+                    TranscriptionSegment adjusted = new TranscriptionSegment(
+                        seg.getStart() + timeOffset,
+                        seg.getEnd() + timeOffset,
+                        seg.getText(),
+                        seg.getConfidence(),
+                        seg.getSpeaker()
+                    );
+                    combinedSegments.add(adjusted);
+                    segmentCount++;
+                }
+            }
+
+            timeOffset += CHUNK_DURATION_SECONDS;
+        }
+
+        String language = chunkResults.stream()
+            .filter(r -> r.getLanguage() != null && !"unknown".equals(r.getLanguage()))
+            .map(TranscriptionResult::getLanguage)
+            .findFirst()
+            .orElse("unknown");
+
+        LOGGER.info("Combined {} segments from {} chunks", segmentCount, chunkResults.size());
+
+        return new TranscriptionResult(
+            combinedText.toString(),
+            language,
+            calculateDuration(combinedSegments),
+            combinedSegments
+        );
+    }
+
+    /**
+     * Cleans up temporary files.
+     */
+    private void cleanupTempFiles(Path tempDir) {
+        if (tempDir == null || !Files.exists(tempDir)) {
+            return;
+        }
+
+        try {
+            Files.walk(tempDir)
+                .sorted((a, b) -> -a.compareTo(b))
+                .forEach(path -> {
+                    try {
+                        Files.deleteIfExists(path);
+                    } catch (IOException e) {
+                        LOGGER.trace("Could not delete: {}", path);
+                    }
+                });
+            LOGGER.debug("Cleaned up temporary directory: {}", tempDir);
+        } catch (IOException e) {
+            LOGGER.warn("Failed to cleanup temp directory: {}", e.getMessage());
+        }
     }
 }

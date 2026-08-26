@@ -31,6 +31,7 @@ import java.util.function.Consumer;
  * while UI state came from AppState.</p>
  * 
  * <p>Includes GPU acceleration configuration in the Performance section.</p>
+ * <p>Includes Translation configuration for post-transcription translation.</p>
  */
 public class ConfigurationPanel {
 
@@ -85,6 +86,14 @@ public class ConfigurationPanel {
     private Label gpuStatusLabel;
     private Label gpuInfoLabel;
 
+    // ===== NEW: Translation Section Components =====
+    private TitledPane translationSection;
+    private CheckBox translationEnabledCheckBox;
+    private ComboBox<String> translationLanguageComboBox;
+    private TextField translationEndpointField;
+    private PasswordField translationApiKeyField;
+    private Label translationStatusLabel;
+
     public ConfigurationPanel(PreferenceManager prefManager) {
         this.prefManager = prefManager;
         
@@ -111,8 +120,9 @@ public class ConfigurationPanel {
             createUISection(),
             createBatchSection(),
             createWhisperSection(),
+            createTranslationSection(),  // NEW: Translation section
             createAudioSection(),
-            createPerformanceSection()  // NEW: GPU section
+            createPerformanceSection()  // GPU section
         );
         
         ScrollPane scrollPane = new ScrollPane(mainContent);
@@ -127,6 +137,17 @@ public class ConfigurationPanel {
             removeSilenceCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
                 silenceThresholdSlider.setDisable(!newVal);
                 silenceDurationSlider.setDisable(!newVal);
+            });
+        }
+
+        // ===== NEW: Translation enable/disable listener =====
+        if (translationEnabledCheckBox != null) {
+            translationEnabledCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
+                boolean enabled = newVal;
+                translationLanguageComboBox.setDisable(!enabled);
+                translationEndpointField.setDisable(!enabled);
+                translationApiKeyField.setDisable(!enabled);
+                updateTranslationStatus();
             });
         }
     }
@@ -229,6 +250,12 @@ public class ConfigurationPanel {
             if (enableGpuCheckBox != null) {
                 prefManager.putBoolean("gpu.enabled", enableGpuCheckBox.isSelected());
             }
+
+            // ===== NEW: Translation settings =====
+            prefManager.setTranslationEnabled(translationEnabledCheckBox.isSelected());
+            prefManager.setTranslationTargetLanguage(translationLanguageComboBox.getValue());
+            prefManager.setTranslationEndpoint(translationEndpointField.getText());
+            prefManager.setTranslationApiKey(translationApiKeyField.getText());
 
             prefManager.flush();
             LOGGER.debug("Configuration preferences saved successfully.");
@@ -404,8 +431,96 @@ public class ConfigurationPanel {
         gpuInfoLabel = new Label();
         gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #718096; -fx-padding: 0 0 4 0;");
 
+        // ===== NEW: Translation Components =====
+        initializeTranslationComponents();
+
         // Set tooltips
         setTooltips();
+    }
+
+    // ===== NEW: Translation Components Initialization =====
+
+    /**
+     * Initializes the translation UI components.
+     */
+    private void initializeTranslationComponents() {
+        translationEnabledCheckBox = new CheckBox("Enable Translation");
+        translationEnabledCheckBox.setTooltip(new Tooltip(
+            "Translate transcripts to another language after transcription.\n" +
+            "Requires a LibreTranslate-compatible endpoint.\n\n" +
+            "Note: Translation is a post-processing step. The original transcript\n" +
+            "is preserved if translation fails."
+        ));
+        translationEnabledCheckBox.setSelected(prefManager.isTranslationEnabled());
+
+        // Target language combobox
+        translationLanguageComboBox = new ComboBox<>(FXCollections.observableArrayList(
+            "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ar", "hi",
+            "nl", "pl", "tr", "vi", "th", "ko", "sv", "no", "da", "fi",
+            "el", "cs", "ro", "hu", "ta", "uk", "he", "id", "ms", "ca"
+        ));
+        translationLanguageComboBox.setPrefWidth(100);
+        translationLanguageComboBox.setValue(prefManager.getTranslationTargetLanguage());
+        translationLanguageComboBox.setTooltip(new Tooltip(
+            "Target language for translation (ISO 639-1 code).\n" +
+            "Common: es=Spanish, fr=French, de=German, it=Italian"
+        ));
+        translationLanguageComboBox.setDisable(!prefManager.isTranslationEnabled());
+
+        // Endpoint URL
+        translationEndpointField = new TextField(prefManager.getTranslationEndpoint());
+        translationEndpointField.setPromptText("https://libretranslate.com/translate");
+        translationEndpointField.setPrefWidth(350);
+        translationEndpointField.setTooltip(new Tooltip(
+            "LibreTranslate-compatible API endpoint.\n" +
+            "Default: https://libretranslate.com/translate\n" +
+            "Self-hosted: http://localhost:5000/translate"
+        ));
+        translationEndpointField.setDisable(!prefManager.isTranslationEnabled());
+
+        // API Key (optional)
+        translationApiKeyField = new PasswordField();
+        translationApiKeyField.setPromptText("API Key (optional)");
+        translationApiKeyField.setPrefWidth(200);
+        translationApiKeyField.setTooltip(new Tooltip(
+            "Optional API key for the translation service.\n" +
+            "Not required for public LibreTranslate instances.\n" +
+            "Required for some self-hosted or commercial services."
+        ));
+        String apiKey = prefManager.getTranslationApiKey();
+        if (apiKey != null && !apiKey.isBlank()) {
+            translationApiKeyField.setText(apiKey);
+        }
+        translationApiKeyField.setDisable(!prefManager.isTranslationEnabled());
+
+        // Translation status label
+        translationStatusLabel = new Label();
+        translationStatusLabel.setStyle("-fx-font-size: 11px; -fx-padding: 4 0 4 0;");
+        updateTranslationStatus();
+    }
+
+    /**
+     * Updates the translation status label based on current configuration.
+     */
+    private void updateTranslationStatus() {
+        if (translationStatusLabel == null) return;
+
+        boolean enabled = translationEnabledCheckBox.isSelected();
+        String endpoint = translationEndpointField.getText();
+        String targetLang = translationLanguageComboBox.getValue();
+
+        if (enabled) {
+            if (endpoint == null || endpoint.isBlank() || endpoint.equals("none")) {
+                translationStatusLabel.setText("⚠️ Translation enabled but no endpoint configured");
+                translationStatusLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #ed6c02; -fx-padding: 4 0 4 0;");
+            } else {
+                translationStatusLabel.setText("✅ Translation enabled: " + targetLang + " via " + endpoint);
+                translationStatusLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #2e7d32; -fx-padding: 4 0 4 0;");
+            }
+        } else {
+            translationStatusLabel.setText("ℹ️ Translation disabled");
+            translationStatusLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #718096; -fx-padding: 4 0 4 0;");
+        }
     }
 
     // ========================================================================
@@ -462,36 +577,30 @@ public class ConfigurationPanel {
     private void updateGpuStatus() {
         if (gpuStatusLabel == null) return;
 
-        // Detect GPU if not already done
         gpuConfig.detectGpu();
-
         boolean gpuAvailable = gpuConfig.isGpuAvailable();
         boolean gpuEnabled = enableGpuCheckBox != null && enableGpuCheckBox.isSelected();
 
         if (gpuAvailable) {
-            String statusText = "🟢 GPU Detected: " + gpuConfig.getGpuName();
-            gpuStatusLabel.setText(statusText);
+            gpuStatusLabel.setText(getGpuStatusMessage());
             gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #2e7d32; -fx-padding: 4 0 4 0;");
-            
-            // Show detailed GPU info
+            gpuStatusLabel.setTooltip(null);
+
             String infoText = String.format(
                 "Memory: %d MB | Compute Capability: %s | Cores: %d",
                 gpuConfig.getGpuMemoryMB(),
                 gpuConfig.getComputeCapability(),
                 gpuConfig.getCudaCores()
             );
-            gpuInfoLabel.setText(infoText);
+            gpuInfoLabel.setText(infoText + (gpuEnabled ? "" : " (currently disabled)"));
             gpuInfoLabel.setVisible(true);
             gpuInfoLabel.setManaged(true);
-
-            // If GPU is available but disabled, show a hint
-            if (!gpuEnabled) {
-                gpuInfoLabel.setText(gpuInfoLabel.getText() + " (currently disabled)");
-                gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #ed6c02; -fx-padding: 0 0 4 0;");
-            }
+            gpuInfoLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: " + 
+                (gpuEnabled ? "#718096" : "#ed6c02") + "; -fx-padding: 0 0 4 0;");
         } else {
-            gpuStatusLabel.setText("🔴 No GPU detected — running on CPU mode");
-            gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #d32f2f; -fx-padding: 4 0 4 0;");
+            gpuStatusLabel.setText(getGpuStatusMessage());
+            gpuStatusLabel.setTooltip(new Tooltip(getGpuStatusTooltip()));
+            gpuStatusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #b0b0b0; -fx-padding: 4 0 4 0;");
             gpuInfoLabel.setVisible(false);
             gpuInfoLabel.setManaged(false);
         }
@@ -678,6 +787,66 @@ public class ConfigurationPanel {
         return section;
     }
 
+    // ===== NEW: Translation Section =====
+
+    /**
+     * Creates the translation configuration section.
+     *
+     * @return the translation section VBox
+     */
+    public VBox createTranslationSection() {
+        VBox section = new VBox(10);
+        section.setPadding(new Insets(10));
+        
+        Label title = new Label("🌐 Translation");
+        setStyled(title, "-fx-font-weight: bold; -fx-font-size: 14px;");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(15);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(5, 0, 5, 0));
+
+        // Row 0: Enable Translation (spanning all columns)
+        GridPane.setColumnSpan(translationEnabledCheckBox, 4);
+        grid.add(translationEnabledCheckBox, 0, 0);
+
+        // Row 1: Target Language
+        Label targetLabel = new Label("Target Language:");
+        targetLabel.setMinWidth(120);
+        grid.add(targetLabel, 0, 1);
+        grid.add(translationLanguageComboBox, 1, 1);
+
+        // Row 2: Endpoint URL
+        Label endpointLabel = new Label("Endpoint URL:");
+        endpointLabel.setMinWidth(120);
+        grid.add(endpointLabel, 0, 2);
+        grid.add(translationEndpointField, 1, 2, 3, 1);
+
+        // Row 3: API Key
+        Label apiKeyLabel = new Label("API Key:");
+        apiKeyLabel.setMinWidth(120);
+        grid.add(apiKeyLabel, 0, 3);
+        grid.add(translationApiKeyField, 1, 3);
+
+        // Row 4: Status (spanning all columns)
+        GridPane.setColumnSpan(translationStatusLabel, 4);
+        grid.add(translationStatusLabel, 0, 4);
+
+        // Row 5: Info note
+        Label infoNote = new Label(
+            "💡 Translation uses LibreTranslate-compatible endpoints.\n" +
+            "Public instance: https://libretranslate.com/translate (rate-limited)\n" +
+            "Self-hosted: https://github.com/LibreTranslate/LibreTranslate"
+        );
+        infoNote.setStyle("-fx-font-size: 11px; -fx-text-fill: #666; -fx-padding: 8 0 0 0;");
+        infoNote.setWrapText(true);
+        GridPane.setColumnSpan(infoNote, 4);
+        grid.add(infoNote, 0, 5);
+
+        section.getChildren().addAll(title, grid);
+        return section;
+    }
+
     public VBox createAudioSection() {
         VBox section = new VBox(10);
         section.setPadding(new Insets(10));
@@ -778,7 +947,7 @@ public class ConfigurationPanel {
     }
 
     // ========================================================================
-    //  Performance Section (NEW - GPU Settings)
+    //  Performance Section (GPU Settings)
     // ========================================================================
 
     public VBox createPerformanceSection() {
@@ -804,18 +973,15 @@ public class ConfigurationPanel {
         enableGpuCheckBox.setTooltip(new Tooltip(
             "Use NVIDIA GPU for faster transcription.\n" +
             "Requires CUDA-compatible GPU and NVIDIA drivers.\n" +
-            "If enabled, transcription will be 2-3x faster on compatible hardware."
+            "If enabled, transcription will be 2-3x faster on compatible hardware.\n\n" +
+            "Current status: " + (gpuConfig.isGpuAvailable() ? 
+                "GPU available ✓" : "No compatible GPU detected - CPU mode will be used")
         ));
         enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
 
         enableGpuCheckBox.selectedProperty().addListener((obs, oldVal, newVal) -> {
             prefManager.putBoolean("gpu.enabled", newVal);
             prefManager.flush();
-            // Update the WhisperXTranscriptionService GPU setting
-            audiomanager.Studio studio = audiomanager.Studio.getInstance();
-            if (studio != null) {
-                // The service will read the preference on next transcription
-            }
             updateGpuStatus();
         });
 
@@ -918,6 +1084,21 @@ public class ConfigurationPanel {
             enableGpuCheckBox.setSelected(prefManager.getBoolean("gpu.enabled", true));
         }
 
+        // ===== NEW: Load Translation preferences =====
+        translationEnabledCheckBox.setSelected(prefManager.isTranslationEnabled());
+        translationLanguageComboBox.setValue(prefManager.getTranslationTargetLanguage());
+        translationEndpointField.setText(prefManager.getTranslationEndpoint());
+        String apiKey = prefManager.getTranslationApiKey();
+        if (apiKey != null && !apiKey.isBlank()) {
+            translationApiKeyField.setText(apiKey);
+        } else {
+            translationApiKeyField.clear();
+        }
+        translationLanguageComboBox.setDisable(!prefManager.isTranslationEnabled());
+        translationEndpointField.setDisable(!prefManager.isTranslationEnabled());
+        translationApiKeyField.setDisable(!prefManager.isTranslationEnabled());
+        updateTranslationStatus();
+
         LOGGER.debug("Preferences loaded successfully - font size from AppState: {}", appState.getFontSize());
     }
 
@@ -961,6 +1142,11 @@ public class ConfigurationPanel {
             .maxSegmentDuration(maxSegmentDurationSpinner.getValue().floatValue())
             .enabled(enableTranscriptionCheckBox.isSelected())
             .skipSegmentation(skipSegmentationCheckBox.isSelected())
+            // ===== NEW: Translation settings =====
+            .translationEnabled(translationEnabledCheckBox.isSelected())
+            .translationTargetLanguage(translationLanguageComboBox.getValue())
+            .translationEndpoint(translationEndpointField.getText())
+            .translationApiKey(translationApiKeyField.getText())
             .build();
     }
 
@@ -1004,6 +1190,24 @@ public class ConfigurationPanel {
         return enableGpuCheckBox != null && enableGpuCheckBox.isSelected();
     }
 
+    // ===== NEW: Translation Getters =====
+
+    public boolean isTranslationEnabled() {
+        return translationEnabledCheckBox != null && translationEnabledCheckBox.isSelected();
+    }
+
+    public String getTranslationTargetLanguage() {
+        return translationLanguageComboBox != null ? translationLanguageComboBox.getValue() : "es";
+    }
+
+    public String getTranslationEndpoint() {
+        return translationEndpointField != null ? translationEndpointField.getText() : "https://libretranslate.com/translate";
+    }
+
+    public String getTranslationApiKey() {
+        return translationApiKeyField != null ? translationApiKeyField.getText() : null;
+    }
+
     public void setEnabled(boolean enabled) {
         // Set all components enabled/disabled state
         modelComboBox.setDisable(!enabled);
@@ -1031,6 +1235,13 @@ public class ConfigurationPanel {
         maxSegmentDurationSpinner.setDisable(!enabled);
         id3TaggingCheckBox.setDisable(!enabled);
         enableGpuCheckBox.setDisable(!enabled);
+        
+        // ===== NEW: Translation controls =====
+        translationEnabledCheckBox.setDisable(!enabled);
+        boolean translationEnabled = enabled && translationEnabledCheckBox.isSelected();
+        translationLanguageComboBox.setDisable(!translationEnabled);
+        translationEndpointField.setDisable(!translationEnabled);
+        translationApiKeyField.setDisable(!translationEnabled);
 
         // Silence controls only enabled when remove silence is checked and panel is enabled
         boolean silenceEnabled = enabled && removeSilenceCheckBox.isSelected();
@@ -1049,6 +1260,7 @@ public class ConfigurationPanel {
     public void refreshAllComponents() {
         loadPreferences();
         updateGpuStatus();
+        updateTranslationStatus();
     }
 
     // ========================================================================
@@ -1217,4 +1429,33 @@ public class ConfigurationPanel {
         });
         return cb;
     }
+    
+    /**
+    * Gets a user-friendly GPU status message.
+    */
+   private String getGpuStatusMessage() {
+       gpuConfig.detectGpu();
+       if (gpuConfig.isGpuAvailable()) {
+           return "🟢 GPU Detected: " + gpuConfig.getGpuName();
+       } else {
+           return "ℹ️ CPU Mode - No compatible GPU detected";
+       }
+   }
+
+   /**
+    * Gets a user-friendly GPU status tooltip.
+    */
+   private String getGpuStatusTooltip() {
+       gpuConfig.detectGpu();
+       if (gpuConfig.isGpuAvailable()) {
+           return null; // No tooltip needed when GPU is available
+       } else {
+           return "The application is running on CPU for transcription.\n\n" +
+                  "For faster performance, you can:\n" +
+                  "• Use a smaller model (tiny, base, small)\n" +
+                  "• Reduce parallel file processing\n" +
+                  "• Install an NVIDIA GPU with CUDA support\n\n" +
+                  "Note: CPU mode still works for all features.";
+       }
+   }
 }

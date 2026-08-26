@@ -21,7 +21,31 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Manages checking and validating external dependencies (FFmpeg, Whisper)
+ * Manages checking and validating external dependencies for the application.
+ *
+ * <p>This class handles resolution of external executables required for
+ * audio processing and transcription, including:
+ * <ul>
+ *   <li><b>FFmpeg:</b> Required for audio conversion and processing</li>
+ *   <li><b>FFprobe:</b> Required for audio duration probing</li>
+ *   <li><b>WhisperX:</b> Required for transcription</li>
+ *   <li><b>Alignment Model:</b> Required for precise timestamp alignment</li>
+ * </ul>
+ *
+ * <p>Executable resolution follows this priority order:
+ * <ol>
+ *   <li><b>Bundled runtime:</b> {@code runtime/ffmpeg/ffmpeg.exe} (or equivalent on macOS/Linux)</li>
+ *   <li><b>Fixed install location:</b> {@code C:\AI\ffmpeg\bin\} (Windows only)</li>
+ *   <li><b>System PATH:</b> Uses the bare command name (e.g., "ffmpeg")</li>
+ * </ol>
+ *
+ * <p><b>Thread-safety:</b> Resolved paths are cached in volatile fields,
+ * making this class safe for concurrent use.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see DependencyStatus
+ * @see ProcessRunner
  */
 public class DependencyManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(DependencyManager.class);
@@ -29,23 +53,15 @@ public class DependencyManager {
     // -------------------------------------------------------------------------
     //  FFmpeg / FFprobe executable resolution
     // -------------------------------------------------------------------------
-    //
-    // FIX: getFFmpegPath()/getFFprobePath() used to just return the bare
-    // "ffmpeg"/"ffprobe" strings, which only worked if the user had manually
-    // added FFmpeg to their system PATH. They are now resolved in priority
-    // order:
-    //   1. Bundled with the app:      runtime\ffmpeg\ffmpeg.exe / ffprobe.exe
-    //   2. Fixed install location:    C:\AI\ffmpeg\bin\ffmpeg.exe / ffprobe.exe
-    //   3. System PATH (last resort): bare "ffmpeg" / "ffprobe"
-    // The first candidate that actually exists on disk wins. Resolved paths
-    // are cached for the lifetime of this instance. On non-Windows platforms
-    // the two Windows-specific candidates are skipped and resolution falls
-    // straight through to PATH.
 
-    /** Relative-to-app-directory location of a bundled FFmpeg build. */
+    /**
+     * Relative-to-app-directory location of a bundled FFmpeg build.
+     */
     private static final String BUNDLED_RUNTIME_SUBDIR = "runtime" + File.separator + "ffmpeg";
 
-    /** Fixed, well-known install location used by the AudioManager installer/docs. */
+    /**
+     * Fixed, well-known install location used by the AudioManager installer/docs.
+     */
     private static final String FIXED_INSTALL_DIR = "C:\\AI\\ffmpeg\\bin";
 
     private static final boolean IS_WINDOWS =
@@ -54,9 +70,18 @@ public class DependencyManager {
     private volatile String ffmpegPath;
     private volatile String ffprobePath;
 
+    // -------------------------------------------------------------------------
+    //  Dependency Checks
+    // -------------------------------------------------------------------------
+
     /**
-     * Check if FFmpeg is available with ASoM retry logic
-     * @return 
+     * Checks if FFmpeg is available with persistent retry logic.
+     *
+     * <p>This method attempts to locate and verify FFmpeg with up to
+     * {@link AppConstants#MAX_DEPENDENCY_RETRIES} retries, waiting
+     * {@link AppConstants#RETRY_DELAY_MS} between attempts.</p>
+     *
+     * @return a {@link DependencyStatus} object containing the check result
      */
     public DependencyStatus checkFFmpeg() {
         LOGGER.info("Checking FFmpeg availability with persistent retries...");
@@ -111,22 +136,13 @@ public class DependencyManager {
     }
 
     /**
-     * Verifies FFprobe specifically, separately from {@link #checkFFmpeg()}.
+     * Verifies FFprobe availability separately from FFmpeg.
      *
-     * <p>FIX: previously nothing checked FFprobe at startup at all —
-     * {@link #checkFFmpeg()} only verifies {@code ffmpeg -version} runs.
-     * FFmpeg and FFprobe are separate executables shipped side by side in
-     * the same install, and a partial/custom FFmpeg install can easily have
-     * one without the other (this is exactly what happened in practice: a
-     * fixed install directory containing {@code ffmpeg.exe} but not
-     * {@code ffprobe.exe} passed every dependency check cleanly, then every
-     * single file in the batch failed deep inside {@code AudioProcessor}
-     * with a raw {@code CreateProcess error=2}, instead of a clear
-     * installation hint at startup like a missing FFmpeg gets). Checking
-     * both explicitly, up front, means a missing FFprobe is caught and
-     * reported the same way a missing FFmpeg already is.</p>
+     * <p>FFmpeg and FFprobe are separate executables shipped side by side.
+     * A partial/custom FFmpeg install can have one without the other,
+     * so this check provides a clear installation hint when FFprobe is missing.</p>
      *
-     * @return status describing whether FFprobe is resolvable and runnable
+     * @return a {@link DependencyStatus} object containing the check result
      */
     public DependencyStatus checkFFprobe() {
         LOGGER.info("Checking FFprobe availability with persistent retries...");
@@ -179,23 +195,13 @@ public class DependencyManager {
     }
 
     /**
-     * Verifies that FFmpeg isn't just runnable by Java — it also needs to be
-     * <em>visible to WhisperX's own Python interpreter</em>, since WhisperX
-     * shells out to ffmpeg internally. A machine can easily have FFmpeg
-     * resolvable by {@link #checkFFmpeg()} (bundled / fixed install / system
-     * PATH) while the WhisperX venv's Python process still can't see it,
-     * because Python resolves executables using its own inherited PATH.
+     * Verifies that FFmpeg is visible to WhisperX's own Python interpreter.
      *
-     * <p>This runs, e.g.:</p>
-     * <pre>{@code
-     * C:\AI\whisperx_env\Scripts\python.exe -c "import shutil; print(shutil.which('ffmpeg'))"
-     * }</pre>
-     * <p>using the <em>same</em> environment (FFmpeg directory injected onto
-     * PATH — see {@link #withFfmpegOnPath}) that real transcription runs use,
-     * so a pass here means transcription won't fail later with a confusing
-     * "ffmpeg not found" error from deep inside WhisperX.</p>
+     * <p>This check ensures that the WhisperX Python environment can find
+     * FFmpeg when it shells out internally. The check uses the same environment
+     * (with FFmpeg directory injected onto PATH) that real transcription runs use.</p>
      *
-     * @return status describing whether WhisperX's Python environment can see FFmpeg
+     * @return a {@link DependencyStatus} object containing the check result
      */
     public DependencyStatus checkFFmpegVisibleToWhisperX() {
         String pythonExecutable;
@@ -238,15 +244,6 @@ public class DependencyManager {
 
             LOGGER.warn("WhisperX Python environment cannot see FFmpeg in this advisory check. python='{}', output='{}'",
                     pythonExecutable, output);
-            // FIX: reworded per observed real-world behavior — this check has
-            // been seen to report "not visible" immediately before the actual
-            // transcription run (which independently re-resolves and injects
-            // FFmpeg onto PATH) succeeds moments later. The exact reason this
-            // specific advisory check can diverge from the real invocation
-            // isn't fully root-caused yet, but presenting it as a hard
-            // failure is misleading when the pipeline goes on to work anyway
-            // — soften to a heads-up rather than an alarm, and say so
-            // explicitly rather than implying this is a fatal problem.
             return new DependencyStatus(
                 "FFmpeg (WhisperX visibility)",
                 false,
@@ -270,18 +267,14 @@ public class DependencyManager {
     }
 
     /**
-     * Returns a copy of {@code baseEnv} (or a fresh map if {@code baseEnv} is
-     * {@code null}) with the resolved FFmpeg directory prepended onto {@code PATH}.
+     * Returns a copy of the environment with the resolved FFmpeg directory
+     * prepended onto the PATH.
      *
-     * <p>This lets child processes — WhisperX's Python interpreter in
-     * particular — find FFmpeg even when it isn't on the user's system PATH,
-     * without ever touching the user's actual system environment variables.
-     * If FFmpeg only resolved to the bare {@code "ffmpeg"}/{@code "ffprobe"}
-     * PATH-fallback (i.e. no absolute path was found), there's no directory
-     * to inject and {@code baseEnv} is returned unchanged.</p>
+     * <p>This allows child processes — particularly WhisperX's Python interpreter —
+     * to find FFmpeg even when it isn't on the user's system PATH.</p>
      *
-     * @param baseEnv environment variables to layer the PATH change on top of; may be {@code null}
-     * @return a new map safe to hand to {@link ProcessRunner}
+     * @param baseEnv the base environment variables (may be {@code null})
+     * @return a new map with FFmpeg prepended to PATH
      */
     public Map<String, String> withFfmpegOnPath(Map<String, String> baseEnv) {
         Map<String, String> env = baseEnv != null ? new HashMap<>(baseEnv) : new HashMap<>();
@@ -291,7 +284,6 @@ public class DependencyManager {
         File ffmpegDir = ffmpegFile.getParentFile();
 
         if (ffmpegDir != null && ffmpegDir.isDirectory()) {
-            // FIX: Use absolute path explicitly
             String ffmpegDirAbs = ffmpegDir.getAbsolutePath();
             String existingPath = env.getOrDefault("PATH", System.getenv("PATH"));
             String newPath = ffmpegDirAbs + File.pathSeparator + existingPath;
@@ -303,8 +295,9 @@ public class DependencyManager {
     }
 
     /**
-     * Check if Whisper CLI is available with v2.5 persistent retry logic
-     * @return A dependencyStatus object that gives information about the System Dependencies state of the app.
+     * Checks if Whisper CLI is available with persistent retry logic.
+     *
+     * @return a {@link DependencyStatus} object containing the check result
      */
     public DependencyStatus checkWhisper() {
         LOGGER.info("Checking Whisper CLI availability with persistent retries...");
@@ -312,7 +305,7 @@ public class DependencyManager {
         for (int attempt = 1; attempt <= AppConstants.MAX_DEPENDENCY_RETRIES; attempt++) {
             LOGGER.debug("Whisper check attempt {}/{}", attempt, AppConstants.MAX_DEPENDENCY_RETRIES);
 
-            // Try multiple ways to invoke whisper (v2.5 logic)
+            // Try multiple ways to invoke whisper
             if (checkWhisperCommand("python -m whisper -h") ||
                 checkWhisperCommand("whisper -h") ||
                 checkWhisperCommand("whisper --version")) {
@@ -350,6 +343,12 @@ public class DependencyManager {
         );
     }
 
+    /**
+     * Helper method to check if a Whisper command is available.
+     *
+     * @param command the command to check
+     * @return {@code true} if the command is available
+     */
     private boolean checkWhisperCommand(String command) {
         return ProcessRunner.isCommandAvailable(
             command, 
@@ -358,21 +357,25 @@ public class DependencyManager {
         );
     }
 
+    // -------------------------------------------------------------------------
+    //  Executable Resolution
+    // -------------------------------------------------------------------------
+
     /**
-     * Get FFmpeg executable path.
-     * Resolved bundled -&gt; fixed install location -&gt; PATH (see class Javadoc / comment above).
-     * @return The path wherein FFmpeg is stored on the system, or the bare "ffmpeg" command as a PATH fallback.
+     * Returns the resolved FFmpeg executable path.
+     *
+     * <p>Resolution order:
+     * <ol>
+     *   <li>Studio-resolved bundled path (if running in a packaged app)</li>
+     *   <li>Bundled runtime directory</li>
+     *   <li>Fixed install location (Windows only)</li>
+     *   <li>System PATH (bare "ffmpeg" command)</li>
+     * </ol>
+     *
+     * @return the absolute path to FFmpeg, or the bare command name as a fallback
      */
     public String getFFmpegPath() {
         if (ffmpegPath == null) {
-            // FIX: Studio.java now resolves bundled ffmpeg via its own
-            // scheme (launcher-set app.dir/ffmpeg.path system properties),
-            // which supersedes this class's own bundled-runtime lookup
-            // below when a real Studio instance is running. The old
-            // resolveExecutable() logic is kept as-is and still runs
-            // whenever Studio isn't available — dev/IDE runs that never
-            // call Application.launch(), and unit tests — so this is
-            // purely additive, never a behavior change for those cases.
             audiomanager.Studio studio = audiomanager.Studio.getInstance();
             if (studio != null && studio.isFFmpegAvailable()) {
                 ffmpegPath = studio.getFfmpegPath();
@@ -385,9 +388,11 @@ public class DependencyManager {
     }
 
     /**
-     * Get FFprobe executable path.
-     * Resolved bundled -&gt; fixed install location -&gt; PATH (see class Javadoc / comment above).
-     * @return The path wherein FFprobe is stored on the system, or the bare "ffprobe" command as a PATH fallback.
+     * Returns the resolved FFprobe executable path.
+     *
+     * <p>Resolution order follows the same priority as {@link #getFFmpegPath()}.</p>
+     *
+     * @return the absolute path to FFprobe, or the bare command name as a fallback
      */
     public String getFFprobePath() {
         if (ffprobePath == null) {
@@ -397,39 +402,22 @@ public class DependencyManager {
     }
 
     /**
-     * Resolves {@code baseName} (e.g. "ffmpeg", "ffprobe") to an absolute path
-     * using the bundled-runtime -&gt; fixed-install -&gt; PATH priority order.
+     * Resolves an executable name to an absolute path.
      *
-     * @param baseName executable name without extension
-     * @return an absolute path to an existing file, or the bare {@code baseName}
-     *         if nothing was found on disk (letting PATH resolution try last)
+     * @param baseName the executable name without extension (e.g., "ffmpeg")
+     * @return the absolute path to the executable, or the bare name as a fallback
      */
     private String resolveExecutable(String baseName) {
-        // FIX (cross-platform bundling): this used to gate the ENTIRE
-        // bundled/fixed lookup behind IS_WINDOWS -- on macOS/Linux it went
-        // straight to bare PATH resolution (step 3) with no attempt at a
-        // bundled runtime at all, even though the runtime/ffmpeg
-        // subdirectory convention itself has nothing Windows-specific
-        // about it. Only the executable's own filename differs by OS
-        // (no ".exe" on macOS/Linux), so that's now the only OS branch.
         String exeFileName = IS_WINDOWS ? baseName + ".exe" : baseName;
 
-        // 1. Bundled runtime, relative to the running application -- now
-        // checked on every OS.
+        // 1. Bundled runtime
         File bundled = new File(getApplicationDirectory(), BUNDLED_RUNTIME_SUBDIR + File.separator + exeFileName);
         if (bundled.isFile()) {
             LOGGER.info("Using bundled {} at: {}", baseName, bundled.getAbsolutePath());
             return bundled.getAbsolutePath();
         }
 
-        // 2. Fixed, well-known install location -- deliberately still
-        // Windows-only. FIXED_INSTALL_DIR is one specific hardcoded path
-        // (C:\AI\ffmpeg\bin); there's no equivalent single well-known
-        // location to safely guess at on macOS (Homebrew alone differs
-        // between /opt/homebrew/bin on Apple Silicon and /usr/local/bin on
-        // Intel) or across Linux distributions/package managers. Step 3
-        // (PATH) already covers a real system install correctly on those
-        // platforms without needing a guessed fixed path here.
+        // 2. Fixed install location (Windows only)
         if (IS_WINDOWS) {
             File fixed = new File(FIXED_INSTALL_DIR, exeFileName);
             if (fixed.isFile()) {
@@ -440,15 +428,14 @@ public class DependencyManager {
 
         LOGGER.debug("Neither bundled nor fixed-location {} found; falling back to PATH.", exeFileName);
 
-        // 3. Last resort: rely on the system PATH.
+        // 3. System PATH
         return baseName;
     }
 
     /**
-     * Best-effort directory that the running application lives in — used as the
-     * base for the bundled {@code runtime/ffmpeg} lookup. Falls back to the
-     * current working directory if the code source can't be determined (e.g.
-     * running from an IDE with a non-standard classpath).
+     * Returns the application directory for bundled resource resolution.
+     *
+     * @return the directory containing the application
      */
     private File getApplicationDirectory() {
         try {
@@ -458,8 +445,6 @@ public class DependencyManager {
                             .getLocation()
                             .toURI());
             File location = codeSource.toFile();
-            // If running from a jar, codeSource points at the jar file itself;
-            // if running from exploded classes, it points at a directory.
             return location.isFile() ? location.getParentFile() : location;
         } catch (URISyntaxException | NullPointerException | SecurityException e) {
             LOGGER.debug("Could not determine application directory; using working directory instead.", e);
@@ -467,13 +452,93 @@ public class DependencyManager {
         }
     }
 
-    /** Wraps a resolved path in quotes if it contains spaces, since it's about to be embedded in a single command string. */
+    /**
+     * Wraps a resolved path in quotes if it contains spaces.
+     *
+     * @param path the path to quote
+     * @return the quoted path if necessary
+     */
     private String quoteIfNeeded(String path) {
         return path.contains(" ") ? "\"" + path + "\"" : path;
     }
 
+    // -------------------------------------------------------------------------
+    //  Alignment Model Check
+    // -------------------------------------------------------------------------
+
     /**
-     * Result of a dependency check
+     * Checks if the alignment model is available and reports its status.
+     *
+     * <p>The alignment model (~360MB) is required for precise timestamp
+     * alignment and speaker diarisation.</p>
+     *
+     * @return a {@link DependencyStatus} object containing the check result
+     */
+    public DependencyStatus checkAlignmentModel() {
+        Path modelPath = Paths.get(System.getProperty("user.home"), 
+            ".cache", "torch", "hub", "checkpoints", "wav2vec2_fairseq_base_ls960_asr_ls960.pth");
+
+        try {
+            if (Files.exists(modelPath)) {
+                long size = Files.size(modelPath);
+                if (size > 300_000_000) { // 300 MB minimum
+                    return new DependencyStatus(
+                        "Alignment Model",
+                        true,
+                        "Alignment model found (" + formatBytes(size) + ")",
+                        null
+                    );
+                } else {
+                    return new DependencyStatus(
+                        "Alignment Model",
+                        false,
+                        "Alignment model is incomplete (" + formatBytes(size) + " expected >300MB)",
+                        "The alignment model appears to be truncated. Delete the file and let the app re-download it."
+                    );
+                }
+            } else {
+                return new DependencyStatus(
+                    "Alignment Model",
+                    false,
+                    "Alignment model not found (required for precise timestamps)",
+                    "The alignment model (~360MB) will be downloaded on first use when alignment is enabled.\n" +
+                    "Or download manually from:\n" +
+                    "https://download.pytorch.org/torchaudio/models/wav2vec2_fairseq_base_ls960_asr_ls960.pth\n" +
+                    "Save to: " + modelPath
+                );
+            }
+        } catch (IOException e) {
+            return new DependencyStatus(
+                "Alignment Model",
+                false,
+                "Could not check alignment model: " + e.getMessage(),
+                "Check file permissions at: " + modelPath
+            );
+        }
+    }
+
+    /**
+     * Formats bytes to a human-readable string.
+     *
+     * @param bytes the number of bytes
+     * @return a formatted string (e.g., "1.5 GB")
+     */
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        int exp = (int) (Math.log(bytes) / Math.log(1024));
+        String pre = "KMGTPE".charAt(exp - 1) + "B";
+        return String.format("%.1f %s", bytes / Math.pow(1024, exp), pre);
+    }
+
+    // -------------------------------------------------------------------------
+    //  Inner Class: DependencyStatus
+    // -------------------------------------------------------------------------
+
+    /**
+     * Result of a dependency check.
+     *
+     * <p>This class encapsulates the availability status of a dependency,
+     * along with a message and optional installation instructions.</p>
      */
     public static class DependencyStatus {
         private final String name;
@@ -481,6 +546,14 @@ public class DependencyManager {
         private final String message;
         private final String installationHint;
 
+        /**
+         * Constructs a new DependencyStatus.
+         *
+         * @param name the name of the dependency
+         * @param available {@code true} if the dependency is available
+         * @param message a status message
+         * @param installationHint installation instructions (may be {@code null})
+         */
         public DependencyStatus(String name, boolean available, String message, String installationHint) {
             this.name = name;
             this.available = available;
@@ -503,61 +576,4 @@ public class DependencyManager {
                                name, available, message);
         }
     }
-    
-    /**
-    * Check if the alignment model is available and report its status.
-    * 
-    * <p>FIX: the 360MB alignment model isn't covered by the Studio bundling.
-    * This provides a clear status check that can be surfaced in the UI
-    * (e.g., during first-run onboarding).</p>
-    */
-   public DependencyStatus checkAlignmentModel() {
-       Path modelPath = Paths.get(System.getProperty("user.home"), 
-           ".cache", "torch", "hub", "checkpoints", "wav2vec2_fairseq_base_ls960_asr_ls960.pth");
-
-       try {
-           if (Files.exists(modelPath)) {
-               long size = Files.size(modelPath);
-               if (size > 300_000_000) { // 300 MB minimum
-                   return new DependencyStatus(
-                       "Alignment Model",
-                       true,
-                       "Alignment model found (" + formatBytes(size) + ")",
-                       null
-                   );
-               } else {
-                   return new DependencyStatus(
-                       "Alignment Model",
-                       false,
-                       "Alignment model is incomplete (" + formatBytes(size) + " expected >300MB)",
-                       "The alignment model appears to be truncated. Delete the file and let the app re-download it."
-                   );
-               }
-           } else {
-               return new DependencyStatus(
-                   "Alignment Model",
-                   false,
-                   "Alignment model not found (required for precise timestamps)",
-                   "The alignment model (~360MB) will be downloaded on first use when alignment is enabled.\n" +
-                   "Or download manually from:\n" +
-                   "https://download.pytorch.org/torchaudio/models/wav2vec2_fairseq_base_ls960_asr_ls960.pth\n" +
-                   "Save to: " + modelPath
-               );
-           }
-       } catch (IOException e) {
-           return new DependencyStatus(
-               "Alignment Model",
-               false,
-               "Could not check alignment model: " + e.getMessage(),
-               "Check file permissions at: " + modelPath
-           );
-       }
-   }
-
-   private String formatBytes(long bytes) {
-       if (bytes < 1024) return bytes + " B";
-       int exp = (int) (Math.log(bytes) / Math.log(1024));
-       String pre = "KMGTPE".charAt(exp - 1) + "B";
-       return String.format("%.1f %s", bytes / Math.pow(1024, exp), pre);
-   }
 }

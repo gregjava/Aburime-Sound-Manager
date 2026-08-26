@@ -10,10 +10,10 @@ import audiomanager.core.BatchProcessor;
 import audiomanager.core.DependencyManager;
 import audiomanager.core.LicenseManager;
 import audiomanager.model.BatchFileItem;
-import audiomanager.model.ProcessingStatus;
 import audiomanager.plugins.AudioSplitterTool;
 import audiomanager.plugins.FileCombinerTool;
 import audiomanager.util.PreferenceManager;
+import audiomanager.util.SoundManager;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -343,14 +343,16 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         actionBox.setPadding(new Insets(8, 0, 4, 0));
 
         Button clearCompletedButton = new Button("Clear Completed");
+        clearCompletedButton.getStyleClass().add("action-btn-clear-queue-active");
         clearCompletedButton.setOnAction(e -> clearCompletedFiles());
 
         Button removeSelectedButton = new Button("Remove Selected");
+        removeSelectedButton.getStyleClass().add("action-btn-clear-queue-active");
         removeSelectedButton.setOnAction(e -> removeSelectedFilesFromTableView(fileTableView));
 
         Button clearAllButton = new Button("Clear All");
         setStyled(clearAllButton, "");
-        clearAllButton.getStyleClass().add("status-negative");
+        clearAllButton.getStyleClass().add("action-btn-danger");
         clearAllButton.setOnAction(e -> clearBatchFiles());
 
         actionBox.getChildren().addAll(clearCompletedButton, removeSelectedButton, clearAllButton);
@@ -486,6 +488,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         List<File> selectedFiles = fileChooser.showOpenMultipleDialog(null);
 
         if (selectedFiles != null && !selectedFiles.isEmpty()) {
+            SoundManager.playClick();
             selectedFile = selectedFiles.get(0);
 
             if (selectedFiles.size() == 1) {
@@ -564,6 +567,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
         }
 
         if (added > 0) {
+            SoundManager.playClick();
             List<BatchFileItem> committedItems = new ArrayList<>(addedItems);
             pushCommand(new QueueCommand() {
                 @Override public void undo() { batchFiles.removeAll(committedItems); }
@@ -644,6 +648,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
 
         alert.showAndWait().ifPresent(response -> {
             if (response == ButtonType.OK) {
+                SoundManager.playClick();
                 batchFiles.clear();
                 log.accept("🗑️ Batch queue cleared");
                 updateBatchStatus(batchFiles);
@@ -663,6 +668,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
             }
         }
         if (removed > 0) {
+            SoundManager.playClick();
             log.accept("🧹 Removed " + removed + " completed files from queue");
             updateBatchQueueTotals();
         }
@@ -1061,6 +1067,7 @@ public class FileSelectionPanel implements BatchProcessor.FileCompletionCallback
     private void removeSelectedFilesFromTableView(TableView<BatchFileItem> tableView) {
         ObservableList<BatchFileItem> selectedItems = tableView.getSelectionModel().getSelectedItems();
         if (!selectedItems.isEmpty()) {
+            SoundManager.playClick();
             List<BatchFileItem> removed = new ArrayList<>(selectedItems);
             List<Integer> originalIndices = new ArrayList<>();
             for (BatchFileItem item : removed) {

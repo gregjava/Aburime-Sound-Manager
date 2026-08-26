@@ -5,15 +5,21 @@
 package audiomanager.exceptions;
 
 /**
- * Thrown when an FFmpeg (or FFprobe) subprocess invocation fails or times
- * out — as distinct from {@link DependencyException}, which means FFmpeg
- * couldn't even be *found*. This means FFmpeg ran and rejected the input, or
- * the process had to be killed.
+ * Thrown when an FFmpeg (or FFprobe) subprocess invocation fails or times out.
+ *
+ * <p>This exception is distinct from {@link DependencyException}, which
+ * means FFmpeg couldn't even be <em>found</em>. This exception means
+ * FFmpeg ran and rejected the input, or the process had to be killed.</p>
  *
  * <p>Distinguishing this from a generic {@code IOException} lets the UI say
  * "this specific file appears to be corrupt or in an unsupported format"
  * instead of the current generic failure alert, and lets batch-processing
  * code decide to skip-and-continue rather than abort the whole run.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see AudioManagerException
+ * @see DependencyException
  */
 public class FfmpegException extends AudioManagerException {
 
@@ -34,37 +40,67 @@ public class FfmpegException extends AudioManagerException {
             143, "The process was terminated (e.g. cancelled by the user, or it exceeded a timeout)."
     );
 
+    /**
+     * Constructs a new FfmpegException with exit code and stderr tail.
+     *
+     * <p>A single file failing FFmpeg processing shouldn't be fatal to a batch —
+     * the exception is marked recoverable so batch code can skip-and-continue
+     * rather than abort.</p>
+     *
+     * @param technicalMessage the technical message for logging
+     * @param userMessage the user-friendly message for display
+     * @param exitCode the FFmpeg process exit code
+     * @param stderrTail the last portion of stderr output
+     */
     public FfmpegException(String technicalMessage, String userMessage,
                             int exitCode, String stderrTail) {
-        // A single file failing FFmpeg processing shouldn't be fatal to a batch —
-        // mark recoverable so batch code can skip-and-continue rather than abort.
         super(technicalMessage, userMessage, true);
         this.exitCode = exitCode;
         this.stderrTail = stderrTail;
     }
 
+    /**
+     * Constructs a new FfmpegException with a cause.
+     *
+     * @param technicalMessage the technical message for logging
+     * @param userMessage the user-friendly message for display
+     * @param cause the underlying cause of this exception
+     */
     public FfmpegException(String technicalMessage, String userMessage, Throwable cause) {
         super(technicalMessage, userMessage, true, cause);
         this.exitCode = -1;
         this.stderrTail = null;
     }
 
-    /** FFmpeg/FFprobe process exit code, or -1 if the process never produced one (e.g. timeout, IOException). */
+    /**
+     * Returns the FFmpeg process exit code.
+     *
+     * @return the exit code, or {@code -1} if no exit code was produced
+     */
     public int getExitCode() {
         return exitCode;
     }
 
-    /** Last portion of stderr captured before failure — useful in a "show details" expander. */
+    /**
+     * Returns the last portion of stderr captured before failure.
+     *
+     * <p>This is useful in a "Show Details" expander in a dialog.</p>
+     *
+     * @return the stderr tail, or {@code null} if not available
+     */
     public String getStderrTail() {
         return stderrTail;
     }
 
     /**
-     * A short, specific explanation for this exception's exit code, if it's
-     * one of a handful of well-known cases — {@code null} otherwise (in
-     * which case callers should fall back to {@link #getUserMessage()}
-     * alone). Deliberately does not attempt to explain every possible exit
-     * code — an incorrect guess is worse than no guess.
+     * Returns a short, specific explanation for the exit code.
+     *
+     * <p>This method returns a hint only for well-known exit codes.
+     * Deliberately does not attempt to explain every possible exit code —
+     * an incorrect guess is worse than no guess. Callers should fall back to
+     * {@link #getUserMessage()} if this returns {@code null}.</p>
+     *
+     * @return an explanation for the exit code, or {@code null} if not known
      */
     public String getExitCodeHint() {
         return EXIT_CODE_HINTS.get(exitCode);

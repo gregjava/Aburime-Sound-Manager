@@ -21,17 +21,20 @@ import java.util.function.Consumer;
 
 /**
  * Watches a directory for newly-created files and hands each one to a
- * caller-supplied handler — e.g. to automatically enqueue new recordings
- * dropped into a "drop folder" for transcription.
+ * caller-supplied handler.
  *
- * <p>Runs on its own thread via {@link #run()}; construct with the folder to
- * watch, wrap in a {@code Thread}, start it, and call {@link #stop()} when
- * you're done (e.g. on application exit).</p>
+ * <p>This class provides automatic file monitoring for use cases such as:
+ * <ul>
+ *   <li>Auto-enqueueing new recordings dropped into a "watch folder"</li>
+ *   <li>Processing files as they are added to a monitored directory</li>
+ *   <li>Automated workflow triggering</li>
+ * </ul>
  *
- * <h2>Usage</h2>
+ * <p><b>Usage Example:</b></p>
  * <pre>{@code
  * FolderWatcher watcher = new FolderWatcher("/path/to/watch", file -> {
- *     // e.g. Platform.runLater(() -> addFileToQueue(file));
+ *     // Handle new file - dispatch back to UI thread if needed
+ *     Platform.runLater(() -> addFileToQueue(file));
  * });
  * Thread watcherThread = new Thread(watcher, "folder-watcher");
  * watcherThread.setDaemon(true);
@@ -39,6 +42,14 @@ import java.util.function.Consumer;
  * // ...later...
  * watcher.stop();
  * }</pre>
+ *
+ * <p><b>Thread-safety:</b> The file handler is invoked on the watcher's
+ * own thread. Callers should dispatch back to the UI thread if updating
+ * JavaFX components.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see WatchService
  */
 public class FolderWatcher implements Runnable {
 
@@ -50,12 +61,13 @@ public class FolderWatcher implements Runnable {
     private final WatchService watchService;
 
     /**
-     * @param path        directory to watch for newly-created files
-     * @param fileHandler invoked (on this watcher's own thread — dispatch
-     *                    back to a UI thread yourself if needed) once per
-     *                    new file detected
-     * @throws IOException if the path doesn't exist or the watch service
-     *                      can't be created/registered
+     * Constructs a new folder watcher.
+     *
+     * @param path the directory to watch for newly-created files
+     * @param fileHandler the handler to invoke for each new file (on the watcher thread)
+     * @param errorReporter the error reporter for diagnostics (may be {@code null})
+     * @throws IOException if the path doesn't exist, is not a directory,
+     *         or the watch service cannot be created or registered
      */
     public FolderWatcher(String path, Consumer<File> fileHandler, ErrorReporter errorReporter) throws IOException {
         this.watchPath = Paths.get(path);
@@ -68,6 +80,13 @@ public class FolderWatcher implements Runnable {
         LOGGER.info("Watching folder for new files: {}", this.watchPath);
     }
 
+    /**
+     * The main watch loop.
+     *
+     * <p>This method runs continuously until {@link #stop()} is called.
+     * It polls for new file creation events and invokes the file handler
+     * for each new file.</p>
+     */
     @Override
     public void run() {
         while (running) {
@@ -108,7 +127,11 @@ public class FolderWatcher implements Runnable {
         LOGGER.info("Folder watcher stopped for: {}", watchPath);
     }
 
-    /** Stop watching and release the underlying watch service. Safe to call more than once. */
+    /**
+     * Stops the folder watcher and releases the underlying watch service.
+     *
+     * <p>This method is safe to call more than once.</p>
+     */
     public void stop() {
         running = false;
         try {

@@ -25,29 +25,44 @@ import java.util.concurrent.TimeUnit;
  * Handles all transcription output writing — SRT, plain text, speaker summaries,
  * and confidence analysis.
  *
- * <p>Extracted from {@link BatchProcessor} to adhere to the Single Responsibility
- * Principle.  Previously the writing logic (~200 lines) lived directly in
- * {@code BatchProcessor}, mixing concerns and making the class impossible to test
- * independently.</p>
+ * <p>This class provides comprehensive output formatting for transcription results:
+ * <ul>
+ *   <li><b>SRT subtitles:</b> Timestamped subtitle format with speaker labels</li>
+ *   <li><b>Plain text:</b> Raw text output with optional speaker summaries</li>
+ *   <li><b>Speaker analysis:</b> Per-speaker duration summaries</li>
+ *   <li><b>Confidence analysis:</b> Average confidence and language detection</li>
+ *   <li><b>Word export:</b> Real {@code .docx} format (minimal OOXML)</li>
+ *   <li><b>PDF export:</b> HTML fallback (printable to PDF from browser)</li>
+ * </ul>
  *
- * <h2>Usage</h2>
- * <pre>{@code
- * TranscriptionOutputWriter writer = new TranscriptionOutputWriter();
- * File out = writer.save("interview.mp3", result, config, "/output/dir");
- * }</pre>
+ * <p><b>Thread-safety:</b> This class is stateless and thread-safe.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see TranscriptionResult
+ * @see TranscriptionConfig
  */
 public final class TranscriptionOutputWriter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TranscriptionOutputWriter.class);
 
+    // ========================================================================
+    //  Main Save Method
+    // ========================================================================
+
     /**
-     * Write the transcription result to the output directory and return the
-     * created file.
+     * Writes the transcription result to the output directory.
+     *
+     * <p>The output format is determined by the configuration:
+     * <ul>
+     *   <li>If timestamps are enabled, writes SRT format</li>
+     *   <li>Otherwise, writes plain text</li>
+     * </ul>
      *
      * @param originalFileName the original audio file name (used for naming)
-     * @param result           the transcription result to serialise
-     * @param config           transcription configuration (controls format)
-     * @param outputDir        target directory path
+     * @param result the transcription result to serialise
+     * @param config the transcription configuration (controls format)
+     * @param outputDir the target directory path
      * @return the created output file
      * @throws IOException if the file cannot be written
      */
@@ -81,10 +96,17 @@ public final class TranscriptionOutputWriter {
         return outputFile.toFile();
     }
 
-    // -------------------------------------------------------------------------
-    //  SRT output
-    // -------------------------------------------------------------------------
+    // ========================================================================
+    //  SRT Output
+    // ========================================================================
 
+    /**
+     * Writes the transcription in SRT subtitle format.
+     *
+     * @param writer the output writer
+     * @param result the transcription result
+     * @param config the transcription configuration
+     */
     private void writeSrt(PrintWriter writer, TranscriptionResult result, TranscriptionConfig config) {
         int index = 1;
         for (TranscriptionSegment segment : result.getSegments()) {
@@ -108,10 +130,17 @@ public final class TranscriptionOutputWriter {
         }
     }
 
-    // -------------------------------------------------------------------------
-    //  Plain-text output
-    // -------------------------------------------------------------------------
+    // ========================================================================
+    //  Plain-Text Output
+    // ========================================================================
 
+    /**
+     * Writes the transcription in plain text format.
+     *
+     * @param writer the output writer
+     * @param result the transcription result
+     * @param config the transcription configuration
+     */
     private void writePlainText(PrintWriter writer, TranscriptionResult result, TranscriptionConfig config) {
         writer.print(result.getText());
 
@@ -123,35 +152,38 @@ public final class TranscriptionOutputWriter {
         }
     }
 
-    // -------------------------------------------------------------------------
-    //  Speaker helpers
-    // -------------------------------------------------------------------------
+    // ========================================================================
+    //  Speaker Helpers
+    // ========================================================================
 
     /**
-     * Test whether the segment carries speaker information.
+     * Checks whether a segment carries speaker information.
      *
-     * <p>FIX: previously fell back to reflection
-     * ({@code getClass().getMethod("getSpeaker")}) for any segment that
-     * wasn't an instance of the (formerly core-layer-only) marker interface —
-     * a fallback that could never actually succeed, since no
-     * {@code TranscriptionSegment} ever implemented it and the JSON parser
-     * that builds segments discarded WhisperX's {@code "speaker"} field
-     * before it ever reached this class. {@link TranscriptionSegment} now
-     * implements {@link SpeakerAwareSegment} directly and the parser
-     * populates it, so a plain interface check is correct and sufficient —
-     * the reflection path added risk (swallowed exceptions, no compile-time
-     * safety) without ever adding real capability.</p>
+     * @param segment the segment to check
+     * @return {@code true} if the segment has speaker information
      */
     private boolean hasSpeaker(TranscriptionSegment segment) {
         String speaker = segment.getSpeaker();
         return speaker != null && !speaker.isBlank();
     }
 
+    /**
+     * Returns the speaker name from a segment.
+     *
+     * @param segment the segment
+     * @return the speaker name, or "SPEAKER_00" if not available
+     */
     private String getSpeaker(TranscriptionSegment segment) {
         String speaker = segment.getSpeaker();
         return (speaker != null && !speaker.isBlank()) ? speaker : "SPEAKER_00";
     }
 
+    /**
+     * Checks whether a transcription has multiple speakers.
+     *
+     * @param result the transcription result
+     * @return {@code true} if multiple speakers are detected
+     */
     private boolean hasMultipleSpeakers(TranscriptionResult result) {
         Set<String> speakers = new HashSet<>();
         for (TranscriptionSegment seg : result.getSegments()) {
@@ -163,6 +195,12 @@ public final class TranscriptionOutputWriter {
         return false;
     }
 
+    /**
+     * Writes a speaker duration summary.
+     *
+     * @param writer the output writer
+     * @param result the transcription result
+     */
     private void writeSpeakerSummary(PrintWriter writer, TranscriptionResult result) {
         Map<String, Double> speakerTimes = new LinkedHashMap<>();
         for (TranscriptionSegment seg : result.getSegments()) {
@@ -184,10 +222,16 @@ public final class TranscriptionOutputWriter {
         }
     }
 
-    // -------------------------------------------------------------------------
-    //  Confidence analysis
-    // -------------------------------------------------------------------------
+    // ========================================================================
+    //  Confidence Analysis
+    // ========================================================================
 
+    /**
+     * Writes confidence analysis for the transcription.
+     *
+     * @param writer the output writer
+     * @param result the transcription result
+     */
     private void writeConfidenceAnalysis(PrintWriter writer, TranscriptionResult result) {
         OptionalDouble avg = result.getSegments().stream()
                 .filter(s -> s.getConfidence() != null)
@@ -201,29 +245,19 @@ public final class TranscriptionOutputWriter {
         }
     }
 
-    // -------------------------------------------------------------------------
+    // ========================================================================
     //  Export — Word / PDF
-    // -------------------------------------------------------------------------
+    // ========================================================================
 
     /**
-     * Export a transcription as a genuine {@code .docx} file that Word opens
-     * natively — not an HTML file renamed/mislabeled as "Word-compatible".
+     * Exports a transcription as a genuine {@code .docx} file that Word opens natively.
      *
-     * <p>FIX: the previous version of this method wrote HTML and called it
-     * a Word export. That's functional (Word *can* open HTML), but it's
-     * misleading — a user who asks for "Word export" and gets a file that
-     * isn't really a Word document will notice, e.g. if they try to edit
-     * and re-save it, or inspect the file type. This writes real minimal
-     * OOXML (the ZIP-based format Word actually uses) directly via
-     * {@code java.util.zip}, so no new dependency (e.g. Apache POI) is
-     * needed — a {@code .docx} only strictly requires three parts:
-     * {@code [Content_Types].xml}, {@code _rels/.rels}, and
-     * {@code word/document.xml}. This produces exactly those three,
-     * respecting the same speaker/timestamp formatting as the SRT output,
-     * with each segment as its own paragraph.</p>
+     * <p>This method writes minimal OOXML (the ZIP-based format Word actually uses)
+     * directly via {@code java.util.zip}, so no new dependency is needed.</p>
      *
-     * @param result     the transcription result to export
-     * @param outputPath destination file path (should end in {@code .docx})
+     * @param result the transcription result to export
+     * @param outputPath the destination file path (should end in {@code .docx})
+     * @return the created file
      * @throws IOException if the file cannot be written
      */
     public File exportToWord(TranscriptionResult result, String outputPath) throws IOException {
@@ -275,37 +309,13 @@ public final class TranscriptionOutputWriter {
         return path.toFile();
     }
 
-    private void writeZipEntry(java.util.zip.ZipOutputStream zip, String name, String content) throws IOException {
-        zip.putNextEntry(new java.util.zip.ZipEntry(name));
-        zip.write(content.getBytes(StandardCharsets.UTF_8));
-        zip.closeEntry();
-    }
-
-    private String docxParagraph(String text, boolean bold) {
-        String run = bold
-                ? "<w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>"
-                : "<w:r><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>";
-        return "<w:p>" + run + "</w:p>";
-    }
-
-    private String escapeXml(String text) {
-        if (text == null) return "";
-        return text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;");
-    }
-
-    private String nullToEmpty(String s) {
-        return s == null ? "" : s;
-    }
-
     /**
-     * Export the transcription as HTML — kept as its own method (rather than
-     * folded into {@link #exportToWord}) since it's genuinely useful on its
-     * own merits: any browser can open it, and it's the fallback
-     * {@link #exportToPDF} prints from.
+     * Exports the transcription as HTML for browser viewing.
+     *
+     * @param result the transcription result
+     * @param outputPath the destination file path
+     * @return the created file
+     * @throws IOException if the file cannot be written
      */
     public File exportToHtml(TranscriptionResult result, String outputPath) throws IOException {
         Path path = Paths.get(outputPath);
@@ -333,21 +343,15 @@ public final class TranscriptionOutputWriter {
     }
 
     /**
-     * Export a transcription as a PDF, if a PDF-generation library is
-     * available on the classpath at runtime; otherwise falls back to
-     * {@link #exportToHtml}, which can be printed to PDF from any browser
-     * or word processor's "Print to PDF" option.
+     * Exports a transcription as a PDF (fallback to HTML).
      *
-     * <p>This project doesn't currently depend on a PDF library (e.g.
-     * Apache PDFBox/iText), so true native PDF generation isn't wired up
-     * here — adding it would mean adding that dependency to the build
-     * first. The HTML fallback keeps this method usable in the meantime
-     * without introducing an untested/unavailable dependency.</p>
+     * <p>This project doesn't currently depend on a PDF library, so this
+     * method writes HTML which can be printed to PDF from any browser.</p>
      *
-     * @param result     the transcription result to export
-     * @param outputPath desired {@code .pdf} destination path
-     * @return the file actually written (HTML fallback unless/until a PDF
-     *         library is added to the project)
+     * @param result the transcription result to export
+     * @param outputPath the desired {@code .pdf} destination path
+     * @return the file actually written (HTML fallback)
+     * @throws IOException if the file cannot be written
      */
     public File exportToPDF(TranscriptionResult result, String outputPath) throws IOException {
         String htmlPath = outputPath.toLowerCase(Locale.ROOT).endsWith(".pdf")
@@ -358,6 +362,44 @@ public final class TranscriptionOutputWriter {
         return exportToHtml(result, htmlPath);
     }
 
+    // ========================================================================
+    //  Private Helpers
+    // ========================================================================
+
+    /**
+     * Writes a zip entry with the given content.
+     */
+    private void writeZipEntry(java.util.zip.ZipOutputStream zip, String name, String content) throws IOException {
+        zip.putNextEntry(new java.util.zip.ZipEntry(name));
+        zip.write(content.getBytes(StandardCharsets.UTF_8));
+        zip.closeEntry();
+    }
+
+    /**
+     * Creates a Word paragraph XML element.
+     */
+    private String docxParagraph(String text, boolean bold) {
+        String run = bold
+                ? "<w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>"
+                : "<w:r><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>";
+        return "<w:p>" + run + "</w:p>";
+    }
+
+    /**
+     * Escapes XML special characters.
+     */
+    private String escapeXml(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
+    }
+
+    /**
+     * Escapes HTML special characters.
+     */
     private String escapeHtml(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;")
@@ -365,6 +407,16 @@ public final class TranscriptionOutputWriter {
                 .replace(">", "&gt;");
     }
 
+    /**
+     * Returns an empty string if the input is null.
+     */
+    private String nullToEmpty(String s) {
+        return s == null ? "" : s;
+    }
+
+    /**
+     * Formats a duration in seconds to a human-readable string.
+     */
     private String formatDuration(double seconds) {
         long totalSeconds = (long) seconds;
         long hours = totalSeconds / 3600;
@@ -375,10 +427,9 @@ public final class TranscriptionOutputWriter {
                 : String.format(Locale.US, "%d:%02d", minutes, secs);
     }
 
-    // -------------------------------------------------------------------------
-    //  Timestamp formatting
-    // -------------------------------------------------------------------------
-
+    /**
+     * Formats a timestamp in SRT format (HH:MM:SS,mmm).
+     */
     private String formatTimestamp(double seconds) {
         long totalMillis = (long)(seconds * 1000);
         long hours   = TimeUnit.MILLISECONDS.toHours(totalMillis) % 24;
@@ -388,10 +439,9 @@ public final class TranscriptionOutputWriter {
         return String.format(Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, secs, millis);
     }
 
-    // -------------------------------------------------------------------------
-    //  Utilities
-    // -------------------------------------------------------------------------
-
+    /**
+     * Returns the file name without its extension.
+     */
     private String getFileNameWithoutExtension(String fileName) {
         int lastDot = fileName.lastIndexOf('.');
         return lastDot > 0 ? fileName.substring(0, lastDot) : fileName;

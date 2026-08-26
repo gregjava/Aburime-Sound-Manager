@@ -13,9 +13,33 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * GPU configuration and detection for CUDA support.
- * 
- * <p>Detects NVIDIA GPUs and provides configuration for WhisperX
- * to use CUDA acceleration when available.</p>
+ *
+ * <p>This class detects NVIDIA GPUs and provides configuration for
+ * WhisperX to use CUDA acceleration when available. Key features:
+ * <ul>
+ *   <li><b>GPU detection:</b> Uses {@code nvidia-smi} to detect NVIDIA GPUs</li>
+ *   <li><b>Capability reporting:</b> Reports GPU name, memory, compute capability</li>
+ *   <li><b>CUDA core estimation:</b> Estimates CUDA core count from GPU name</li>
+ *   <li><b>Device string generation:</b> Provides {@code "cuda"} or {@code "cpu"} for WhisperX</li>
+ *   <li><b>Singleton pattern:</b> Single instance shared across the application</li>
+ * </ul>
+ *
+ * <p><b>Usage:</b></p>
+ * <pre>{@code
+ * GpuConfig gpu = GpuConfig.getInstance();
+ * gpu.detectGpu();
+ * if (gpu.isGpuAvailable()) {
+ *     String device = gpu.getDeviceString(); // "cuda"
+ *     String computeType = gpu.getComputeType(); // "float16"
+ * }
+ * }</pre>
+ *
+ * <p><b>Thread-safety:</b> All methods are thread-safe with lazy
+ * initialisation and volatile fields.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see WhisperXTranscriptionService
  */
 public class GpuConfig {
 
@@ -33,6 +57,11 @@ public class GpuConfig {
         // Private constructor for singleton
     }
 
+    /**
+     * Returns the singleton instance of GpuConfig.
+     *
+     * @return the GpuConfig instance
+     */
     public static GpuConfig getInstance() {
         if (instance == null) {
             synchronized (GpuConfig.class) {
@@ -45,8 +74,10 @@ public class GpuConfig {
     }
 
     /**
-     * Detect GPU availability and capabilities.
-     * This is called once during application startup.
+     * Detects GPU availability and capabilities.
+     *
+     * <p>This method is called once during application startup and caches
+     * the results. It uses {@code nvidia-smi} to query GPU information.</p>
      */
     public synchronized void detectGpu() {
         if (initialized) {
@@ -95,7 +126,9 @@ public class GpuConfig {
     }
 
     /**
-     * Check if nvidia-smi is available on the system.
+     * Checks if nvidia-smi is available on the system.
+     *
+     * @return {@code true} if nvidia-smi is available
      */
     private boolean isNvidiaSmiAvailable() {
         try {
@@ -115,7 +148,9 @@ public class GpuConfig {
     }
 
     /**
-     * Parse GPU information from nvidia-smi output.
+     * Parses GPU information from nvidia-smi output.
+     *
+     * @param line the CSV line from nvidia-smi
      */
     private void parseGpuInfo(String line) {
         String[] parts = line.split(", ");
@@ -134,7 +169,10 @@ public class GpuConfig {
     }
 
     /**
-     * Parse memory size from string like "8192 MiB" or "16 GiB".
+     * Parses memory size from strings like "8192 MiB" or "16 GiB".
+     *
+     * @param memoryStr the memory string
+     * @return the memory in megabytes
      */
     private long parseMemorySize(String memoryStr) {
         String[] parts = memoryStr.split(" ");
@@ -148,8 +186,12 @@ public class GpuConfig {
     }
 
     /**
-     * Estimate CUDA cores based on GPU name.
-     * This is a rough estimate for display purposes.
+     * Estimates CUDA core count based on GPU name.
+     *
+     * <p>This is a rough estimate for display purposes only.</p>
+     *
+     * @param gpuName the GPU name
+     * @return the estimated number of CUDA cores
      */
     private int estimateCudaCores(String gpuName) {
         String name = gpuName.toLowerCase();
@@ -174,7 +216,9 @@ public class GpuConfig {
     // ========================================================================
 
     /**
-     * Returns true if a CUDA-capable GPU is available.
+     * Returns whether a CUDA-capable GPU is available.
+     *
+     * @return {@code true} if a GPU is available
      */
     public boolean isGpuAvailable() {
         if (!initialized) {
@@ -184,7 +228,9 @@ public class GpuConfig {
     }
 
     /**
-     * Returns the GPU name (e.g., "NVIDIA GeForce RTX 3080").
+     * Returns the GPU name.
+     *
+     * @return the GPU name (e.g., "NVIDIA GeForce RTX 3080")
      */
     public String getGpuName() {
         if (!initialized) {
@@ -194,7 +240,9 @@ public class GpuConfig {
     }
 
     /**
-     * Returns the GPU memory in MB.
+     * Returns the GPU memory in megabytes.
+     *
+     * @return the GPU memory in MB
      */
     public long getGpuMemoryMB() {
         if (!initialized) {
@@ -204,7 +252,9 @@ public class GpuConfig {
     }
 
     /**
-     * Returns the CUDA compute capability (e.g., "8.6").
+     * Returns the CUDA compute capability.
+     *
+     * @return the compute capability (e.g., "8.6")
      */
     public String getComputeCapability() {
         if (!initialized) {
@@ -215,6 +265,8 @@ public class GpuConfig {
 
     /**
      * Returns the estimated number of CUDA cores.
+     *
+     * @return the estimated CUDA core count
      */
     public int getCudaCores() {
         if (!initialized) {
@@ -224,15 +276,20 @@ public class GpuConfig {
     }
 
     /**
-     * Returns true if GPU acceleration should be used.
-     * This can be overridden by user preferences.
+     * Returns whether GPU acceleration should be used.
+     *
+     * <p>This checks both availability and user preference.</p>
+     *
+     * @return {@code true} if GPU should be used
      */
     public boolean shouldUseGpu() {
         return isGpuAvailable(); // && userPrefersGpu();
     }
 
     /**
-     * Returns the device string for WhisperX ("cuda" or "cpu").
+     * Returns the device string for WhisperX.
+     *
+     * @return {@code "cuda"} if GPU is available and enabled, otherwise {@code "cpu"}
      */
     public String getDeviceString() {
         return shouldUseGpu() ? "cuda" : "cpu";
@@ -240,7 +297,8 @@ public class GpuConfig {
 
     /**
      * Returns the compute type for WhisperX.
-     * float16 for CUDA, int8 for CPU.
+     *
+     * @return {@code "float16"} for CUDA, {@code "int8"} for CPU
      */
     public String getComputeType() {
         return shouldUseGpu() ? "float16" : "int8";
@@ -248,6 +306,8 @@ public class GpuConfig {
 
     /**
      * Returns a summary of GPU configuration for display.
+     *
+     * @return a human-readable GPU summary
      */
     public String getGpuSummary() {
         if (!isGpuAvailable()) {
@@ -260,7 +320,7 @@ public class GpuConfig {
     }
 
     /**
-     * Reset the GPU detection (for testing or after driver updates).
+     * Resets GPU detection (for testing or after driver updates).
      */
     public synchronized void resetDetection() {
         initialized = false;

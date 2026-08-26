@@ -22,7 +22,33 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Opt-in error and crash reporting system.
- * Collects anonymized error data and sends it to the server.
+ *
+ * <p>This class collects anonymized error data and sends it to a remote
+ * server when the user has given explicit consent. Features include:
+ * <ul>
+ *   <li><b>Opt-in consent:</b> Requires explicit user consent before reporting</li>
+ *   <li><b>Anonymized user ID:</b> Consistent, non-identifying user identifier</li>
+ *   <li><b>Asynchronous reporting:</b> Does not block the UI thread</li>
+ *   <li><b>Offline queueing:</b> Reports are stored locally and sent when connectivity is available</li>
+ *   <li><b>Batch sending:</b> Reports are sent in batches to reduce server load</li>
+ *   <li><b>Consent persistence:</b> User preference is saved across sessions</li>
+ * </ul>
+ *
+ * <p><b>Data collected:</b>
+ * <ul>
+ *   <li>Application version</li>
+ *   <li>Operating system and architecture</li>
+ *   <li>Error type, message, and stack trace</li>
+ *   <li>Context information (where the error occurred)</li>
+ *   <li>Java version and JVM information</li>
+ * </ul>
+ *
+ * <p><b>No personal data</b> is ever collected. The user ID is a randomly
+ * generated UUID with no connection to the user's identity.</p>
+ *
+ * @author AudioManager Project Contributors
+ * @version 4.0.0
+ * @see ErrorReport
  */
 public class ErrorReporter {
     
@@ -41,6 +67,11 @@ public class ErrorReporter {
     private static final int MAX_QUEUED_REPORTS = 50;
     private static final int BATCH_SIZE = 10;
     
+    /**
+     * Constructs a new ErrorReporter.
+     *
+     * @param appVersion the current application version string
+     */
     public ErrorReporter(String appVersion) {
         this.appVersion = appVersion;
         this.osInfo = System.getProperty("os.name") + " " + 
@@ -61,8 +92,11 @@ public class ErrorReporter {
     }
     
     /**
-     * Set whether error reporting is enabled.
-     * This should only be called with explicit user consent.
+     * Enables or disables error reporting.
+     *
+     * <p>This should only be called with explicit user consent.</p>
+     *
+     * @param enabled {@code true} to enable error reporting
      */
     public void setEnabled(boolean enabled) {
         this.enabled.set(enabled);
@@ -70,16 +104,33 @@ public class ErrorReporter {
         saveConsent();
     }
     
+    /**
+     * Returns whether error reporting is enabled.
+     *
+     * @return {@code true} if error reporting is enabled
+     */
     public boolean isEnabled() {
         return enabled.get();
     }
     
+    /**
+     * Returns whether the user has given consent.
+     *
+     * @return {@code true} if the user has given consent
+     */
     public boolean hasUserConsent() {
         return userConsentGiven.get();
     }
     
     /**
-     * Report an error asynchronously.
+     * Reports an error asynchronously.
+     *
+     * <p>If reporting is enabled, the error is queued and sent to the server
+     * in the background.</p>
+     *
+     * @param error the throwable to report
+     * @param context the context in which the error occurred
+     * @return a {@link CompletableFuture} that completes when the report is queued
      */
     public CompletableFuture<Void> reportError(Throwable error, String context) {
         return CompletableFuture.runAsync(() -> {
@@ -95,7 +146,12 @@ public class ErrorReporter {
     }
     
     /**
-     * Report an error synchronously (for crashes).
+     * Reports an error synchronously (for crashes).
+     *
+     * <p>This method blocks until the report is queued and sent.</p>
+     *
+     * @param error the throwable to report
+     * @param context the context in which the error occurred
      */
     public void reportErrorSync(Throwable error, String context) {
         if (!enabled.get() || !userConsentGiven.get()) {
@@ -108,7 +164,11 @@ public class ErrorReporter {
     }
     
     /**
-     * Build a comprehensive error report.
+     * Builds a comprehensive error report.
+     *
+     * @param error the throwable to report
+     * @param context the context in which the error occurred
+     * @return a fully populated {@link ErrorReport} object
      */
     private ErrorReport buildReport(Throwable error, String context) {
         ErrorReport report = new ErrorReport();
@@ -144,7 +204,10 @@ public class ErrorReporter {
     }
     
     /**
-     * Get stack trace as string.
+     * Converts a stack trace to a string.
+     *
+     * @param error the throwable
+     * @return the stack trace as a string
      */
     private String getStackTrace(Throwable error) {
         StringWriter sw = new StringWriter();
@@ -154,7 +217,9 @@ public class ErrorReporter {
     }
     
     /**
-     * Queue a report for later sending.
+     * Queues a report for later sending.
+     *
+     * @param report the error report to queue
      */
     private void queueReport(ErrorReport report) {
         try {
@@ -172,7 +237,9 @@ public class ErrorReporter {
     }
     
     /**
-     * Clean old reports if queue exceeds max size.
+     * Cleans old reports if the queue exceeds the maximum size.
+     *
+     * @throws IOException if an I/O error occurs
      */
     private void cleanQueue() throws IOException {
         List<Path> reports = Files.list(reportQueuePath)
@@ -187,7 +254,7 @@ public class ErrorReporter {
     }
     
     /**
-     * Send queued reports to the server.
+     * Sends queued reports to the server asynchronously.
      */
     private void sendQueuedReports() {
         try {
@@ -216,7 +283,7 @@ public class ErrorReporter {
     }
     
     /**
-     * Send queued reports synchronously.
+     * Sends queued reports to the server synchronously.
      */
     private void sendQueuedReportsSync() {
         try {
@@ -244,7 +311,9 @@ public class ErrorReporter {
     }
     
     /**
-     * Send a batch of reports to the server.
+     * Sends a batch of reports to the server.
+     *
+     * @param reports the list of reports to send
      */
     private void sendReportBatch(List<ErrorReport> reports) {
         try {
@@ -276,7 +345,9 @@ public class ErrorReporter {
     }
     
     /**
-     * Generate a consistent user ID (anonymized).
+     * Generates a consistent anonymized user ID.
+     *
+     * <p>The ID is stored in a file and reused across sessions.</p>
      */
     private void generateUserId() {
         try {
@@ -295,7 +366,7 @@ public class ErrorReporter {
     }
     
     /**
-     * Load persisted consent setting.
+     * Loads the persisted consent setting.
      */
     private void loadConsent() {
         try {
@@ -313,7 +384,7 @@ public class ErrorReporter {
     }
     
     /**
-     * Save consent setting.
+     * Saves the consent setting.
      */
     private void saveConsent() {
         try {
@@ -326,8 +397,14 @@ public class ErrorReporter {
         }
     }
     
+    // -------------------------------------------------------------------------
+    //  Inner Class: ErrorReport
+    // -------------------------------------------------------------------------
+
     /**
-     * Error report data structure.
+     * Internal data structure for an error report.
+     *
+     * <p>This class is serialized to JSON for storage and transmission.</p>
      */
     private static class ErrorReport {
         String timestamp;
