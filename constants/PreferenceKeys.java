@@ -97,4 +97,70 @@ public final class PreferenceKeys {
      * This is set after successful signature verification.
      */
     public static final String CODE_SIGNED = "code.signed";
+
+    // =============================================
+    // Audio Enhancement Settings (NEW)
+    // =============================================
+
+    /**
+     * Whether automatic volume optimization is applied during processing.
+     * Literal value preserved as-is from PreferenceManager's former local
+     * constant so existing users' stored preferences keep resolving.
+     */
+    public static final String AUTO_VOLUME_OPTIMIZATION = "autoVolumeOptimization";
+
+    /** Target volume level (dB) used by automatic volume optimization. */
+    public static final String TARGET_VOLUME_DB = "targetVolumeDb";
+
+    // =============================================
+    // Translation Settings (NEW)
+    // =============================================
+
+    public static final String TRANSLATION_ENABLED = "translation.enabled";
+    public static final String TRANSLATION_TARGET_LANGUAGE = "translation.target_language";
+    public static final String TRANSLATION_ENDPOINT = "translation.endpoint";
+    public static final String TRANSLATION_API_KEY = "translation.api_key";
+
+    // =============================================
+    // Batch Queue Settings (NEW)
+    // =============================================
+
+    public static final String BATCH_QUEUE_FILES = "batch_queue_files";
+    public static final String BATCH_QUEUE_LAST_SAVED = "batch_queue_last_saved";
+
+    // =============================================
+    // Error Reporting Settings (NEW)
+    // =============================================
+
+    public static final String ERROR_REPORTING_ENABLED = "error.reporting.enabled";
+    public static final String ERROR_REPORTING_LAST_SENT = "error.reporting.last_sent";
+
+    // =============================================
+    // Auto-Update Settings (NEW)
+    // =============================================
+
+    public static final String AUTO_UPDATE_ENABLED = "auto.update.enabled";
+    public static final String UPDATE_SKIPPED_VERSION = "update.skipped.version";
+
+    // =============================================
+    // Dependency Check Settings (NEW)
+    // =============================================
+
+    public static final String LAST_DEPENDENCY_CHECK = "last.dependency.check";
+    public static final String DEPENDENCIES_OK = "dependencies.ok";
+
+    // =============================================
+    // Tool-Specific Output Locations (NEW)
+    // =============================================
+
+    public static final String LAST_AUDIO_SPLITTER_OUTPUT_LOCATION = "last_audio_splitter_output_location";
+    public static final String LAST_TEXT_COMBINER_OUTPUT_LOCATION = "last_text_combiner_output_location";
+    public static final String LAST_SOUND_RECORDER_LOCATION = "last_sound_recorder_location";
+
+    // =============================================
+    // Session / Processing State (NEW)
+    // =============================================
+
+    public static final String LAST_PROCESSING_STATE = "last_processing_state";
+    public static final String PROCESSING_STATE_TIMESTAMP = "processing_state_timestamp";
 }

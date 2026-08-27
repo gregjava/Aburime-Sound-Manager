@@ -35,32 +35,6 @@ import java.util.prefs.Preferences;
 public class PreferenceManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(PreferenceManager.class);
     private final Preferences prefs;
-    
-    // ===== Audio Processing Keys =====
-    private static final String AUTO_VOLUME_OPTIMIZATION_KEY = "autoVolumeOptimization";
-    private static final String TARGET_VOLUME_DB_KEY = "targetVolumeDb";
-
-    // ===== Translation Preference Keys =====
-    private static final String TRANSLATION_ENABLED_KEY = "translation.enabled";
-    private static final String TRANSLATION_TARGET_LANGUAGE_KEY = "translation.target_language";
-    private static final String TRANSLATION_ENDPOINT_KEY = "translation.endpoint";
-    private static final String TRANSLATION_API_KEY_KEY = "translation.api_key";
-
-    // ===== Batch Processing Keys =====
-    private static final String BATCH_QUEUE_FILES_KEY = "batch_queue_files";
-    private static final String BATCH_QUEUE_LAST_SAVED_KEY = "batch_queue_last_saved";
-
-    // ===== Error Reporting Keys =====
-    private static final String ERROR_REPORTING_ENABLED_KEY = "error.reporting.enabled";
-    private static final String ERROR_REPORTING_LAST_SENT_KEY = "error.reporting.last_sent";
-
-    // ===== Auto-Update Keys =====
-    private static final String AUTO_UPDATE_ENABLED_KEY = "auto.update.enabled";
-    private static final String UPDATE_SKIPPED_VERSION_KEY = "update.skipped.version";
-
-    // ===== Dependency Check Keys =====
-    private static final String LAST_DEPENDENCY_CHECK_KEY = "last.dependency.check";
-    private static final String DEPENDENCIES_OK_KEY = "dependencies.ok";
 
     // =========================================================================
     //  Constructors
@@ -129,19 +103,19 @@ public class PreferenceManager {
     // =========================================================================
 
     public boolean isAutoVolumeOptimizationEnabled() {
-        return getBoolean(AUTO_VOLUME_OPTIMIZATION_KEY, true);
+        return getBoolean(PreferenceKeys.AUTO_VOLUME_OPTIMIZATION, true);
     }
 
     public void setAutoVolumeOptimizationEnabled(boolean enabled) {
-        putBoolean(AUTO_VOLUME_OPTIMIZATION_KEY, enabled);
+        putBoolean(PreferenceKeys.AUTO_VOLUME_OPTIMIZATION, enabled);
     }
 
     public double getTargetVolumeDb() {
-        return getDouble(TARGET_VOLUME_DB_KEY, -1.0);
+        return getDouble(PreferenceKeys.TARGET_VOLUME_DB, -1.0);
     }
 
     public void setTargetVolumeDb(double targetDb) {
-        putDouble(TARGET_VOLUME_DB_KEY, targetDb);
+        putDouble(PreferenceKeys.TARGET_VOLUME_DB, targetDb);
     }
 
     // =========================================================================
@@ -154,7 +128,7 @@ public class PreferenceManager {
      * @return {@code true} if translation is enabled
      */
     public boolean isTranslationEnabled() {
-        return getBoolean(TRANSLATION_ENABLED_KEY, false);
+        return getBoolean(PreferenceKeys.TRANSLATION_ENABLED, false);
     }
 
     /**
@@ -163,7 +137,7 @@ public class PreferenceManager {
      * @param enabled {@code true} to enable translation
      */
     public void setTranslationEnabled(boolean enabled) {
-        putBoolean(TRANSLATION_ENABLED_KEY, enabled);
+        putBoolean(PreferenceKeys.TRANSLATION_ENABLED, enabled);
     }
 
     /**
@@ -172,7 +146,7 @@ public class PreferenceManager {
      * @return the target language code (e.g., "es", "fr"), or "es" if not set
      */
     public String getTranslationTargetLanguage() {
-        return getString(TRANSLATION_TARGET_LANGUAGE_KEY, "es");
+        return getString(PreferenceKeys.TRANSLATION_TARGET_LANGUAGE, "es");
     }
 
     /**
@@ -181,7 +155,7 @@ public class PreferenceManager {
      * @param language the target language code (e.g., "es", "fr")
      */
     public void setTranslationTargetLanguage(String language) {
-        putString(TRANSLATION_TARGET_LANGUAGE_KEY, language != null ? language : "es");
+        putString(PreferenceKeys.TRANSLATION_TARGET_LANGUAGE, language != null ? language : "es");
     }
 
     /**
@@ -190,7 +164,7 @@ public class PreferenceManager {
      * @return the endpoint URL, or the default LibreTranslate URL if not set
      */
     public String getTranslationEndpoint() {
-        return getString(TRANSLATION_ENDPOINT_KEY, "https://libretranslate.com/translate");
+        return getString(PreferenceKeys.TRANSLATION_ENDPOINT, "https://libretranslate.com/translate");
     }
 
     /**
@@ -199,7 +173,7 @@ public class PreferenceManager {
      * @param endpoint the endpoint URL
      */
     public void setTranslationEndpoint(String endpoint) {
-        putString(TRANSLATION_ENDPOINT_KEY, endpoint != null ? endpoint : "https://libretranslate.com/translate");
+        putString(PreferenceKeys.TRANSLATION_ENDPOINT, endpoint != null ? endpoint : "https://libretranslate.com/translate");
     }
 
     /**
@@ -208,7 +182,7 @@ public class PreferenceManager {
      * @return the API key, or {@code null} if not set
      */
     public String getTranslationApiKey() {
-        return getString(TRANSLATION_API_KEY_KEY, null);
+        return getString(PreferenceKeys.TRANSLATION_API_KEY, null);
     }
 
     /**
@@ -218,9 +192,9 @@ public class PreferenceManager {
      */
     public void setTranslationApiKey(String apiKey) {
         if (apiKey != null && !apiKey.isBlank()) {
-            putString(TRANSLATION_API_KEY_KEY, apiKey);
+            putString(PreferenceKeys.TRANSLATION_API_KEY, apiKey);
         } else {
-            remove(TRANSLATION_API_KEY_KEY);
+            remove(PreferenceKeys.TRANSLATION_API_KEY);
         }
     }
 
@@ -234,7 +208,7 @@ public class PreferenceManager {
      * @return {@code true} if error reporting is enabled
      */
     public boolean isErrorReportingEnabled() {
-        return getBoolean(ERROR_REPORTING_ENABLED_KEY, false);
+        return getBoolean(PreferenceKeys.ERROR_REPORTING_ENABLED, false);
     }
 
     /**
@@ -243,7 +217,7 @@ public class PreferenceManager {
      * @param enabled {@code true} to enable error reporting
      */
     public void setErrorReportingEnabled(boolean enabled) {
-        putBoolean(ERROR_REPORTING_ENABLED_KEY, enabled);
+        putBoolean(PreferenceKeys.ERROR_REPORTING_ENABLED, enabled);
     }
 
     /**
@@ -252,7 +226,7 @@ public class PreferenceManager {
      * @return the timestamp in milliseconds, or 0 if never sent
      */
     public long getLastErrorReportSent() {
-        return getLong(ERROR_REPORTING_LAST_SENT_KEY, 0);
+        return getLong(PreferenceKeys.ERROR_REPORTING_LAST_SENT, 0);
     }
 
     /**
@@ -261,7 +235,7 @@ public class PreferenceManager {
      * @param timestamp the timestamp in milliseconds
      */
     public void setLastErrorReportSent(long timestamp) {
-        putLong(ERROR_REPORTING_LAST_SENT_KEY, timestamp);
+        putLong(PreferenceKeys.ERROR_REPORTING_LAST_SENT, timestamp);
     }
 
     // =========================================================================
@@ -274,7 +248,7 @@ public class PreferenceManager {
      * @return {@code true} if auto-update is enabled
      */
     public boolean isAutoUpdateEnabled() {
-        return getBoolean(AUTO_UPDATE_ENABLED_KEY, true);
+        return getBoolean(PreferenceKeys.AUTO_UPDATE_ENABLED, true);
     }
 
     /**
@@ -283,7 +257,7 @@ public class PreferenceManager {
      * @param enabled {@code true} to enable auto-update
      */
     public void setAutoUpdateEnabled(boolean enabled) {
-        putBoolean(AUTO_UPDATE_ENABLED_KEY, enabled);
+        putBoolean(PreferenceKeys.AUTO_UPDATE_ENABLED, enabled);
     }
 
     /**
@@ -292,7 +266,7 @@ public class PreferenceManager {
      * @return the skipped version, or {@code null} if none
      */
     public String getSkippedUpdateVersion() {
-        return getString(UPDATE_SKIPPED_VERSION_KEY, null);
+        return getString(PreferenceKeys.UPDATE_SKIPPED_VERSION, null);
     }
 
     /**
@@ -302,9 +276,9 @@ public class PreferenceManager {
      */
     public void setSkippedUpdateVersion(String version) {
         if (version != null && !version.isBlank()) {
-            putString(UPDATE_SKIPPED_VERSION_KEY, version);
+            putString(PreferenceKeys.UPDATE_SKIPPED_VERSION, version);
         } else {
-            remove(UPDATE_SKIPPED_VERSION_KEY);
+            remove(PreferenceKeys.UPDATE_SKIPPED_VERSION);
         }
     }
 
@@ -380,13 +354,13 @@ public class PreferenceManager {
      */
     public void saveBatchQueueFiles(List<String> filePaths) {
         if (filePaths == null || filePaths.isEmpty()) {
-            remove(BATCH_QUEUE_FILES_KEY);
-            remove(BATCH_QUEUE_LAST_SAVED_KEY);
+            remove(PreferenceKeys.BATCH_QUEUE_FILES);
+            remove(PreferenceKeys.BATCH_QUEUE_LAST_SAVED);
             return;
         }
         String joined = String.join(";", filePaths);
-        putString(BATCH_QUEUE_FILES_KEY, joined);
-        putLong(BATCH_QUEUE_LAST_SAVED_KEY, System.currentTimeMillis());
+        putString(PreferenceKeys.BATCH_QUEUE_FILES, joined);
+        putLong(PreferenceKeys.BATCH_QUEUE_LAST_SAVED, System.currentTimeMillis());
     }
 
     /**
@@ -395,7 +369,7 @@ public class PreferenceManager {
      * @return the list of file paths, or an empty list if none
      */
     public List<String> loadBatchQueueFiles() {
-        String saved = getString(BATCH_QUEUE_FILES_KEY, "");
+        String saved = getString(PreferenceKeys.BATCH_QUEUE_FILES, "");
         if (saved == null || saved.isBlank()) {
             return new java.util.ArrayList<>();
         }
@@ -408,7 +382,7 @@ public class PreferenceManager {
      * @return {@code true} if a recent batch queue exists
      */
     public boolean hasRecentBatchQueue() {
-        long lastSaved = getLong(BATCH_QUEUE_LAST_SAVED_KEY, 0);
+        long lastSaved = getLong(PreferenceKeys.BATCH_QUEUE_LAST_SAVED, 0);
         return lastSaved > 0 && (System.currentTimeMillis() - lastSaved) < 7 * 24 * 60 * 60 * 1000L; // 7 days
     }
 
@@ -422,7 +396,7 @@ public class PreferenceManager {
      * @return the timestamp in milliseconds, or 0 if never checked
      */
     public long getLastDependencyCheck() {
-        return getLong(LAST_DEPENDENCY_CHECK_KEY, 0);
+        return getLong(PreferenceKeys.LAST_DEPENDENCY_CHECK, 0);
     }
 
     /**
@@ -431,7 +405,7 @@ public class PreferenceManager {
      * @param timestamp the timestamp in milliseconds
      */
     public void setLastDependencyCheck(long timestamp) {
-        putLong(LAST_DEPENDENCY_CHECK_KEY, timestamp);
+        putLong(PreferenceKeys.LAST_DEPENDENCY_CHECK, timestamp);
     }
 
     /**
@@ -440,7 +414,7 @@ public class PreferenceManager {
      * @return {@code true} if dependencies were OK
      */
     public boolean areDependenciesOk() {
-        return getBoolean(DEPENDENCIES_OK_KEY, false);
+        return getBoolean(PreferenceKeys.DEPENDENCIES_OK, false);
     }
 
     /**
@@ -449,7 +423,7 @@ public class PreferenceManager {
      * @param ok {@code true} if dependencies were OK
      */
     public void setDependenciesOk(boolean ok) {
-        putBoolean(DEPENDENCIES_OK_KEY, ok);
+        putBoolean(PreferenceKeys.DEPENDENCIES_OK, ok);
     }
 
     // =========================================================================
@@ -553,33 +527,33 @@ public class PreferenceManager {
      * Get last Audio Splitter OUTPUT directory
      */
     public String getLastAudioSplitterOutputLocation() {
-        return getString("last_audio_splitter_output_location", getOutputDirectory());
+        return getString(PreferenceKeys.LAST_AUDIO_SPLITTER_OUTPUT_LOCATION, getOutputDirectory());
     }
 
     public void setLastAudioSplitterOutputLocation(String path) {
-        putString("last_audio_splitter_output_location", path);
+        putString(PreferenceKeys.LAST_AUDIO_SPLITTER_OUTPUT_LOCATION, path);
     }
 
     /**
      * Get last Text File Combiner OUTPUT location
      */
     public String getLastTextCombinerOutputLocation() {
-        return getString("last_text_combiner_output_location", getOutputDirectory());
+        return getString(PreferenceKeys.LAST_TEXT_COMBINER_OUTPUT_LOCATION, getOutputDirectory());
     }
 
     public void setLastTextCombinerOutputLocation(String path) {
-        putString("last_text_combiner_output_location", path);
+        putString(PreferenceKeys.LAST_TEXT_COMBINER_OUTPUT_LOCATION, path);
     }
 
     /**
      * Get last Sound Recorder Panel save location
      */
     public String getLastSoundRecorderLocation() {
-        return getString("last_sound_recorder_location", getOutputDirectory());
+        return getString(PreferenceKeys.LAST_SOUND_RECORDER_LOCATION, getOutputDirectory());
     }
 
     public void setLastSoundRecorderLocation(String path) {
-        putString("last_sound_recorder_location", path);
+        putString(PreferenceKeys.LAST_SOUND_RECORDER_LOCATION, path);
     }
     
     // Audio Processing Settings
@@ -617,7 +591,7 @@ public class PreferenceManager {
     }
 
     public String getWhisperModel() {
-        return getString(PreferenceKeys.WHISPER_MODEL, "base");
+        return getString(PreferenceKeys.WHISPER_MODEL, AppConstants.DEFAULT_MODEL);
     }
 
     public void setWhisperModel(String model) {
@@ -625,7 +599,7 @@ public class PreferenceManager {
     }
 
     public String getLanguage() {
-        return getString(PreferenceKeys.LANGUAGE, "auto");
+        return getString(PreferenceKeys.LANGUAGE, AppConstants.DEFAULT_LANGUAGE);
     }
 
     public void setLanguage(String language) {
@@ -673,12 +647,12 @@ public class PreferenceManager {
     public void clearSessionData() {
         try {
             // Remove batch queue state
-            remove(BATCH_QUEUE_FILES_KEY);
-            remove(BATCH_QUEUE_LAST_SAVED_KEY);
+            remove(PreferenceKeys.BATCH_QUEUE_FILES);
+            remove(PreferenceKeys.BATCH_QUEUE_LAST_SAVED);
 
             // Remove any temporary processing state
-            remove("last_processing_state");
-            remove("processing_start_time");
+            remove(PreferenceKeys.LAST_PROCESSING_STATE);
+            remove(PreferenceKeys.PROCESSING_STATE_TIMESTAMP);
 
             flush();
             LOGGER.info("Session data cleared");
@@ -691,8 +665,8 @@ public class PreferenceManager {
      * Save current processing state
      */
     public void saveProcessingState(String state) {
-        putString("last_processing_state", state);
-        putLong("processing_state_timestamp", System.currentTimeMillis());
+        putString(PreferenceKeys.LAST_PROCESSING_STATE, state);
+        putLong(PreferenceKeys.PROCESSING_STATE_TIMESTAMP, System.currentTimeMillis());
         flush();
     }
 
@@ -700,14 +674,14 @@ public class PreferenceManager {
      * Get saved processing state
      */
     public String getProcessingState() {
-        return getString("last_processing_state", "");
+        return getString(PreferenceKeys.LAST_PROCESSING_STATE, "");
     }
 
     /**
      * Check if there's a recent session to restore
      */
     public boolean hasRecentSession() {
-        long lastSave = getLong("processing_state_timestamp", 0);
+        long lastSave = getLong(PreferenceKeys.PROCESSING_STATE_TIMESTAMP, 0);
         return (System.currentTimeMillis() - lastSave) < 300000; // 5 minutes
     }
 
