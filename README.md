@@ -245,6 +245,16 @@ SRT, TXT, DOCX, HTML, JSON
 
 ---
 
+## 📊 Benchmarks & Research
+
+This project is backed by a reproducible ablation study (207 runs) published on Zenodo:
+
+- **Dataset & Paper:** [AburimeSoundManager WhisperX Ablation Study](https://zenodo.org/records/23175556)
+- **Analysis Code:** [aburime-som-whisperx-ablation](https://github.com/gregjava/aburime-som-whisperx-ablation)
+- Covers: concurrency modes, ablation configurations, batch sizes, clip durations, and persistent runtime estimation accuracy.
+
+---
+
 ## 🤝 Contributing
 
 We welcome contributions! Here's how you can help:
