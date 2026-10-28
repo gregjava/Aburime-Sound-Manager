@@ -21,9 +21,9 @@
 
 ## 📸 Screenshots
 
-| Processing Queue & Controls | Active Transcription |
-| :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/d76d87e1-67b1-4183-94e4-eb88a901a1d6" width="100%"> |
+| Processing Queue & Controls | Active Transcription | Batch Report Complete |
+| :---: | :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/e160a35d-444b-442c-819d-96bd94b6170a" width="100%"> | <img src="https://github.com/user-attachments/assets/7a7b37f5-a6bc-46a7-85a0-7822fa10730e" width="100%"> |
 
 ---
 
