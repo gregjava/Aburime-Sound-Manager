@@ -23,7 +23,7 @@
 
 | Processing Queue & Controls | Active Transcription |
 | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/e160a35d-444b-442c-819d-96bd94b6170a" width="100%"> |
+| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/e1dfa8ff-a50b-4904-b7bc-ff7975a02b3b" width="100%"> |
 
 ---
 
