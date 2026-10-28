@@ -23,7 +23,7 @@
 
 | Processing Queue & Controls | Active Transcription | Batch Report Complete |
 | :---: | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/e160a35d-444b-442c-819d-96bd94b6170a" width="100%"> | <img src="https://github.com/user-attachments/assets/7a7b37f5-a6bc-46a7-85a0-7822fa10730e" width="100%"> |
+| <img src="https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7" width="100%"> | <img src="https://github.com/user-attachments/assets/ab021f80-8a18-4982-ade5-0e7cf6afe523" width="100%"> | <img src="https://github.com/user-attachments/assets/7a7b37f5-a6bc-46a7-85a0-7822fa10730e" width="100%"> |
 
 ---
 
