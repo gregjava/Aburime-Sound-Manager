@@ -19,6 +19,14 @@
 
 ---
 
+## 📸 Screenshots
+
+| Processing Queue & Controls | Active Transcription |
+| :---: | :---: |
+| <img src="[IMAGE_LINK_1](https://github.com/user-attachments/assets/55b43840-1f66-4eef-946f-8a4fa4c049f7)" width="100%"> | <img src="[IMAGE_LINK_2](https://github.com/user-attachments/assets/e160a35d-444b-442c-819d-96bd94b6170a)" width="100%"> |
+
+---
+
 ## ✨ Features
 
 | Feature | Description |
