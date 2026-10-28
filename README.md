@@ -150,6 +150,11 @@ pip install whisperx
 > C:\Python312\python.exe -m venv whisperx_env
 > ```
 
+> **⚠️ Windows Users Note:** If you encounter an `'activate' is not recognized` error, or if typing `python` opens a `>>>` shell instead of showing the version, your Windows "App Execution Aliases" are interfering. To fix this:
+> 1. Open Windows Settings and search for **"Manage app execution aliases"**.
+> 2. Scroll down to **"App Installer"** (python.exe and python3.exe) and toggle them **OFF**.
+> 3. If creating the environment still fails with "Access Denied", open your Command Prompt as **Administrator** and run `python -m venv whisperx_env`.
+
 ### Step 4: Install TorchCodec (Recommended for Windows)
 
 TorchCodec improves audio loading performance on Windows:
