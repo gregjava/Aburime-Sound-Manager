@@ -64,18 +64,7 @@
 | **GPU** | NVIDIA GPU with 4+ GB VRAM (optional, for GPU acceleration) |
 | **Dependencies** | FFmpeg and FFprobe (required) — see [Troubleshooting Guide](TROUBLESHOOTING.md) |
 
-> ## ⚠️ Python Version Note
->
-> **WhisperX does NOT work with Python 3.13 or newer.**
->
-> If you have Python 3.13 or higher installed, you MUST install Python 3.10, 3.11, or 3.12 in a separate location.
->
-> **Check your Python version:**
-> ```bash
-> python --version
-> ```
->
-> If you see `Python 3.13.x` or higher, download Python 3.12 from [python.org](https://www.python.org/downloads/) before proceeding.
+> **⚠️ Python 3.13+ is not supported by WhisperX.** See [Installation → Step 1](#step-1-install-python-required-for-transcription) for details.
 
 ---
 
@@ -92,16 +81,6 @@
 6.  **Add files** to the queue using the file browser or drag-and-drop.
 7.  **Configure** transcription settings (`Tools → Transcription Settings`).
 8.  **Press Start** and watch your files get transcribed!
-
----
-
-## 📸 Screenshots
-
-*Screenshots coming soon!*
-
-| Main Window | Batch Queue | Performance Report |
-| :---: | :---: | :---: |
-| *[Placeholder]* | *[Placeholder]* | *[Placeholder]* |
 
 ---
 
@@ -396,11 +375,22 @@ This project is licensed under the **Apache License 2.0** — see the [LICENSE](
 
 ---
 
+## 💼 Hire Me
+
+I build production audio/ASR tooling in Java and Python — JavaFX desktop apps, WhisperX pipelines, and REST APIs.
+
+**Available for freelance and full-time remote work.**
+📧 [tefdrive01@gmail.com](mailto:tefdrive01@gmail.com)
+
+---
+
 <div align="center">
 
 **Made with ❤️ by Greg Java**
 
 <a href="https://www.producthunt.com/products/index-of-aburime?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-index-of-aburime" target="_blank" rel="noopener noreferrer"><img alt="Index of /Aburime - Professional audio transcription, 100% offline — no cloud | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1228818&amp;theme=dark&amp;t=1787374992468"></a><br>
 [🌐 Website](https://poseidon.org.uk/Aburime-Sound-Manager-v4.0/) · [🐙 GitHub](https://github.com/gregjava/Aburime-Sound-Manager) · [🐛 Issues](https://github.com/gregjava/Aburime-Sound-Manager/issues)
+
+<!-- Keywords: javafx, whisperx, speech-to-text, speaker-diarization, audio-processing, java, transcription, rest-api, offline, batch-processing -->
 
 </div>
